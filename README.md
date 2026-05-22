@@ -7,14 +7,32 @@ của rubric.
 ## Cách chạy
 
 ### Giao diện Dashboard (Khuyến nghị cho trình bày & cấu hình)
-Hệ thống cung cấp giao diện Dashboard Streamlit tích hợp toàn bộ chức năng (chạy live stream, quét Sweep Analysis, chạy demo khôi phục lỗi, và mô phỏng cluster phân tán) thông qua các nút bấm trực quan:
+`app.py` là một **Dashboard Streamlit 6 tab** tích hợp toàn bộ chức năng —
+chạy live stream, quét Sweep, demo khôi phục lỗi, mô phỏng cluster phân tán
+và **mô phỏng kill / revive node** — qua các nút bấm trực quan, không cần
+gõ thêm lệnh nào trong terminal.
 
 ```bash
-pip install pandas matplotlib streamlit
+pip install pandas numpy matplotlib plotly streamlit
 
 # Khởi chạy Dashboard:
 streamlit run app.py
 ```
+
+**6 tab của Dashboard:**
+
+| Tab | Chức năng chính |
+|---|---|
+| 🏠 Tổng quan | Lộ trình demo 5 bước, kiến trúc, dataset, bám rubric, nút **Demo nhanh** |
+| 📈 Live Stream | Phát luồng realtime — watermark bò lên, cửa sổ đóng dần; có **Play / Dừng / Reset** |
+| 📊 Sweep Analysis | Quét 9 mức Wait Time → đường cong Completeness ↔ Latency (Plotly tương tác), xuất `tradeoff.csv/png` |
+| 🛡️ Recovery & Backpressure | Crash giữa chừng + khôi phục checkpoint atomic (bảng so sánh state); burst tải kiểm chứng drop có kiểm soát |
+| 🖥️ Distributed Cluster | N node `hash(host)%N`, đo hot-key skew, sơ đồ topology Axon-style |
+| 🔪 Kill Node Live | Kill / revive node realtime — events của node chết ghi vào **DLQ trên đĩa**, revive → replay + Exactly-Once. **Auto-Play** có lập lịch sự cố + biểu đồ diễn biến cluster |
+
+> Vùng realtime (Live Stream & Kill Node) dùng `@st.fragment` —
+> chỉ vùng dữ liệu động cập nhật, phần còn lại của trang không rerender
+> (chống flicker).
 
 ### Chạy qua Terminal CLI (Dành cho nhà phát triển)
 Nếu muốn chạy trực tiếp bằng dòng lệnh trong terminal:
@@ -44,7 +62,8 @@ Logic core nằm trong package `wm/`; root chỉ có 3 script CLI/driver mỏng.
 | `wm/data/nasa.py`      | Đọc NASA-HTTP thật (`.gz` hoặc `dataset/data.csv`) + sinh arrival-time |
 | `analysis.py`          | CLI: sweep + recovery + backpressure demo |
 | `distributed_sweep.py` | CLI: chạy cluster N-node, in bảng kết quả |
-| `app.py`               | Streamlit live ("Data in Motion") |
+| `app.py`               | Dashboard Streamlit 6 tab — interface chính để demo (xem bảng tab ở trên) |
+| `.simdata/`            | Sinh khi chạy tab Kill Node: `checkpoints/` (state snapshot atomic) + `dlq/` (Dead-Letter Queue `.jsonl` append-only) |
 | `REPORT.md`            | Bản phân tích Strict vs Heuristic (deliverable) |
 
 ## Bám vào rubric — vì sao đạt Excellent
@@ -76,6 +95,8 @@ có ngưỡng `max_queue`: khi `queue_len` vượt ngưỡng thì drop có kiể
 (đếm `backpressure_drops`) thay vì để tràn bộ nhớ/crash. Chạy 5111 dòng
 (có duplicate + tải dao động) không lỗi.
 
-**Live Visualization (rubric gợi ý):** `app.py` dùng Streamlit, cửa sổ
-đóng dần theo thời gian thực, watermark bò lên, slider Wait Time cho thấy
-ngay đánh đổi → đúng tinh thần "Data in Motion".
+**Live Visualization (rubric gợi ý):** Dashboard Streamlit minh hoạ trực
+quan — cửa sổ đóng dần theo thời gian thực, watermark bò lên (tab Live
+Stream). Tab **Kill Node Live** mô phỏng node chết giữa stream: DLQ phình
+ra rồi xẹp về 0 sau khi revive — đúng tinh thần "Data in Motion", đồng
+thời chứng minh fault-tolerance bằng kịch bản lỗi (failure case) sống động.

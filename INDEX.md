@@ -8,6 +8,7 @@ code → chạy `app.py` để demo.
 
 | File | Vai trò | Dùng để nộp mục nào |
 |---|---|---|
+| `PROPOSAL.md`          | Đề cương dự án theo template (6 mục) | Project Proposal (Tuần 3) |
 | `DESIGN.md`            | Tài liệu thiết kế hệ thống (kiến trúc, lý thuyết Ö&V) | Design document 2 trang |
 | `REPORT.md`            | Báo cáo phân tích Strict vs Heuristic + số liệu | The Analysis |
 | `tradeoff.png`         | Biểu đồ Data Completeness % vs Wait Time | Deliverable chính |
@@ -20,7 +21,7 @@ code → chạy `app.py` để demo.
 | `wm/data/nasa.py`      | Đọc NASA-HTTP (.gz + CSV) + sinh arrival-time | The Code (dữ liệu thật) |
 | `analysis.py`          | CLI mỏng: sweep + recovery + backpressure demo | The Code |
 | `distributed_sweep.py` | CLI mỏng: cluster N-node | The Code |
-| `app.py`               | Live visualization (Streamlit, "Data in Motion") | The Proof / demo |
+| `app.py`               | Dashboard Streamlit 6 tab (live stream · sweep · recovery · cluster · kill-node) | The Proof / demo |
 | `README.md`            | Hướng dẫn cài & chạy | README repo |
 
 ## Map vào 4 tiêu chí rubric
@@ -43,15 +44,21 @@ code → chạy `app.py` để demo.
 
 ## Live Visualization (theo gợi ý giảng viên)
 
-`app.py` dùng **Streamlit** (đúng lựa chọn khuyến nghị). Chạy
-`streamlit run app.py` → kéo slider Wait Time, thấy cửa sổ đóng dần theo
-thời gian thực = minh họa "Data in Motion". Quay phần này vào video 3–5
-phút (The Proof).
+`app.py` là **Dashboard Streamlit 6 tab** (đúng lựa chọn khuyến nghị).
+Chạy `streamlit run app.py`:
+
+- Tab **Live Stream** — cửa sổ đóng dần theo thời gian thực, watermark
+  bò lên: minh hoạ "Data in Motion".
+- Tab **Kill Node Live** — kill/revive node giữa stream, DLQ trên đĩa,
+  Auto-Play có lập lịch sự cố + biểu đồ diễn biến cluster: kịch bản
+  failure case sống động cho video.
+
+Quay 2 tab này vào video 3–5 phút (The Proof).
 
 ## Cách chạy nhanh
 
 ```bash
-pip install pandas matplotlib streamlit
+pip install pandas numpy matplotlib plotly streamlit
 
 # Synthetic (mặc định, nhanh vài giây):
 python analysis.py
@@ -72,5 +79,6 @@ python distributed_sweep.py --nodes 4 -n 100000
 
 ## Còn lại tự làm (không thuộc file thiết kế)
 
-Proposal theo template; quay video demo failure case; điền số chương
-chính xác vào các chỗ `[Ö&V, Ch.X]` trong `DESIGN.md` và `REPORT.md`.
+Điền tên thành viên + hạn nộp + mã Category vào `PROPOSAL.md`; quay video
+demo failure case; điền số chương chính xác vào các chỗ `[Ö&V, Ch.X]`
+trong `DESIGN.md` và `REPORT.md`.
