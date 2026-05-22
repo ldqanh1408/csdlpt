@@ -5,12 +5,17 @@ Chạy: streamlit run app.py
 Một lệnh duy nhất hiển thị TOÀN BỘ giao diện trình bày dự án + cấu hình +
 mô phỏng dựa trên dataset, KHÔNG cần gõ thêm lệnh nào trong terminal.
 
-Các tab:
-  0. Tổng quan dự án (Project Overview) — giới thiệu, dataset, kiến trúc, rubric
-  1. Live Stream Visualization ("Data in Motion")
-  2. Sweep Analysis (Wait Time vs Completeness & Latency)
-  3. Fault Tolerance & Robustness Demos (Crash Recovery & Backpressure)
-  4. Distributed Cluster Simulation (N nodes)
+6 tab:
+  0. Tổng quan dự án — lộ trình demo, kiến trúc, dataset, rubric, Demo nhanh
+  1. Live Stream Visualization ("Data in Motion") — Play / Dừng / Reset
+  2. Sweep Analysis (Wait Time vs Completeness & Latency) — Plotly curve
+  3. Fault Tolerance & Robustness (Crash Recovery & Backpressure)
+  4. Distributed Cluster Simulation (N nodes, hot-key skew)
+  5. Kill Node Live — kill/revive node realtime, DLQ trên đĩa, Auto-Play
+
+Kỹ thuật UI: vùng realtime (Tab 1 & Tab 5) dùng @st.fragment +
+st.rerun(scope="fragment") → chỉ vùng live cập nhật, phần còn lại của
+trang KHÔNG bị rerender (chống flicker).
 """
 import json
 import os
@@ -515,7 +520,7 @@ def render_sim_evolution_chart(container, state, total_events):
         shapes=shapes, annotations=annotations,
         hovermode="x unified",
     )
-    container.plotly_chart(fig, use_container_width=True,
+    container.plotly_chart(fig, width="stretch",
                            key=f"sim_evo_{len(xs)}")
 
 
@@ -786,7 +791,7 @@ with tab_overview:
                 d3.metric("Nguồn", "NASA-HTTP")
 
                 st.caption("Xem 8 dòng đầu của `dataset/data.csv`:")
-                st.dataframe(preview, use_container_width=True, height=240)
+                st.dataframe(preview, width="stretch", height=240)
             except Exception as e:
                 st.error(f"Không đọc được dataset: {e}")
         else:
@@ -825,7 +830,7 @@ with tab_overview:
         "Mini-sweep trên 10K event Synthetic ở 4 mức Wait Time (~5 giây). "
         "Kết quả hiển thị ngay tại đây."
     )
-    quick_btn = st.button("Chạy Demo Nhanh", type="primary", use_container_width=False)
+    quick_btn = st.button("Chạy Demo Nhanh", type="primary", width="content")
 
     if quick_btn:
         with st.spinner("Đang chạy mini-sweep…"):
@@ -852,7 +857,7 @@ with tab_overview:
                 "avg_result_latency_ms": "Result Latency (ms)",
                 "proc_latency_p99_us": "Proc p99 (µs)",
             }),
-            use_container_width=True,
+            width="stretch",
         )
 
         fig_q, axq = plt.subplots(figsize=(8, 3.2))
@@ -918,17 +923,17 @@ with tab_stream:
     play_stream_btn = sb1.button(
         "Chạy Live Stream", type="primary",
         disabled=st.session_state.stream_active,
-        use_container_width=True,
+        width="stretch",
     )
     stop_stream_btn = sb2.button(
         "Dừng",
         disabled=not st.session_state.stream_active,
-        use_container_width=True,
+        width="stretch",
     )
     reset_stream_btn = sb3.button(
         "Reset",
         disabled=st.session_state.stream_active,
-        use_container_width=True,
+        width="stretch",
     )
 
     # ── Status line (native badge) ──
@@ -986,111 +991,102 @@ with tab_stream:
         st.session_state.stream_active = True
         st.rerun()
 
-    # ── Live placeholders ──
-    m1, m2, m3, m4 = st.columns(4)
-    k_comp = m1.empty()
-    k_wm = m2.empty()
-    k_late = m3.empty()
-    k_dup = m4.empty()
-
-    c_chart, c_q = st.columns([3, 1])
-    chart_box = c_chart.empty()
-    q_box = c_q.empty()
-    prog_box = st.empty()
-
+    # ── Renderer trực tiếp (không placeholder) — fragment tự re-render ──
     def _render_stream_ui(eng, src, end_idx, total_rows, qlen):
         uniq = max(eng.metrics["unique"], 1)
         comp = 100.0 * eng.metrics["on_time"] / uniq
-        k_comp.metric("Completeness", f"{comp:.2f}%")
-        # Watermark có thể là -inf (chưa có event) hoặc +inf (sau flush) —
-        # phải lọc cả 2 trước khi format / time.localtime để tránh OverflowError.
+        mc1, mc2, mc3, mc4 = st.columns(4)
+        mc1.metric("Completeness", f"{comp:.2f}%")
+        # Watermark: -inf (chưa có event) / +inf (sau flush) → lọc trước
         wm = eng.watermark
         if wm == float("-inf"):
-            k_wm.metric("Watermark", "—")
+            mc2.metric("Watermark", "—")
         elif wm == float("inf"):
-            k_wm.metric("Watermark", "∞ (đã flush)")
+            mc2.metric("Watermark", "∞ (đã flush)")
         else:
             try:
                 if src == "Synthetic":
                     wm_val = f"{wm - 1_700_000_000:.1f} s"
                 else:
                     wm_val = time.strftime("%H:%M:%S", time.localtime(wm))
-                k_wm.metric("Watermark", wm_val)
+                mc2.metric("Watermark", wm_val)
             except (OverflowError, ValueError, OSError):
-                k_wm.metric("Watermark", f"{wm:.0f}")
-        k_late.metric("Late dropped", f"{eng.metrics['late_dropped']}")
-        k_dup.metric("Duplicates", f"{eng.metrics['duplicates']}")
+                mc2.metric("Watermark", f"{wm:.0f}")
+        mc3.metric("Late dropped", f"{eng.metrics['late_dropped']}")
+        mc4.metric("Duplicates", f"{eng.metrics['duplicates']}")
 
-        if eng.closed_windows:
-            cw_keys = sorted(eng.closed_windows.keys())
-            if src == "Synthetic":
-                cw = pd.Series({k - 1_700_000_000: eng.closed_windows[k]["count"]
-                                for k in cw_keys})
-                chart_box.bar_chart(cw, x_label="Window Start (s tương đối)",
-                                    y_label="Events (CLOSED)")
+        cc1, cc2 = st.columns([3, 1])
+        with cc1:
+            if eng.closed_windows:
+                cw_keys = sorted(eng.closed_windows.keys())
+                if src == "Synthetic":
+                    cw = pd.Series({k - 1_700_000_000: eng.closed_windows[k]["count"]
+                                    for k in cw_keys})
+                    st.bar_chart(cw, horizontal=True,
+                                 x_label="Events (CLOSED)",
+                                 y_label="Window Start (s tương đối)")
+                else:
+                    cw = pd.Series({time.strftime("%H:%M:%S", time.localtime(k)):
+                                    eng.closed_windows[k]["count"] for k in cw_keys})
+                    st.bar_chart(cw, horizontal=True,
+                                 x_label="Events (CLOSED)",
+                                 y_label="Window time")
             else:
-                cw = pd.Series({time.strftime("%H:%M:%S", time.localtime(k)):
-                                eng.closed_windows[k]["count"] for k in cw_keys})
-                chart_box.bar_chart(cw, x_label="Window time",
-                                    y_label="Events (CLOSED)")
+                st.caption("Chưa có cửa sổ nào đóng — watermark chưa vượt "
+                           "qua window đầu tiên.")
+        cc2.metric("Queue", f"{qlen} / {eng.max_queue}")
+        st.progress(end_idx / max(total_rows, 1),
+                    text=f"⏱️ Stream: {end_idx:,}/{total_rows:,}")
 
-        q_box.metric("Queue", f"{qlen} / {eng.max_queue}")
-        prog_box.progress(
-            end_idx / max(total_rows, 1),
-            text=f"⏱️ Stream: {end_idx:,}/{total_rows:,}"
-        )
-
-    # ── Chunked stream executor ──
-    if st.session_state.stream_active and "stream_eng" in st.session_state:
-        eng = st.session_state.stream_eng
-        rows_st = st.session_state.stream_rows
-        cur = st.session_state.stream_cursor
-        spd = st.session_state.get("stream_speed_val", 200)
-        src = st.session_state.get("stream_source_val", "Synthetic")
-        n_total = len(rows_st)
-
-        chunk = max(int(spd), 50)
-        end_idx = min(cur + chunk, n_total)
-
-        last_q = 0
-        for i in range(cur, end_idx):
-            r = rows_st[i]
-            qlen = (i * 7) % 2500
-            eng.process({"event_id": r.event_id, "event_time": r.event_time,
-                         "status": r.status}, queue_len=qlen)
-            last_q = qlen
-
-        st.session_state.stream_cursor = end_idx
-        _render_stream_ui(eng, src, end_idx, n_total, last_q)
-
-        if end_idx < n_total:
-            time.sleep(0.03)
-            st.rerun()
-        else:
-            eng.flush()
-            s = eng.summary()
-            st.session_state.stream_done_summary = s
-            st.session_state.stream_done = True
-            st.session_state.stream_active = False
-            st.rerun()
-
-    elif "stream_eng" in st.session_state:
-        # Show current state (paused or finished)
+    # ── LIVE STREAM FRAGMENT ────────────────────────────────────────
+    # @st.fragment + st.rerun(scope="fragment"): mỗi chunk CHỈ rerun vùng
+    # này → header / sidebar / tabs KHÔNG bị rerender (hết flicker).
+    @st.fragment
+    def _stream_live_fragment():
+        if "stream_eng" not in st.session_state:
+            return
         eng = st.session_state.stream_eng
         rows_st = st.session_state.get("stream_rows", [])
-        cur = st.session_state.get("stream_cursor", 0)
         src = st.session_state.get("stream_source_val", "Synthetic")
-        last_q = ((cur - 1) * 7) % 2500 if cur > 0 else 0
-        _render_stream_ui(eng, src, cur, len(rows_st), last_q)
+        n_total = len(rows_st)
+        active = st.session_state.get("stream_active", False)
 
-        if st.session_state.get("stream_done", False):
-            s = st.session_state.get("stream_done_summary", {})
-            st.success(
-                f"✅ Hoàn tất! Completeness={s.get('data_completeness_pct', 0)}% · "
-                f"Result-latency TB={s.get('avg_result_latency_ms', 0)} ms · "
-                f"Proc p99={s.get('proc_latency_p99_us', 0)} µs · "
-                f"Windows={s.get('windows_emitted', 0)}"
-            )
+        if active:
+            cur = st.session_state.stream_cursor
+            spd = st.session_state.get("stream_speed_val", 200)
+            chunk = max(int(spd), 50)
+            end_idx = min(cur + chunk, n_total)
+            for i in range(cur, end_idx):
+                r = rows_st[i]
+                qlen = (i * 7) % 2500
+                eng.process({"event_id": r.event_id, "event_time": r.event_time,
+                             "status": r.status}, queue_len=qlen)
+            last_q = ((end_idx - 1) * 7) % 2500 if end_idx > 0 else 0
+            st.session_state.stream_cursor = end_idx
+            _render_stream_ui(eng, src, end_idx, n_total, last_q)
+            if end_idx < n_total:
+                time.sleep(0.03)
+                st.rerun(scope="fragment")   # chỉ rerun fragment
+            else:
+                eng.flush()
+                st.session_state.stream_done_summary = eng.summary()
+                st.session_state.stream_done = True
+                st.session_state.stream_active = False
+                st.rerun()                   # full rerun → khôi phục UI tĩnh
+        else:
+            cur = st.session_state.get("stream_cursor", 0)
+            last_q = ((cur - 1) * 7) % 2500 if cur > 0 else 0
+            _render_stream_ui(eng, src, cur, n_total, last_q)
+            if st.session_state.get("stream_done", False):
+                s = st.session_state.get("stream_done_summary", {})
+                st.success(
+                    f"✅ Hoàn tất! Completeness={s.get('data_completeness_pct', 0)}% · "
+                    f"Result-latency TB={s.get('avg_result_latency_ms', 0)} ms · "
+                    f"Proc p99={s.get('proc_latency_p99_us', 0)} µs · "
+                    f"Windows={s.get('windows_emitted', 0)}"
+                )
+
+    _stream_live_fragment()
 
 
 # ============================================================
@@ -1173,7 +1169,7 @@ with tab_sweep:
                 legend=dict(orientation="h", yanchor="bottom", y=1.05, x=0),
                 hovermode="x unified",
             )
-            live_chart.plotly_chart(fig_live, use_container_width=True,
+            live_chart.plotly_chart(fig_live, width="stretch",
                                     key=f"sweep_live_{idx}")
 
             # Bảng cập nhật
@@ -1189,7 +1185,7 @@ with tab_sweep:
                 "avg_result_latency_ms": "Result Latency (ms)",
                 "proc_latency_p99_us": "Proc p99 (µs)",
             })
-            live_table.dataframe(df_live, use_container_width=True)
+            live_table.dataframe(df_live, width="stretch")
 
         status_text.text("Đang xuất báo cáo & vẽ biểu đồ cuối…")
         write_report(rows, csv_path="tradeoff.csv", png_path="tradeoff.png")
@@ -1209,7 +1205,7 @@ with tab_sweep:
                 "avg_result_latency_ms": "Result Latency (ms)",
                 "proc_latency_p99_us": "Proc p99 (µs)",
             }),
-            use_container_width=True,
+            width="stretch",
         )
 
         st.markdown("#### Biểu đồ đánh đổi (Watermark Trade-off Curve)")
@@ -1262,7 +1258,7 @@ with tab_sweep:
             legend=dict(orientation="h", yanchor="bottom", y=1.05, x=0),
             hovermode="x unified",
         )
-        st.plotly_chart(fig_final, use_container_width=True, key="sweep_final")
+        st.plotly_chart(fig_final, width="stretch", key="sweep_final")
         st.success("Đã xuất `tradeoff.csv` và `tradeoff.png` thành công!", icon="✅")
 
 
@@ -1355,7 +1351,7 @@ with tab_demos:
                     len(eng2.closed_windows),
                 ],
             })
-            st.dataframe(compare_df, use_container_width=True, hide_index=True)
+            st.dataframe(compare_df, width="stretch", hide_index=True)
 
             mc1, mc2, mc3 = st.columns(3)
             mc1.metric("Completeness", f"{s['data_completeness_pct']}%")
@@ -1461,7 +1457,7 @@ with tab_demos:
                                     y=1.06, x=0),
                         hovermode="x unified",
                     )
-                    bp_plot.plotly_chart(fig_rt, use_container_width=True,
+                    bp_plot.plotly_chart(fig_rt, width="stretch",
                                          key=f"bp_rt_{i // REFRESH}")
 
                     bp_metrics.markdown(
@@ -1550,7 +1546,7 @@ with tab_dist:
                 "duplicates": "Duplicates (gộp)",
                 "windows": "Windows đã chốt",
             }),
-            use_container_width=True,
+            width="stretch",
         )
 
         if first_run_counts:
@@ -1584,7 +1580,7 @@ with tab_dist:
                 total=sum(first_run_counts),
                 tick=0,
             )
-            st.plotly_chart(dist_fig, use_container_width=False)
+            st.plotly_chart(dist_fig, width="content")
             st.success("Mô phỏng Cluster phân tán thành công!")
 
 
@@ -1683,7 +1679,10 @@ with tab_kill:
             dlq = os.path.join(dlq_dir, f"dlq_node_{i}.jsonl")
             # Xoá DLQ cũ nếu còn (để session mới sạch sẽ)
             if os.path.exists(dlq):
-                os.remove(dlq)
+                try:
+                    os.remove(dlq)
+                except OSError:
+                    pass
             ckpt_paths.append(p)
             dlq_paths.append(dlq)
             engines.append(WatermarkEngine(
@@ -1735,7 +1734,11 @@ with tab_kill:
         cursor = state["cursor"]
         done = cursor >= total
 
-        # Backward compat: state có thể tồn tại từ phiên cũ chưa có sim_history
+        # Backward compat + khởi tạo sớm các key cần dùng trước phần Controls
+        if "auto_play_active" not in state:
+            state["auto_play_active"] = False
+        if "schedule" not in state:
+            state["schedule"] = []
         if "sim_history" not in state:
             state["sim_history"] = {
                 "cursor": [0], "completeness": [100.0],
@@ -1757,7 +1760,7 @@ with tab_kill:
         qa1, qa2, qa3, qa4 = st.columns(4)
         if qa1.button("💀 Kill ALL nodes",
                       disabled=state.get("auto_play_active", False) or done,
-                      use_container_width=True):
+                      width="stretch"):
             killed = 0
             for i in range(n):
                 if state["status"][i] == "alive":
@@ -1778,7 +1781,7 @@ with tab_kill:
             st.rerun()
         if qa2.button("🔄 Revive ALL nodes",
                       disabled=state.get("auto_play_active", False),
-                      use_container_width=True):
+                      width="stretch"):
             revived = 0
             for i in range(n):
                 if state["status"][i] == "dead":
@@ -1825,7 +1828,7 @@ with tab_kill:
             st.rerun()
         if qa3.button("🏁 Flush all alive",
                       disabled=state.get("auto_play_active", False),
-                      use_container_width=True):
+                      width="stretch"):
             flushed = 0
             for i, eng in enumerate(state["engines"]):
                 if state["status"][i] == "alive":
@@ -1835,7 +1838,7 @@ with tab_kill:
             st.rerun()
         if qa4.button("📸 Save snapshot",
                       disabled=state.get("auto_play_active", False),
-                      use_container_width=True):
+                      width="stretch"):
             saved = 0
             for i, eng in enumerate(state["engines"]):
                 if state["status"][i] == "alive":
@@ -1869,14 +1872,19 @@ with tab_kill:
         diag_tick = state.get("diag_tick", 0)
         state["diag_tick"] = diag_tick + 1
 
-        diag_fig = make_cluster_fig(
-            state["status"], _p, _w, [len(p) for p in state["pending"]],
-            cursor, total, highlight_node=None, tick=diag_tick,
-        )
-        clicked = st.plotly_chart(
-            diag_fig, key="cluster_static",
-            on_select="rerun", use_container_width=False,
-        )
+        if not state["auto_play_active"]:
+            diag_fig = make_cluster_fig(
+                state["status"], _p, _w, [len(p) for p in state["pending"]],
+                cursor, total, highlight_node=None, tick=diag_tick,
+            )
+            clicked = st.plotly_chart(
+                diag_fig, key="cluster_static",
+                on_select="rerun", width="content",
+            )
+        else:
+            clicked = None
+            st.caption("⏯️ Đang Auto-Play — diagram realtime cập nhật ở "
+                       "khu vực live bên dưới ↓")
         # ── Click-to-kill / revive directly on diagram ──────────
         if clicked and clicked.selection and clicked.selection.points:
             pt = clicked.selection.points[0]
@@ -1923,7 +1931,10 @@ with tab_kill:
                                         state["node_processed"][nid_click] += 1
                                     except Exception:
                                         pass
-                            os.remove(dlq)
+                            try:
+                                os.remove(dlq)
+                            except OSError:
+                                pass
                         state["pending"][nid_click] = []
                         state["engines"][nid_click] = eng_new
                         state["status"][nid_click] = "alive"
@@ -1965,7 +1976,8 @@ with tab_kill:
 
                 if status == "alive":
                     if st.button(f"Kill node {i}", key=f"kill_{i}",
-                                 use_container_width=True):
+                                 width="stretch",
+                                 disabled=state["auto_play_active"]):
                         try:
                             eng.checkpoint()
                             ckpt_size = os.path.getsize(state["ckpt_paths"][i])
@@ -1993,7 +2005,9 @@ with tab_kill:
                         f"{dlq_lines:,} dòng · {dlq_size:,} B"
                     )
 
-                    if st.button(f"🔄 Revive node {i}", key=f"revive_{i}", use_container_width=True):
+                    if st.button(f"🔄 Revive node {i}", key=f"revive_{i}",
+                                 width="stretch",
+                                 disabled=state["auto_play_active"]):
                         ckpt_path = state["ckpt_paths"][i]
                         if os.path.exists(ckpt_path):
                             try:
@@ -2032,7 +2046,10 @@ with tab_kill:
                                     replayed += 1
                                     state["node_processed"][i] += 1
                             # Xoá DLQ sau khi replay xong (đã drain)
-                            os.remove(dlq_path)
+                            try:
+                                os.remove(dlq_path)
+                            except OSError:
+                                pass
                         state["pending"][i] = []
                         state["engines"][i] = eng_new
                         state["status"][i] = "alive"
@@ -2050,10 +2067,7 @@ with tab_kill:
         # CONTROLS — 3-tab segmented: Thủ công / Auto-Play / Lập lịch
         # ============================================================
         st.markdown("#### Điều khiển stream")
-        if "schedule" not in state:
-            state["schedule"] = []
-        if "auto_play_active" not in state:
-            state["auto_play_active"] = False
+        # (schedule / auto_play_active đã khởi tạo sớm ở khối backward-compat)
 
         def _buffer_to_dlq(nid: int, ev: dict):
             """Append event vào Dead-Letter Queue trên ĐĨA (append-only JSONL)."""
@@ -2076,17 +2090,17 @@ with tab_kill:
             run_chunk_btn = mc1.button(
                 f"Chạy {kill_chunk:,} events",
                 disabled=done or state["auto_play_active"],
-                use_container_width=True, key="man_chunk_btn",
+                width="stretch", key="man_chunk_btn",
             )
             run_all_btn = mc2.button(
                 "Chạy hết stream",
                 disabled=done or state["auto_play_active"],
-                use_container_width=True, key="man_all_btn",
+                width="stretch", key="man_all_btn",
             )
             flush_btn = mc3.button(
                 "Flush & tổng kết",
                 disabled=not done,
-                use_container_width=True, key="man_flush_btn",
+                width="stretch", key="man_flush_btn",
             )
 
         # ── Tab: Auto-Play ──
@@ -2110,20 +2124,15 @@ with tab_kill:
                 key="auto_until", disabled=state["auto_play_active"],
             )
 
-            pb1, pb2 = st.columns(2)
-            play_btn = pb1.button(
+            play_btn = st.button(
                 "Auto-Play realtime", type="primary",
                 disabled=done or state["auto_play_active"],
-                use_container_width=True, key="auto_play_btn",
-            )
-            stop_btn = pb2.button(
-                "Dừng stream",
-                disabled=not state["auto_play_active"],
-                use_container_width=True, key="auto_stop_btn",
+                width="stretch", key="auto_play_btn",
             )
 
             if state["auto_play_active"]:
-                st.error("Đang stream realtime — bấm **Dừng** để pause.", icon="🔴")
+                st.error("Đang stream realtime — nút **DỪNG** nằm ở khu vực "
+                         "live phía dưới ↓", icon="🔴")
             elif done:
                 st.success("Stream hoàn tất.", icon="✅")
             else:
@@ -2169,7 +2178,7 @@ with tab_kill:
 
                 sched_df = pd.DataFrame(state["schedule"],
                                         columns=["Hành động", "Node", "Tại cursor"])
-                st.dataframe(sched_df, hide_index=True, use_container_width=True)
+                st.dataframe(sched_df, hide_index=True, width="stretch")
                 ccol1, _ = st.columns([1, 4])
                 if ccol1.button("🗑️ Xoá toàn bộ lịch"):
                     state["schedule"] = []
@@ -2192,14 +2201,14 @@ with tab_kill:
             st.markdown("**🎲 Preset kịch bản sự cố** (1 nút = thêm nhiều dòng):")
             pre1, pre2, pre3, pre4 = st.columns(4)
             if pre1.button("⚡ 1 node chết 30% rồi sống 70%",
-                           use_container_width=True):
+                           width="stretch"):
                 a = max(int(total * 0.30), 1)
                 b = max(int(total * 0.70), a + 1)
                 state["schedule"] += [("kill", 0, a), ("revive", 0, b)]
                 state["schedule"].sort(key=lambda x: x[2])
                 st.rerun()
             if pre2.button("💀 Kill chéo 2 node (25%, 60%)",
-                           use_container_width=True):
+                           width="stretch"):
                 state["schedule"] += [
                     ("kill", 0, int(total * 0.25)),
                     ("kill", min(1, n - 1), int(total * 0.60)),
@@ -2207,7 +2216,7 @@ with tab_kill:
                 state["schedule"].sort(key=lambda x: x[2])
                 st.rerun()
             if pre3.button("🌪️ Chaos: kill xen kẽ tất cả",
-                           use_container_width=True):
+                           width="stretch"):
                 step = max(int(total / (n * 2 + 1)), 1)
                 for i in range(n):
                     state["schedule"].append(("kill", i, step * (2 * i + 1)))
@@ -2215,7 +2224,7 @@ with tab_kill:
                 state["schedule"].sort(key=lambda x: x[2])
                 st.rerun()
             if pre4.button("🧹 Xoá toàn bộ preset",
-                           use_container_width=True):
+                           width="stretch"):
                 state["schedule"] = []
                 st.rerun()
 
@@ -2265,19 +2274,7 @@ with tab_kill:
             state["log"].append("🏁 Flush tất cả engines còn sống · tổng kết bên dưới")
             st.rerun()
 
-        if stop_btn:
-            state["auto_play_active"] = False
-            state["log"].append(
-                f"⏸️ AUTO-PLAY DỪNG bởi user tại cursor={state['cursor']:,}"
-            )
-            st.rerun()
-
-        # Live placeholders — chỉ dùng khi đang Auto-Play
-        live_progress = st.empty()
-        live_diag = st.empty()
-        live_grid = st.empty()
-        live_metrics = st.empty()
-        live_log = st.empty()
+        # (Nút Dừng + placeholders live đã chuyển vào _autoplay_fragment bên dưới)
 
         def _render_live_grid(container, st_state, n_nodes):
             with container.container():
@@ -2348,10 +2345,29 @@ with tab_kill:
             )
             st.rerun()
 
-        # ── Chunked auto-play executor ──
-        # Process small chunk per rerun → STOP button is responsive
-        # (mỗi chunk ≈ refresh_n events, sleep theo `speed_eps` để pace tốc độ)
-        if state["auto_play_active"]:
+        # ── AUTO-PLAY FRAGMENT ──────────────────────────────────────
+        # Dùng @st.fragment + st.rerun(scope="fragment"): mỗi chunk CHỈ
+        # rerun vùng này, KHÔNG rerun header / sidebar / tabs / inspector
+        # → hết hiện tượng "đa số chức năng bị rerender" (flicker).
+        @st.fragment
+        def _autoplay_fragment():
+            if not state["auto_play_active"]:
+                return
+            # Nút Dừng nằm TRONG fragment để luôn bắt được click realtime
+            if st.button("⏸️ DỪNG STREAM", type="primary",
+                         width="stretch", key="frag_stop"):
+                state["auto_play_active"] = False
+                state["log"].append(
+                    f"⏸️ AUTO-PLAY DỪNG bởi user tại cursor={state['cursor']:,}")
+                st.rerun()
+                return
+            st.error("Đang stream realtime — chỉ vùng live này cập nhật, "
+                     "phần còn lại của trang đứng yên (không flicker).", icon="🔴")
+            live_progress = st.empty()
+            live_diag = st.empty()
+            live_grid = st.empty()
+            live_metrics = st.empty()
+            live_log = st.empty()
             ap_speed = state.get("auto_play_speed", 1000)
             ap_refresh = state.get("auto_play_refresh_n", 50)
             ap_end_at = state.get("auto_play_end_at", total)
@@ -2416,7 +2432,10 @@ with tab_kill:
                                     eng_new.process(ev)
                                     replayed += 1
                                     state["node_processed"][nid] += 1
-                            os.remove(dlq)
+                            try:
+                                os.remove(dlq)
+                            except OSError:
+                                pass
                         state["pending"][nid] = []
                         state["engines"][nid] = eng_new
                         state["status"][nid] = "alive"
@@ -2478,23 +2497,25 @@ with tab_kill:
                         highlight_node=last_nid,
                         tick=j_end - ap_start,
                     ),
-                    use_container_width=False,
+                    width="content",
                 )
                 _render_live_grid(live_grid, state, n)
                 _render_live_metrics(live_metrics, state)
                 _render_live_log(live_log, state)
 
-            # ---- Pace and rerun (or finish) ----
+            # ---- Pace + loop: CHỈ rerun fragment, không rerun cả app ----
             if j_end < ap_end_at:
                 time.sleep(chunk_size / max(ap_speed, 1))
-                st.rerun()
+                st.rerun(scope="fragment")
             else:
                 state["auto_play_active"] = False
                 state["log"].append(
                     f"⏯️ AUTO-PLAY kết thúc tại cursor={state['cursor']:,} · "
                     f"dead nodes: {[i for i, s in enumerate(state['status']) if s == 'dead'] or 'không có'}"
                 )
-                st.rerun()
+                st.rerun()  # full rerun → khôi phục UI tĩnh
+
+        _autoplay_fragment()
 
         # ============================================================
         # INSPECTOR — 4-tab bottom panel: Metrics / DLQ / Files / Log
@@ -2571,7 +2592,7 @@ with tab_kill:
                 yaxis=dict(title="Events", gridcolor="#E5E7EB"),
                 legend=dict(orientation="h", yanchor="bottom", y=1.02, x=0),
             )
-            st.plotly_chart(dist_fig, use_container_width=True,
+            st.plotly_chart(dist_fig, width="stretch",
                             key="dist_bar")
 
         # ── Tab: DLQ on disk ──
@@ -2617,7 +2638,7 @@ with tab_kill:
                             if parsed:
                                 st.caption("Preview 8 events đầu:")
                                 st.dataframe(pd.DataFrame(parsed),
-                                             use_container_width=True,
+                                             width="stretch",
                                              hide_index=True, height=160)
                             with st.expander("Xem raw JSONL (head + tail)"):
                                 st.code("".join(preview_lines), language="json")
@@ -2641,7 +2662,7 @@ with tab_kill:
                     "DLQ events (mem)": len(state["pending"][i]),
                 })
             st.dataframe(pd.DataFrame(fs_rows),
-                         use_container_width=True, hide_index=True)
+                         width="stretch", hide_index=True)
 
         # ── Tab: Event log (colorized + filter) ──
         with ins_log:

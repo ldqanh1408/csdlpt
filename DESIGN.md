@@ -31,9 +31,10 @@ Live visualization**.
 - **Processing node ×N (`wm/engine.py`):** xem mục 4.
 - **Checkpoint store:** snapshot atomic per-node (mục 3).
 - **Coordinator:** `kill(node)` / `recover(node)` — minh hoạ bằng
-  `wm/demos.py:crash_recovery_demo()`.
-- **Merge / Sink:** gộp cửa sổ đã đóng → report (`wm/sweep.py`) + live
-  Streamlit (`app.py`).
+  `wm/demos.py:crash_recovery_demo()` và tab **Kill Node Live** của
+  `app.py` (DLQ append-only trên đĩa + replay khi revive → Exactly-Once).
+- **Merge / Sink:** gộp cửa sổ đã đóng → report (`wm/sweep.py`) +
+  Dashboard Streamlit 6 tab (`app.py`).
 
 > **Code layout.** Logic core nằm trong package `wm/`
 > (`engine`, `sweep`, `demos`, `partition`, `data/{synthetic,nasa}`).
