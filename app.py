@@ -13,9 +13,9 @@ mô phỏng dựa trên dataset, KHÔNG cần gõ thêm lệnh nào trong termin
   4. Distributed Cluster Simulation (N nodes, hot-key skew)
   5. Kill Node Live — kill/revive node realtime, DLQ trên đĩa, Auto-Play
 
-Kỹ thuật UI: vùng realtime (Tab 1 & Tab 5) dùng @st.fragment +
-st.rerun(scope="fragment") → chỉ vùng live cập nhật, phần còn lại của
-trang KHÔNG bị rerender (chống flicker).
+Kỹ thuật UI: vùng realtime (Tab 1 & Tab 5) dùng @st.fragment(run_every=…)
+→ chỉ vùng live tự cập nhật theo timer, phần còn lại của trang KHÔNG bị
+rerender (chống flicker).
 """
 import json
 import os
@@ -1039,9 +1039,11 @@ with tab_stream:
                     text=f"⏱️ Stream: {end_idx:,}/{total_rows:,}")
 
     # ── LIVE STREAM FRAGMENT ────────────────────────────────────────
-    # @st.fragment + st.rerun(scope="fragment"): mỗi chunk CHỈ rerun vùng
-    # này → header / sidebar / tabs KHÔNG bị rerender (hết flicker).
-    @st.fragment
+    # @st.fragment(run_every=...): fragment tự rerun theo timer, chỉ rerun
+    # vùng này → header / sidebar / tabs KHÔNG bị rerender (hết flicker).
+    _stream_interval = 0.1 if st.session_state.get("stream_active") else None
+
+    @st.fragment(run_every=_stream_interval)
     def _stream_live_fragment():
         if "stream_eng" not in st.session_state:
             return
@@ -1064,15 +1066,13 @@ with tab_stream:
             last_q = ((end_idx - 1) * 7) % 2500 if end_idx > 0 else 0
             st.session_state.stream_cursor = end_idx
             _render_stream_ui(eng, src, end_idx, n_total, last_q)
-            if end_idx < n_total:
-                time.sleep(0.03)
-                st.rerun(scope="fragment")   # chỉ rerun fragment
-            else:
+            if end_idx >= n_total:
                 eng.flush()
                 st.session_state.stream_done_summary = eng.summary()
                 st.session_state.stream_done = True
                 st.session_state.stream_active = False
                 st.rerun()                   # full rerun → khôi phục UI tĩnh
+            # else: run_every tự rerun fragment cho chunk kế tiếp
         else:
             cur = st.session_state.get("stream_cursor", 0)
             last_q = ((cur - 1) * 7) % 2500 if cur > 0 else 0
@@ -2346,10 +2346,12 @@ with tab_kill:
             st.rerun()
 
         # ── AUTO-PLAY FRAGMENT ──────────────────────────────────────
-        # Dùng @st.fragment + st.rerun(scope="fragment"): mỗi chunk CHỈ
-        # rerun vùng này, KHÔNG rerun header / sidebar / tabs / inspector
-        # → hết hiện tượng "đa số chức năng bị rerender" (flicker).
-        @st.fragment
+        # @st.fragment(run_every=...): fragment TỰ rerun theo timer, CHỈ
+        # rerun vùng này — KHÔNG rerun header / tabs / inspector (hết
+        # flicker). run_every=None khi idle để không poll vô ích.
+        _ap_interval = 0.1 if state.get("auto_play_active") else None
+
+        @st.fragment(run_every=_ap_interval)
         def _autoplay_fragment():
             if not state["auto_play_active"]:
                 return
@@ -2373,7 +2375,8 @@ with tab_kill:
             ap_end_at = state.get("auto_play_end_at", total)
             ap_start = state.get("auto_play_start", 0)
 
-            chunk_size = max(int(ap_refresh), 25)
+            # Mỗi tick run_every ≈ 0.1s → xử lý ap_speed*0.1 event/tick
+            chunk_size = max(int(ap_speed * 0.1), 1)
             j_start = state["cursor"]
 
             if j_start >= ap_end_at:
@@ -2503,11 +2506,8 @@ with tab_kill:
                 _render_live_metrics(live_metrics, state)
                 _render_live_log(live_log, state)
 
-            # ---- Pace + loop: CHỈ rerun fragment, không rerun cả app ----
-            if j_end < ap_end_at:
-                time.sleep(chunk_size / max(ap_speed, 1))
-                st.rerun(scope="fragment")
-            else:
+            # ---- Kết thúc? run_every tự lặp fragment cho chunk kế tiếp ----
+            if j_end >= ap_end_at:
                 state["auto_play_active"] = False
                 state["log"].append(
                     f"⏯️ AUTO-PLAY kết thúc tại cursor={state['cursor']:,} · "
