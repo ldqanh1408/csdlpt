@@ -93,6 +93,13 @@ class WatermarkEngine:
         t0 = time.perf_counter_ns()          # [Latency] high-res timer
         self.metrics["total"] += 1
 
+        # [EOS_MARKER] Check if it is an End-Of-Stream control marker
+        if event.get("status") == "EOS":
+            self.flush()
+            latency_ns = time.perf_counter_ns() - t0
+            self.proc_latencies_ns.append(latency_ns)
+            return latency_ns
+
         # [Robustness] Backpressure: hàng đợi vượt ngưỡng -> drop có kiểm
         # soát thay vì để OOM/crash.
         if queue_len > self.max_queue:
