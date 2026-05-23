@@ -1,0 +1,134 @@
+{
+  "version": "1.0.0",
+  "lastScanned": 1779517960487,
+  "projectRoot": "D:\\dev\\csdlpt",
+  "techStack": {
+    "languages": [],
+    "frameworks": [],
+    "packageManager": null,
+    "runtime": null
+  },
+  "build": {
+    "buildCommand": null,
+    "testCommand": null,
+    "lintCommand": null,
+    "devCommand": null,
+    "scripts": {}
+  },
+  "conventions": {
+    "namingStyle": null,
+    "importStyle": null,
+    "testPattern": null,
+    "fileOrganization": null
+  },
+  "structure": {
+    "isMonorepo": false,
+    "workspaces": [],
+    "mainDirectories": [
+      "docs"
+    ],
+    "gitBranches": null
+  },
+  "customNotes": [],
+  "directoryMap": {
+    "dataset": {
+      "path": "dataset",
+      "purpose": null,
+      "fileCount": 2,
+      "lastAccessed": 1779517960380,
+      "keyFiles": [
+        "access.log.zip",
+        "data.csv"
+      ]
+    },
+    "docs": {
+      "path": "docs",
+      "purpose": "Documentation",
+      "fileCount": 0,
+      "lastAccessed": 1779517960381,
+      "keyFiles": []
+    },
+    "wm": {
+      "path": "wm",
+      "purpose": null,
+      "fileCount": 9,
+      "lastAccessed": 1779517960382,
+      "keyFiles": [
+        "actions.py",
+        "config.py",
+        "demos.py",
+        "engine.py",
+        "partition.py"
+      ]
+    },
+    "__pycache__": {
+      "path": "__pycache__",
+      "purpose": null,
+      "fileCount": 5,
+      "lastAccessed": 1779517960382,
+      "keyFiles": [
+        "app.cpython-310.pyc",
+        "app.cpython-314.pyc",
+        "log_generator.cpython-310.pyc",
+        "nasa_loader.cpython-310.pyc",
+        "watermark_engine.cpython-310.pyc"
+      ]
+    },
+    "wm\\data": {
+      "path": "wm\\data",
+      "purpose": "Data files",
+      "fileCount": 3,
+      "lastAccessed": 1779517960384,
+      "keyFiles": [
+        "nasa.py",
+        "synthetic.py",
+        "__init__.py"
+      ]
+    }
+  },
+  "hotPaths": [
+    {
+      "path": "app.py",
+      "accessCount": 54,
+      "lastAccessed": 1779440564950,
+      "type": "file"
+    },
+    {
+      "path": "INDEX.md",
+      "accessCount": 7,
+      "lastAccessed": 1779436661157,
+      "type": "file"
+    },
+    {
+      "path": "README.md",
+      "accessCount": 4,
+      "lastAccessed": 1779419755474,
+      "type": "file"
+    },
+    {
+      "path": "DESIGN.md",
+      "accessCount": 4,
+      "lastAccessed": 1779419832137,
+      "type": "directory"
+    },
+    {
+      "path": "REPORT.md",
+      "accessCount": 2,
+      "lastAccessed": 1779419832195,
+      "type": "directory"
+    },
+    {
+      "path": "PROPOSAL.md",
+      "accessCount": 1,
+      "lastAccessed": 1779436613781,
+      "type": "file"
+    },
+    {
+      "path": "wm\\engine.py",
+      "accessCount": 1,
+      "lastAccessed": 1779439252222,
+      "type": "file"
+    }
+  ],
+  "userDirectives": []
+}

@@ -7,7 +7,9 @@
       "Bash(python -c \"import ast; ast.parse\\(open\\('app.py', encoding='utf-8'\\).read\\(\\)\\); print\\('OK'\\)\")",
       "Bash(python -c ' *)",
       "Skill(oh-my-claudecode:plan)",
-      "Skill(oh-my-claudecode:plan:*)"
+      "Skill(oh-my-claudecode:plan:*)",
+      "Bash(git ls-tree *)",
+      "Bash(git push *)"
     ]
   }
 }

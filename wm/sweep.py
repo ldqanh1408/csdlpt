@@ -14,8 +14,9 @@ import matplotlib.pyplot as plt
 from wm.engine import WatermarkEngine
 from wm.data.synthetic import generate_logs
 from wm.data.nasa import load_nasa_csv
+from wm.config import EngineConfig
 
-WINDOW_S = 10.0
+WINDOW_S = EngineConfig().window_size_s
 WAIT_TIMES_MS = [0, 100, 250, 500, 1000, 2000, 4000, 6000, 8000]
 
 

@@ -1,3 +1,4 @@
+# -*- coding: utf-8 -*-
 """
 app.py — Dashboard đa chức năng của Distributed Watermark Tracker
 ------------------------------------------------------------------
@@ -13,9 +14,9 @@ mô phỏng dựa trên dataset, KHÔNG cần gõ thêm lệnh nào trong termin
   4. Distributed Cluster Simulation (N nodes, hot-key skew)
   5. Kill Node Live — kill/revive node realtime, DLQ trên đĩa, Auto-Play
 
-Kỹ thuật UI: vùng realtime (Tab 1 & Tab 5) dùng @st.fragment +
-st.rerun(scope="fragment") → chỉ vùng live cập nhật, phần còn lại của
-trang KHÔNG bị rerender (chống flicker).
+Kỹ thuật UI: vùng realtime (Tab 1 & Tab 5) dùng @st.fragment(run_every=…)
+→ chỉ vùng live tự cập nhật theo timer, phần còn lại của trang KHÔNG bị
+rerender (chống flicker).
 """
 import json
 import os
@@ -27,7 +28,10 @@ import plotly.graph_objects as go
 import streamlit as st
 import matplotlib.pyplot as plt
 
-from wm import WatermarkEngine, generate_logs, load_nasa_csv
+from wm import (WatermarkEngine, generate_logs, load_nasa_csv,
+                EngineConfig, DEFAULT_CONFIG, PRESETS,
+                kill_node, revive_node, kill_all, revive_all)
+from wm.scenario import Scenario, ScenarioAction
 from wm.sweep import run_once, write_report
 from wm.partition import run_cluster, partition_key
 
@@ -367,8 +371,406 @@ def make_cluster_fig(statuses, processed, windows_closed, dlq_counts,
 
 
 # ============================================================
+# STATE RECOVERY SVG DIAGRAM (TAB 4)
+# ============================================================
+def generate_recovery_svg(state, processed_e=0, dup_filtered=0):
+    e1_class = "node-box"
+    e2_class = "node-box"
+    disk_class = "node-box"
+    
+    path1_class = "flow-line"
+    path2_class = "flow-line"
+    
+    e1_status = "READY"
+    e1_sub = f"Processed: {processed_e} log" if state in ["eng1_running", "checkpoint", "crashed"] else "Processed: 0"
+    
+    disk_status = "No Snapshot"
+    disk_sub = "Empty"
+    
+    e2_status = "OFFLINE"
+    e2_sub = "Processed: 0"
+    
+    if state == "init":
+        e1_class += " status-ready"
+        e1_status = "READY"
+    elif state == "eng1_running":
+        e1_class += " status-running"
+        e1_status = "RUNNING 🔄"
+    elif state == "checkpoint":
+        e1_class += " status-running"
+        e1_status = "CHECKPOINTING 💾"
+        disk_class += " status-saved"
+        disk_status = "SNAPSHOT SAVED 💾"
+        disk_sub = "web_recovery.json"
+        path1_class += " flow-line-active-blue"
+    elif state == "crashed":
+        e1_class += " status-crashed"
+        e1_status = "CRASHED 💀"
+        disk_class += " status-saved"
+        disk_status = "SNAPSHOT SAVED 💾"
+        disk_sub = "web_recovery.json"
+    elif state == "eng2_restore":
+        e1_class += " status-muted"
+        e1_status = "CRASHED 💀"
+        disk_class += " status-saved"
+        disk_status = "SNAPSHOT SAVED 💾"
+        disk_sub = "web_recovery.json"
+        e2_class += " status-restore"
+        e2_status = "RESTORING... 🔄"
+        e2_sub = "Restoring state"
+        path2_class += " flow-line-active-green"
+    elif state == "eng2_running":
+        e1_class += " status-muted"
+        e1_status = "OFFLINE ❌"
+        disk_class += " status-saved"
+        disk_status = "SNAPSHOT SAVED 💾"
+        disk_sub = "web_recovery.json"
+        e2_class += " status-active-green"
+        e2_status = "RUNNING (RECOVERED)"
+        e2_sub = f"Processed: {processed_e} log"
+    elif state == "done":
+        e1_class += " status-muted"
+        e1_status = "OFFLINE ❌"
+        disk_class += " status-saved"
+        disk_status = "SNAPSHOT SAVED 💾"
+        disk_sub = "web_recovery.json"
+        e2_class += " status-active-green"
+        e2_status = "COMPLETED 🏁"
+        e2_sub = f"Exactly-Once: OK ✅"
+
+    svg = f"""
+    <svg width="100%" height="200" viewBox="0 0 650 200" xmlns="http://www.w3.org/2000/svg">
+      <defs>
+        <filter id="glow-blue" x="-20%" y="-20%" width="140%" height="140%">
+          <feGaussianBlur stdDeviation="6" result="blur" />
+          <feComposite in="SourceGraphic" in2="blur" operator="over" />
+        </filter>
+        <filter id="glow-red" x="-20%" y="-20%" width="140%" height="140%">
+          <feGaussianBlur stdDeviation="6" result="blur" />
+          <feComposite in="SourceGraphic" in2="blur" operator="over" />
+        </filter>
+        <filter id="glow-green" x="-20%" y="-20%" width="140%" height="140%">
+          <feGaussianBlur stdDeviation="6" result="blur" />
+          <feComposite in="SourceGraphic" in2="blur" operator="over" />
+        </filter>
+        <filter id="glow-amber" x="-20%" y="-20%" width="140%" height="140%">
+          <feGaussianBlur stdDeviation="6" result="blur" />
+          <feComposite in="SourceGraphic" in2="blur" operator="over" />
+        </filter>
+      </defs>
+      <style>
+        .node-box {{ fill: #1E293B; stroke: #334155; stroke-width: 2; transition: all 0.5s ease; }}
+        .node-title {{ font-family: 'Outfit', sans-serif; font-size: 13px; font-weight: bold; fill: #F8FAFC; text-anchor: middle; }}
+        .node-text {{ font-family: 'Outfit', sans-serif; font-size: 11px; fill: #94A3B8; text-anchor: middle; }}
+        .node-metric {{ font-family: 'JetBrains Mono', monospace; font-size: 11px; fill: #38BDF8; text-anchor: middle; }}
+        .node-metric-green {{ font-family: 'JetBrains Mono', monospace; font-size: 11px; fill: #34D399; text-anchor: middle; }}
+        
+        .status-ready {{ stroke: #64748B; }}
+        .status-running {{ stroke: #3B82F6; filter: url(#glow-blue); }}
+        .status-crashed {{ stroke: #EF4444; filter: url(#glow-red); }}
+        .status-saved {{ stroke: #F59E0B; filter: url(#glow-amber); }}
+        .status-restore {{ stroke: #06B6D4; filter: url(#glow-blue); }}
+        .status-active-green {{ stroke: #10B981; filter: url(#glow-green); }}
+        .status-muted {{ stroke: #1E293B; stroke-dasharray: 4,4; opacity: 0.5; }}
+        
+        .flow-line {{ fill: none; stroke: #334155; stroke-width: 3; transition: all 0.5s ease; }}
+        .flow-line-active-blue {{ stroke: #3B82F6; stroke-dasharray: 6, 4; animation: dash 1s linear infinite; }}
+        .flow-line-active-green {{ stroke: #10B981; stroke-dasharray: 6, 4; animation: dash 1s linear infinite; }}
+        
+        @keyframes dash {{
+          to {{
+            stroke-dashoffset: -20;
+          }}
+        }}
+      </style>
+      
+      <!-- Box 1: Engine 1 -->
+      <rect class="{e1_class}" x="15" y="30" width="160" height="130" rx="10" ry="10" />
+      <text class="node-title" x="95" y="60">ENGINE 1</text>
+      <text class="node-text" x="95" y="90">{e1_status}</text>
+      <text class="node-metric" x="95" y="120">{e1_sub}</text>
+      
+      <!-- Connection 1 -->
+      <path class="{path1_class}" d="M 175 95 L 245 95" />
+      
+      <!-- Box 2: State Store -->
+      <rect class="{disk_class}" x="245" y="30" width="160" height="130" rx="10" ry="10" />
+      <text class="node-title" x="325" y="60">💾 STATE STORE</text>
+      <text class="node-text" x="325" y="90">{disk_status}</text>
+      <text class="node-text" x="325" y="120" style="font-size: 10px; fill: #F59E0B;">{disk_sub}</text>
+      
+      <!-- Connection 2 -->
+      <path class="{path2_class}" d="M 405 95 L 475 95" />
+      
+      <!-- Box 3: Engine 2 -->
+      <rect class="{e2_class}" x="475" y="30" width="160" height="130" rx="10" ry="10" />
+      <text class="node-title" x="555" y="60">ENGINE 2</text>
+      <text class="node-text" x="555" y="90">{e2_status}</text>
+      <text class="node-metric-green" x="555" y="120">{e2_sub}</text>
+    </svg>
+    """
+    return svg
+
+
+def update_recovery_diagram(placeholder, state, processed_e=0):
+    with placeholder:
+        st.components.v1.html(generate_recovery_svg(state, processed_e), height=210)
+
+
+# ============================================================
+# ANIMATED DYNAMIC SVG TOPOLOGY DIAGRAM
+# ============================================================
+def generate_svg_cluster(statuses, processed, windows_closed, dlq_counts, ckpt_sizes, highlight_node=None, tick=0):
+    n = len(statuses)
+    width = 900
+    height = 420
+    
+    svg = f"""
+    <div style="display: flex; justify-content: center; width: 100%;">
+    <svg width="100%" height="{height}" viewBox="0 0 {width} {height}" xmlns="http://www.w3.org/2000/svg" style="background:#090D16; border-radius:14px; font-family:'Outfit', sans-serif; border: 1px solid #1E293B; box-shadow: 0px 10px 30px rgba(0,0,0,0.5);">
+      <style>
+        .glow {{ filter: drop-shadow(0px 0px 8px rgba(59, 130, 246, 0.6)); }}
+        .glow-green {{ filter: drop-shadow(0px 0px 10px rgba(16, 185, 129, 0.7)); }}
+        .glow-red {{ filter: drop-shadow(0px 0px 10px rgba(239, 68, 68, 0.8)); }}
+        .pulse-green {{ animation: pulse-g 2s infinite alternate; }}
+        .pulse-red {{ animation: pulse-r 1s infinite alternate; }}
+        .node-card {{ transition: all 0.3s ease; }}
+        @keyframes pulse-g {{
+          0% {{ fill: #059669; filter: drop-shadow(0 0 2px #10B981); }}
+          100% {{ fill: #4ADE80; filter: drop-shadow(0 0 10px #4ADE80); }}
+        }}
+        @keyframes pulse-r {{
+          0% {{ fill: #B91C1C; filter: drop-shadow(0 0 2px #EF4444); }}
+          100% {{ fill: #F87171; filter: drop-shadow(0 0 10px #F87171); }}
+        }}
+        .packet-flow {{
+          stroke-dasharray: 8, 12;
+          animation: flow 3s linear infinite;
+        }}
+        .packet-flow-fast {{
+          stroke-dasharray: 5, 8;
+          animation: flow 1.2s linear infinite;
+        }}
+        .packet-flow-red {{
+          stroke-dasharray: 6, 10;
+          animation: flow 2.5s linear infinite;
+        }}
+        @keyframes flow {{
+          to {{ stroke-dashoffset: -100; }}
+        }}
+      </style>
+      
+      <!-- Gradients -->
+      <defs>
+        <linearGradient id="blueGrad" x1="0%" y1="0%" x2="100%" y2="100%">
+          <stop offset="0%" stop-color="#1E3A8A" />
+          <stop offset="100%" stop-color="#3B82F6" />
+        </linearGradient>
+        <linearGradient id="purpleGrad" x1="0%" y1="0%" x2="100%" y2="100%">
+          <stop offset="0%" stop-color="#5B21B6" />
+          <stop offset="100%" stop-color="#7C3AED" />
+        </linearGradient>
+        <linearGradient id="amberGrad" x1="0%" y1="0%" x2="100%" y2="100%">
+          <stop offset="0%" stop-color="#78350F" />
+          <stop offset="100%" stop-color="#F59E0B" />
+        </linearGradient>
+      </defs>
+    """
+    
+    # Ingestion Box
+    ing_x, ing_y, ing_w, ing_h = 375, 15, 150, 45
+    # Partitioner Box
+    part_x, part_y, part_w, part_h = 350, 95, 200, 45
+    # Coordinator Box
+    coor_x, coor_y, coor_w, coor_h = 350, 360, 200, 45
+    
+    # Ingestion Source
+    svg += f"""
+      <rect x="{ing_x}" y="{ing_y}" width="{ing_w}" height="{ing_h}" rx="8" fill="url(#amberGrad)" stroke="#F59E0B" stroke-width="1.5" />
+      <text x="{ing_x + ing_w/2}" y="{ing_y + 27}" fill="#FEF3C7" font-size="12" font-weight="bold" text-anchor="middle">📦 Dataset Stream</text>
+    """
+    
+    # Partitioner
+    svg += f"""
+      <rect x="{part_x}" y="{part_y}" width="{part_w}" height="{part_h}" rx="8" fill="url(#blueGrad)" stroke="#2563EB" stroke-width="1.5" />
+      <text x="{part_x + part_w/2}" y="{part_y + 27}" fill="#E0F2FE" font-size="12" font-weight="bold" text-anchor="middle">⚖️ Partitioner : hash(host)%N</text>
+    """
+    
+    # Connection Ingestion -> Partitioner
+    svg += f"""
+      <path d="M 450,{ing_y+ing_h} L 450,{part_y}" stroke="#475569" stroke-width="2" />
+      <path class="packet-flow" d="M 450,{ing_y+ing_h} L 450,{part_y}" stroke="#F59E0B" stroke-width="2.5" />
+    """
+    
+    # Spacing for nodes
+    node_y = 200
+    node_w, node_h = 135, 105
+    gap = 20
+    total_w = n * node_w + (n - 1) * gap
+    start_x = (width - total_w) / 2
+    
+    centers_x = []
+    for i in range(n):
+        cx = start_x + i * (node_w + gap) + node_w / 2
+        centers_x.append(cx)
+        
+        status = statuses[i]
+        is_highlight = (highlight_node == i)
+        
+        if status == "alive":
+            bg_color = "#1E293B"
+            border_color = "#10B981" if is_highlight else "#334155"
+            header_bg = "#065F46" if is_highlight else "#0F172A"
+            status_text = "🟢 ALIVE"
+            status_class = "pulse-green"
+            line_color = "#10B981" if is_highlight else "#475569"
+            line_class = "packet-flow-fast" if is_highlight else "packet-flow"
+            line_stroke = "#059669" if is_highlight else "#334155"
+        else:
+            bg_color = "#270F15"
+            border_color = "#EF4444"
+            header_bg = "#7F1D1D"
+            status_text = "💀 DEAD"
+            status_class = "pulse-red"
+            line_color = "#EF4444"
+            line_class = "packet-flow-red"
+            line_stroke = "#B91C1C"
+            
+        # Partitioner -> Node Connection (curved quadratic bezier)
+        svg += f"""
+          <path d="M 450,140 Q {cx},160 {cx},{node_y}" stroke="{line_stroke}" stroke-width="2" fill="none" stroke-dasharray="{"6,6" if status == "dead" else "none"}"/>
+          <path class="{line_class}" d="M 450,140 Q {cx},160 {cx},{node_y}" stroke="{line_color}" stroke-width="2" fill="none" />
+        """
+        
+        # Node -> Coordinator Connection
+        svg += f"""
+          <path d="M {cx},{node_y+node_h} Q {cx},{coor_y-20} 450,{coor_y}" stroke="{"#B91C1C" if status == "dead" else "#4C1D95"}" stroke-width="1.5" fill="none" stroke-dasharray="{"6,6" if status == "dead" else "none"}"/>
+          {" " if status == "dead" else f'<path class="packet-flow" d="M {cx},{node_y+node_h} Q {cx},{coor_y-20} 450,{coor_y}" stroke="#A78BFA" stroke-width="1.8" fill="none" />'}
+        """
+        
+        # Card body
+        card_x = cx - node_w / 2
+        card_y = node_y
+        glow_class = "glow-green" if (status == "alive" and is_highlight) else ("glow-red" if status == "dead" else "")
+        
+        svg += f"""
+          <g class="node-card {glow_class}">
+            <rect x="{card_x}" y="{card_y}" width="{node_w}" height="{node_h}" rx="10" fill="{bg_color}" stroke="{border_color}" stroke-width="2" />
+            <rect x="{card_x+1}" y="{card_y+1}" width="{node_w-2}" height="24" rx="8 8 0 0" fill="{header_bg}" />
+            <text x="{cx}" y="{card_y+16}" fill="#F8FAFC" font-size="10.5" font-weight="bold" text-anchor="middle">Node {i}</text>
+            <circle class="{status_class}" cx="{card_x + 18}" cy="{card_y+12}" r="4" />
+            
+            <text x="{card_x+12}" y="{card_y+43}" fill="#94A3B8" font-size="8.5" font-family="monospace">Proc: {processed[i]:,}</text>
+            <text x="{card_x+12}" y="{card_y+56}" fill="#94A3B8" font-size="8.5" font-family="monospace">Wins: {windows_closed[i]}</text>
+            <text x="{card_x+12}" y="{card_y+69}" fill="{"#F87171" if dlq_counts[i] > 0 else "#94A3B8"}" font-size="8.5" font-family="monospace" font-weight="{"bold" if dlq_counts[i] > 0 else "normal"}">DLQ: {dlq_counts[i]:,}</text>
+            <text x="{card_x+12}" y="{card_y+82}" fill="#94A3B8" font-size="8.5" font-family="monospace">Ckpt: {ckpt_sizes[i]:,} B</text>
+            
+            <rect x="{cx - 28}" y="{card_y+88}" width="56" height="12" rx="4" fill="{"#065F46" if status == "alive" else "#7F1D1D"}" />
+            <text x="{cx}" y="{card_y+97}" fill="#F8FAFC" font-size="8.5" font-weight="bold" text-anchor="middle">{status.upper()}</text>
+          </g>
+        """
+        
+    # Coordinator Box
+    svg += f"""
+      <rect x="{coor_x}" y="{coor_y}" width="{coor_w}" height="{coor_h}" rx="8" fill="url(#purpleGrad)" stroke="#6D28D9" stroke-width="1.5" />
+      <text x="{coor_x + coor_w/2}" y="{coor_y + 27}" fill="#F5F3FF" font-size="12" font-weight="bold" text-anchor="middle">🧮 Coordinator (merge metrics)</text>
+    </svg>
+    </div>
+    """
+    return svg
+
+
+# ============================================================
+# UNIFIED SIMULATION STEP EXECUTOR
+# ============================================================
+def execute_step(state, j, cfg):
+    """Processes a single event at index j, triggering any scheduled actions."""
+    # 1. Trigger scheduled actions
+    schedule = state.get("schedule", [])
+    for item in schedule:
+        act_type = item[0]
+        nid = item[1]
+        at = item[2]
+        params = item[3] if len(item) > 3 else {}
+        label = item[4] if len(item) > 4 else ""
+        if at == j:
+            trigger_action(state, act_type, nid, params, label, cfg)
+
+    # 2. Process the event
+    row = state["rows"][j]
+    host = getattr(row, "host", "unknown")
+    n = len(state["engines"])
+    nid = partition_key(host, n)
+    ev = {"event_id": row.event_id, "event_time": row.event_time, "status": row.status}
+
+    if state["status"][nid] == "alive":
+        state["engines"][nid].process(ev)
+        state["node_processed"][nid] += 1
+    else:
+        # Buffer to disk DLQ file (append-only JSONL)
+        with open(state["dlq_paths"][nid], "a", encoding="utf-8") as f:
+            f.write(json.dumps(ev, ensure_ascii=False) + "\n")
+        state["pending"][nid].append(ev)
+        state["node_buffered_total"][nid] += 1
+
+
+def trigger_action(state, act_type, nid, params, label, cfg):
+    """Triggers a single scheduled simulation action."""
+    cursor_now = state["cursor"]
+    if act_type == "kill":
+        if state["status"][nid] == "alive":
+            kill_node(state, nid)
+    elif act_type == "revive":
+        if state["status"][nid] == "dead":
+            revive_node(state, nid, cfg)
+    elif act_type == "ooo_spike":
+        frac = params.get("fraction", 0.8)
+        dur = params.get("duration", 500)
+        slice_end = min(cursor_now + dur, len(state["rows"]))
+        if slice_end > cursor_now:
+            import random
+            sub_rows = state["rows"][cursor_now:slice_end]
+            modified = []
+            for r in sub_rows:
+                if random.random() < frac:
+                    new_delay = random.uniform(5.0, 15.0)
+                    modified.append(r._replace(arrival_time=r.event_time + new_delay))
+                else:
+                    modified.append(r)
+            modified.sort(key=lambda x: x.arrival_time)
+            state["rows"][cursor_now:slice_end] = modified
+            state["log"].append(
+                f"[cursor={cursor_now:,}] 🌪️ BÃO LOG (OOO SPIKE) kích hoạt: xáo trộn {frac*100:.0f}% dữ liệu trễ trong {dur} events"
+            )
+            state.setdefault("events_markers", []).append((cursor_now, "ooo_spike", nid))
+    elif act_type == "load_burst":
+        mult = params.get("multiplier", 3.0)
+        dur = params.get("duration", 1000)
+        state["burst_multiplier"] = mult
+        state["burst_end_at"] = cursor_now + dur
+        state["log"].append(
+            f"[cursor={cursor_now:,}] ⚡ TẢI TĂNG ĐỘT NGỘT (LOAD BURST) kích hoạt: tăng tải {mult}x trong {dur} events"
+        )
+        state.setdefault("events_markers", []).append((cursor_now, "load_burst", nid))
+    elif act_type == "delay_inject":
+        delay = params.get("delay_s", 5.0)
+        dur = params.get("duration", 500)
+        slice_end = min(cursor_now + dur, len(state["rows"]))
+        if slice_end > cursor_now:
+            state["rows"][cursor_now:slice_end] = [
+                r._replace(arrival_time=r.arrival_time + delay)
+                for r in state["rows"][cursor_now:slice_end]
+            ]
+            state["log"].append(
+                f"[cursor={cursor_now:,}] ⏳ TRỄ ĐƯỜNG TRUYỀN (DELAY INJECT) kích hoạt: thêm {delay}s trễ trong {dur} events"
+            )
+            state.setdefault("events_markers", []).append((cursor_now, "delay_inject", nid))
+
+
+# ============================================================
 # LOG COLORIZATION — gắn class CSS theo keyword
 # ============================================================
+
 def colorize_log_line(line: str) -> str:
     """Bọc 1 dòng log bằng <span class='log-*'> theo keyword chính.
 
@@ -504,13 +906,14 @@ def render_sim_evolution_chart(container, state, total_events):
     fig.update_layout(
         height=320,
         margin=dict(l=10, r=10, t=30, b=30),
-        plot_bgcolor="#F8FAFC",
-        paper_bgcolor="#FFFFFF",
-        xaxis=dict(title="Cursor (events processed)", gridcolor="#E5E7EB",
+        plot_bgcolor="#0F172A",
+        paper_bgcolor="#0F172A",
+        font=dict(color="#94A3B8"),
+        xaxis=dict(title="Cursor (events processed)", gridcolor="#1E293B",
                    range=[0, max(total_events, max(xs) if xs else 1)]),
-        yaxis=dict(title="Completeness %", color="#059669",
-                   range=[0, 105], gridcolor="#E5E7EB"),
-        yaxis2=dict(title="DLQ buffered", color="#DC2626",
+        yaxis=dict(title="Completeness %", color="#10B981",
+                   range=[0, 105], gridcolor="#1E293B"),
+        yaxis2=dict(title="DLQ buffered", color="#EF4444",
                     overlaying="y", side="right",
                     showgrid=False),
         yaxis3=dict(overlaying="y", side="right",
@@ -575,48 +978,121 @@ st.set_page_config(
 # ============================================================
 st.markdown("""
 <style>
-    .hero {
-        background: linear-gradient(135deg, #1E3A8A 0%, #3B82F6 60%, #06B6D4 100%);
-        color: #FFFFFF;
-        padding: 20px 26px;
-        border-radius: 12px;
-        margin-bottom: 14px;
+    @import url('https://fonts.googleapis.com/css2?family=Outfit:wght@300;400;600;800&family=JetBrains+Mono:wght@400;700&display=swap');
+
+    html, body, [data-testid="stAppViewContainer"], .main {
+        font-family: 'Outfit', 'Inter', sans-serif !important;
+        background-color: #0F172A;
+        color: #E2E8F0;
     }
-    .hero h1 { margin: 0; font-size: 1.85rem; font-weight: 800; }
-    .hero p  { margin: 6px 0 0 0; font-size: 0.98rem; opacity: 0.92; }
+
+    .stTabs [data-baseweb="tab-list"] {
+        gap: 8px;
+        background-color: #1E293B;
+        padding: 6px 10px;
+        border-radius: 12px;
+        border: 1px solid #334155;
+    }
+
+    .stTabs [data-baseweb="tab"] {
+        font-family: 'Outfit', sans-serif !important;
+        font-size: 0.92rem;
+        font-weight: 600;
+        color: #94A3B8;
+        background-color: transparent;
+        border: none;
+        border-radius: 8px;
+        padding: 6px 14px;
+        transition: all 0.25s ease;
+    }
+
+    .stTabs [data-baseweb="tab"]:hover {
+        color: #F8FAFC;
+        background-color: #334155;
+    }
+
+    .stTabs [data-baseweb="tab"][aria-selected="true"] {
+        color: #FFFFFF !important;
+        background-color: #3B82F6 !important;
+        box-shadow: 0px 4px 12px rgba(59, 130, 246, 0.4);
+    }
+
+    .hero {
+        background: linear-gradient(135deg, #1E3A8A 0%, #3B82F6 50%, #0D9488 100%);
+        color: #FFFFFF;
+        padding: 22px 28px;
+        border-radius: 16px;
+        margin-bottom: 18px;
+        box-shadow: 0px 8px 24px rgba(0, 0, 0, 0.3);
+        border: 1px solid rgba(255, 255, 255, 0.1);
+        position: relative;
+        overflow: hidden;
+    }
+
+    .hero h1 {
+        font-family: 'Outfit', sans-serif !important;
+        margin: 0;
+        font-size: 2.10rem;
+        font-weight: 800;
+        letter-spacing: -0.5px;
+    }
+
+    .hero p {
+        margin: 8px 0 0 0;
+        font-size: 1.0rem;
+        opacity: 0.9;
+        font-weight: 300;
+    }
+
     .badge {
         display: inline-block;
-        background: rgba(255,255,255,0.18);
-        color: #FFFFFF;
-        padding: 3px 10px;
+        background: rgba(255, 255, 255, 0.12);
+        color: #F1F5F9;
+        padding: 4px 12px;
         border-radius: 999px;
         font-size: 0.78rem;
-        margin: 8px 6px 0 0;
-        border: 1px solid rgba(255,255,255,0.30);
+        font-weight: 500;
+        margin: 10px 8px 0 0;
+        border: 1px solid rgba(255, 255, 255, 0.18);
+        backdrop-filter: blur(4px);
     }
+
     .demo-log {
-        background-color: #0F172A;
+        background-color: #030712;
         color: #94A3B8;
-        font-family: 'JetBrains Mono', Consolas, monospace;
-        padding: 12px 14px;
-        border-radius: 8px;
-        height: 260px;
+        font-family: 'JetBrains Mono', Consolas, monospace !important;
+        padding: 14px;
+        border-radius: 10px;
+        height: 270px;
         overflow-y: auto;
         white-space: pre-wrap;
-        font-size: 0.82rem;
-        line-height: 1.45;
+        font-size: 0.8rem;
+        line-height: 1.5;
+        border: 1px solid #1E293B;
+        box-shadow: inset 0px 4px 10px rgba(0,0,0,0.4);
     }
-    .demo-log .log-kill    { color: #FCA5A5; }
-    .demo-log .log-revive  { color: #6EE7B7; }
-    .demo-log .log-stream  { color: #93C5FD; }
+
+    .demo-log .log-kill    { color: #F87171; font-weight: bold; }
+    .demo-log .log-revive  { color: #4ADE80; font-weight: bold; }
+    .demo-log .log-stream  { color: #60A5FA; }
     .demo-log .log-sched   { color: #FBBF24; }
-    .demo-log .log-info    { color: #CBD5E1; }
-    .stTabs [data-baseweb="tab-list"] button {
-        font-size: 0.95rem;
-        font-weight: 600;
+    .demo-log .log-info    { color: #94A3B8; }
+
+    /* Custom modern styling for containers */
+    div[data-testid="stMetricValue"] {
+        font-family: 'Outfit', sans-serif !important;
+        font-weight: 800 !important;
+        color: #3B82F6;
+    }
+
+    /* Sidebar updates */
+    section[data-testid="stSidebar"] {
+        background-color: #0B0F19 !important;
+        border-right: 1px solid #1E293B;
     }
 </style>
 """, unsafe_allow_html=True)
+
 
 # ============================================================
 # SIDEBAR
@@ -672,14 +1148,16 @@ st.markdown("""
 # ============================================================
 # TAB LAYOUT
 # ============================================================
-tab_overview, tab_stream, tab_sweep, tab_demos, tab_dist, tab_kill = st.tabs([
+tab_overview, tab_report, tab_stream, tab_sweep, tab_demos, tab_dist, tab_sim = st.tabs([
     "🏠 Tổng quan dự án",
+    "📖 Tài liệu báo cáo",
     "📈 Live Stream",
     "📊 Sweep Analysis",
     "🛡️ Recovery & Backpressure",
     "🖥️ Distributed Cluster",
-    "🔪 Kill Node Live",
+    "🔪 Simulation Lab",
 ])
+
 
 # ============================================================
 # TAB 0 — TỔNG QUAN / OVERVIEW
@@ -860,27 +1338,180 @@ with tab_overview:
             width="stretch",
         )
 
-        fig_q, axq = plt.subplots(figsize=(8, 3.2))
-        axq.plot([r["allowed_lateness_ms"] for r in quick_rows],
-                 [r["data_completeness_pct"] for r in quick_rows],
-                 "o-", color="#1D4ED8", lw=2, label="Completeness %")
-        axq2 = axq.twinx()
-        axq2.plot([r["allowed_lateness_ms"] for r in quick_rows],
-                  [r["avg_result_latency_ms"] for r in quick_rows],
-                  "s--", color="#DC2626", lw=2, label="Result Latency (ms)")
-        axq.set_xlabel("Wait Time (ms)")
-        axq.set_ylabel("Completeness %", color="#1D4ED8")
-        axq2.set_ylabel("Result Latency (ms)", color="#DC2626")
-        axq.grid(alpha=0.3)
-        fig_q.tight_layout()
-        st.pyplot(fig_q)
+        import plotly.graph_objects as go
+        fig_q = go.Figure()
+        fig_q.add_trace(go.Scatter(
+            x=[r["allowed_lateness_ms"] for r in quick_rows],
+            y=[r["data_completeness_pct"] for r in quick_rows],
+            mode="lines+markers",
+            name="Độ đầy đủ (Completeness %)",
+            line=dict(color="#3B82F6", width=3),
+            marker=dict(size=9, color="#3B82F6", line=dict(color="white", width=1.5)),
+            hovertemplate="Wait %{x}ms<br>Completeness %{y:.2f}%<extra></extra>"
+        ))
+        fig_q.add_trace(go.Scatter(
+            x=[r["allowed_lateness_ms"] for r in quick_rows],
+            y=[r["avg_result_latency_ms"] for r in quick_rows],
+            mode="lines+markers",
+            name="Độ trễ (Result Latency ms)",
+            line=dict(color="#EF4444", width=2, dash="dash"),
+            marker=dict(size=8, symbol="square", color="#EF4444", line=dict(color="white", width=1.5)),
+            yaxis="y2",
+            hovertemplate="Wait %{x}ms<br>Latency %{y:.1f}ms<extra></extra>"
+        ))
+        fig_q.update_layout(
+            height=260,
+            margin=dict(l=10, r=10, t=30, b=30),
+            plot_bgcolor="#0F172A",
+            paper_bgcolor="#0F172A",
+            font=dict(color="#94A3B8"),
+            xaxis=dict(title="Wait Time (ms)", gridcolor="#1E293B"),
+            yaxis=dict(title="Completeness %", color="#3B82F6", gridcolor="#1E293B"),
+            yaxis2=dict(title="Latency (ms)", color="#EF4444", overlaying="y", side="right", showgrid=False),
+            legend=dict(orientation="h", yanchor="bottom", y=1.05, x=0),
+            hovermode="x unified"
+        )
+        st.plotly_chart(fig_q, width="stretch", key="quick_demo_chart")
         st.success("✅ Demo nhanh hoàn tất! Chuyển sang các tab khác để chạy các kịch bản đầy đủ.")
 
 
 # ============================================================
-# TAB 1 — LIVE STREAM
+# TAB 1 — BÁO CÁO HỆ THỐNG
+# ============================================================
+with tab_report:
+    report_path = "SYSTEM_REPORT.md"
+    if os.path.exists(report_path):
+        with open(report_path, "r", encoding="utf-8") as f:
+            report_md = f.read()
+        
+        # Style the report container nicely
+        st.markdown("""
+        <div style="background-color: #1E293B; border: 1px solid #334155; border-radius: 12px; padding: 24px; box-shadow: 0px 4px 15px rgba(0,0,0,0.25); margin-bottom: 24px;">
+            <div style="text-align: center; margin-bottom: 20px;">
+                <span style="background-color: #3B82F6; color: white; padding: 4px 12px; border-radius: 999px; font-size: 0.8rem; font-weight: bold;">TÀI LIỆU CHÍNH THỨC</span>
+            </div>
+        """, unsafe_allow_html=True)
+        st.markdown(report_md)
+        st.markdown("</div>", unsafe_allow_html=True)
+    else:
+        st.warning("Không tìm thấy file SYSTEM_REPORT.md trong thư mục gốc.")
+
+
+# ============================================================
+# TAB 2 — LIVE STREAM
 # ============================================================
 with tab_stream:
+    st.markdown("""
+<style>
+    .ingestion-card {
+        background: linear-gradient(135deg, #1E293B 0%, #0F172A 100%);
+        border: 1px solid #334155;
+        border-radius: 12px;
+        padding: 20px;
+        box-shadow: 0 8px 32px rgba(0, 0, 0, 0.4);
+        margin-bottom: 20px;
+    }
+    .card-header {
+        display: flex;
+        justify-content: space-between;
+        align-items: center;
+        border-bottom: 1px solid #334155;
+        padding-bottom: 12px;
+        margin-bottom: 16px;
+    }
+    .status-badge {
+        padding: 4px 12px;
+        border-radius: 999px;
+        font-size: 0.75rem;
+        font-weight: bold;
+        text-transform: uppercase;
+        letter-spacing: 0.5px;
+    }
+    .status-badge.ingesting {
+        background-color: rgba(16, 185, 129, 0.15);
+        color: #10B981;
+        border: 1px solid #10B981;
+        box-shadow: 0 0 10px rgba(16, 185, 129, 0.3);
+        animation: pulse-green-badge 2s infinite;
+    }
+    .status-badge.completed {
+        background-color: rgba(59, 130, 246, 0.15);
+        color: #3B82F6;
+        border: 1px solid #3B82F6;
+    }
+    .status-badge.paused {
+        background-color: rgba(245, 158, 11, 0.15);
+        color: #F59E0B;
+        border: 1px solid #F59E0B;
+    }
+    .status-badge.ready {
+        background-color: rgba(148, 163, 184, 0.15);
+        color: #94A3B8;
+        border: 1px solid #94A3B8;
+    }
+    .card-grid {
+        display: grid;
+        grid-template-columns: repeat(4, 1fr);
+        gap: 16px;
+        margin-bottom: 16px;
+    }
+    .metric-box {
+        background: rgba(30, 41, 59, 0.5);
+        border: 1px solid #334155;
+        border-radius: 8px;
+        padding: 12px;
+        display: flex;
+        flex-direction: column;
+    }
+    .metric-label {
+        font-size: 0.75rem;
+        color: #94A3B8;
+        margin-bottom: 4px;
+    }
+    .metric-val {
+        font-size: 1.25rem;
+        font-weight: bold;
+        color: #F8FAFC;
+    }
+    .metric-val.text-red {
+        color: #EF4444 !important;
+    }
+    .metric-val.text-blue {
+        color: #3B82F6 !important;
+    }
+    .queue-monitor {
+        background: rgba(15, 23, 42, 0.4);
+        border: 1px solid #1E293B;
+        border-radius: 8px;
+        padding: 12px;
+    }
+    .queue-info {
+        display: flex;
+        justify-content: space-between;
+        font-size: 0.8rem;
+        color: #94A3B8;
+        margin-bottom: 6px;
+    }
+    .queue-bar-container {
+        height: 8px;
+        background: #1E293B;
+        border-radius: 4px;
+        overflow: hidden;
+    }
+    .queue-bar {
+        height: 100%;
+        background: linear-gradient(90deg, #3B82F6 0%, #10B981 100%);
+        border-radius: 4px;
+        transition: width 0.3s ease;
+    }
+    @keyframes pulse-green-badge {
+        0% { box-shadow: 0 0 0 0 rgba(16, 185, 129, 0.4); }
+        70% { box-shadow: 0 0 0 10px rgba(16, 185, 129, 0); }
+        100% { box-shadow: 0 0 0 0 rgba(16, 185, 129, 0); }
+    }
+</style>
+""", unsafe_allow_html=True)
+
     st.header("📈 Trực quan hóa Live Stream (Data in Motion)")
     st.markdown(
         "Cửa sổ thời gian được gán theo **event-time**. Stream log nạp theo **arrival-time** "
@@ -995,53 +1626,121 @@ with tab_stream:
     def _render_stream_ui(eng, src, end_idx, total_rows, qlen):
         uniq = max(eng.metrics["unique"], 1)
         comp = 100.0 * eng.metrics["on_time"] / uniq
-        mc1, mc2, mc3, mc4 = st.columns(4)
-        mc1.metric("Completeness", f"{comp:.2f}%")
-        # Watermark: -inf (chưa có event) / +inf (sau flush) → lọc trước
+        
+        # Calculate watermark string
         wm = eng.watermark
         if wm == float("-inf"):
-            mc2.metric("Watermark", "—")
+            wm_val = "—"
         elif wm == float("inf"):
-            mc2.metric("Watermark", "∞ (đã flush)")
+            wm_val = "∞ (đã flush)"
         else:
             try:
                 if src == "Synthetic":
                     wm_val = f"{wm - 1_700_000_000:.1f} s"
                 else:
                     wm_val = time.strftime("%H:%M:%S", time.localtime(wm))
-                mc2.metric("Watermark", wm_val)
-            except (OverflowError, ValueError, OSError):
-                mc2.metric("Watermark", f"{wm:.0f}")
-        mc3.metric("Late dropped", f"{eng.metrics['late_dropped']}")
-        mc4.metric("Duplicates", f"{eng.metrics['duplicates']}")
+            except:
+                wm_val = f"{wm:.0f}"
+                
+        # Determine state for status badge
+        active = st.session_state.get("stream_active", False)
+        done = st.session_state.get("stream_done", False)
+        cursor = st.session_state.get("stream_cursor", 0)
+        
+        if active:
+            status_text = "INGESTING"
+            status_class = "ingesting"
+        elif done:
+            status_text = "COMPLETED"
+            status_class = "completed"
+        elif cursor > 0:
+            status_text = "PAUSED"
+            status_class = "paused"
+        else:
+            status_text = "READY"
+            status_class = "ready"
+            
+        q_pct = min(100.0 * qlen / max(eng.max_queue, 1), 100.0)
+        
+        # Custom HTML Ingestion Monitor Card
+        html_card = f"""
+        <div class="ingestion-card">
+          <div class="card-header">
+             <h3 style="margin:0; font-family:'Outfit', sans-serif;">⚡ Ingestion Monitor</h3>
+             <span class="status-badge {status_class}">{status_text}</span>
+          </div>
+          <div class="card-grid">
+             <div class="metric-box">
+               <span class="metric-label">Completeness</span>
+               <span class="metric-val">{comp:.2f}%</span>
+             </div>
+             <div class="metric-box">
+               <span class="metric-label">Watermark</span>
+               <span class="metric-val">{wm_val}</span>
+             </div>
+             <div class="metric-box">
+               <span class="metric-label">Late Dropped</span>
+               <span class="metric-val text-red">{eng.metrics['late_dropped']:,}</span>
+             </div>
+             <div class="metric-box">
+               <span class="metric-label">Duplicates</span>
+               <span class="metric-val text-blue">{eng.metrics['duplicates']:,}</span>
+             </div>
+          </div>
+          <div class="queue-monitor">
+             <div class="queue-info">
+               <span>Queue depth: <strong>{qlen:,} / {eng.max_queue:,}</strong></span>
+               <span>{q_pct:.1f}% capacity</span>
+             </div>
+             <div class="queue-bar-container">
+               <div class="queue-bar" style="width: {q_pct}%"></div>
+             </div>
+          </div>
+        </div>
+        """
+        st.markdown(html_card, unsafe_allow_html=True)
 
-        cc1, cc2 = st.columns([3, 1])
-        with cc1:
-            if eng.closed_windows:
-                cw_keys = sorted(eng.closed_windows.keys())
-                if src == "Synthetic":
-                    cw = pd.Series({k - 1_700_000_000: eng.closed_windows[k]["count"]
-                                    for k in cw_keys})
-                    st.bar_chart(cw, horizontal=True,
-                                 x_label="Events (CLOSED)",
-                                 y_label="Window Start (s tương đối)")
-                else:
-                    cw = pd.Series({time.strftime("%H:%M:%S", time.localtime(k)):
-                                    eng.closed_windows[k]["count"] for k in cw_keys})
-                    st.bar_chart(cw, horizontal=True,
-                                 x_label="Events (CLOSED)",
-                                 y_label="Window time")
+        # Closed windows Plotly bar chart
+        if eng.closed_windows:
+            cw_keys = sorted(eng.closed_windows.keys())
+            if src == "Synthetic":
+                cw_x = [f"W {k - 1_700_000_000:.0f}s" for k in cw_keys]
+                cw_y = [eng.closed_windows[k]["count"] for k in cw_keys]
+                x_label = "Cửa sổ (event-time)"
             else:
-                st.caption("Chưa có cửa sổ nào đóng — watermark chưa vượt "
-                           "qua window đầu tiên.")
-        cc2.metric("Queue", f"{qlen} / {eng.max_queue}")
+                cw_x = [time.strftime("%H:%M:%S", time.localtime(k)) for k in cw_keys]
+                cw_y = [eng.closed_windows[k]["count"] for k in cw_keys]
+                x_label = "Thời gian cửa sổ"
+                
+            fig_cw = go.Figure()
+            fig_cw.add_trace(go.Bar(
+                x=cw_x, y=cw_y,
+                marker_color="#3B82F6",
+                hovertemplate="Cửa sổ: %{x}<br>Số sự kiện: %{y:,}<extra></extra>"
+            ))
+            fig_cw.update_layout(
+                height=280, margin=dict(l=10, r=10, t=30, b=30),
+                title=dict(text="📊 Phân phối sự kiện trong các cửa sổ ĐÃ CHỐT",
+                           font=dict(size=12, color="#E2E8F0")),
+                plot_bgcolor="#0F172A", paper_bgcolor="#0F172A",
+                font=dict(color="#94A3B8"),
+                xaxis=dict(title=x_label, gridcolor="#1E293B"),
+                yaxis=dict(title="Events Count", gridcolor="#1E293B"),
+                showlegend=False
+            )
+            st.plotly_chart(fig_cw, width="stretch", key=f"stream_cw_chart_{end_idx}")
+        else:
+            st.info("Chưa có cửa sổ nào đóng — watermark chưa vượt qua window đầu tiên.")
+
         st.progress(end_idx / max(total_rows, 1),
                     text=f"⏱️ Stream: {end_idx:,}/{total_rows:,}")
 
     # ── LIVE STREAM FRAGMENT ────────────────────────────────────────
-    # @st.fragment + st.rerun(scope="fragment"): mỗi chunk CHỈ rerun vùng
-    # này → header / sidebar / tabs KHÔNG bị rerender (hết flicker).
-    @st.fragment
+    # @st.fragment(run_every=...): fragment tự rerun theo timer, chỉ rerun
+    # vùng này → header / sidebar / tabs KHÔNG bị rerender (hết flicker).
+    _stream_interval = 0.5 if st.session_state.get("stream_active") else None
+
+    @st.fragment(run_every=_stream_interval)
     def _stream_live_fragment():
         if "stream_eng" not in st.session_state:
             return
@@ -1054,7 +1753,7 @@ with tab_stream:
         if active:
             cur = st.session_state.stream_cursor
             spd = st.session_state.get("stream_speed_val", 200)
-            chunk = max(int(spd), 50)
+            chunk = max(int(spd * 0.5), 25)
             end_idx = min(cur + chunk, n_total)
             for i in range(cur, end_idx):
                 r = rows_st[i]
@@ -1064,15 +1763,13 @@ with tab_stream:
             last_q = ((end_idx - 1) * 7) % 2500 if end_idx > 0 else 0
             st.session_state.stream_cursor = end_idx
             _render_stream_ui(eng, src, end_idx, n_total, last_q)
-            if end_idx < n_total:
-                time.sleep(0.03)
-                st.rerun(scope="fragment")   # chỉ rerun fragment
-            else:
+            if end_idx >= n_total:
                 eng.flush()
                 st.session_state.stream_done_summary = eng.summary()
                 st.session_state.stream_done = True
                 st.session_state.stream_active = False
                 st.rerun()                   # full rerun → khôi phục UI tĩnh
+            # else: run_every tự rerun fragment cho chunk kế tiếp
         else:
             cur = st.session_state.get("stream_cursor", 0)
             last_q = ((cur - 1) * 7) % 2500 if cur > 0 else 0
@@ -1141,8 +1838,8 @@ with tab_sweep:
             fig_live.add_trace(go.Scatter(
                 x=xs, y=comp, mode="lines+markers",
                 name="Completeness %",
-                line=dict(color="#1D4ED8", width=3),
-                marker=dict(size=10, color="#1D4ED8",
+                line=dict(color="#3B82F6", width=3),
+                marker=dict(size=10, color="#3B82F6",
                             line=dict(color="white", width=2)),
                 hovertemplate="Wait %{x}ms<br>Completeness %{y:.2f}%<extra></extra>",
             ))
@@ -1150,8 +1847,8 @@ with tab_sweep:
                 fig_live.add_trace(go.Scatter(
                     x=xs, y=lat, mode="lines+markers",
                     name="Result latency (ms)",
-                    line=dict(color="#DC2626", width=2, dash="dash"),
-                    marker=dict(size=9, symbol="square", color="#DC2626",
+                    line=dict(color="#EF4444", width=2, dash="dash"),
+                    marker=dict(size=9, symbol="square", color="#EF4444",
                                 line=dict(color="white", width=2)),
                     yaxis="y2",
                     hovertemplate="Wait %{x}ms<br>Latency %{y:.1f}ms<extra></extra>",
@@ -1159,12 +1856,13 @@ with tab_sweep:
             fig_live.update_layout(
                 height=340, margin=dict(l=10, r=10, t=40, b=30),
                 title=dict(text=f"Quét tradeoff curve realtime · {idx+1}/{len(WAIT_TIMES_MS)} điểm",
-                           font=dict(size=12)),
-                plot_bgcolor="#F8FAFC", paper_bgcolor="#FFFFFF",
-                xaxis=dict(title="Wait Time (ms)", gridcolor="#E5E7EB"),
-                yaxis=dict(title="Completeness %", color="#1D4ED8",
-                           gridcolor="#E5E7EB"),
-                yaxis2=dict(title="Latency (ms)", color="#DC2626",
+                           font=dict(size=12, color="#E2E8F0")),
+                plot_bgcolor="#0F172A", paper_bgcolor="#0F172A",
+                font=dict(color="#94A3B8"),
+                xaxis=dict(title="Wait Time (ms)", gridcolor="#1E293B"),
+                yaxis=dict(title="Completeness %", color="#3B82F6",
+                           gridcolor="#1E293B"),
+                yaxis2=dict(title="Latency (ms)", color="#EF4444",
                             overlaying="y", side="right", showgrid=False),
                 legend=dict(orientation="h", yanchor="bottom", y=1.05, x=0),
                 hovermode="x unified",
@@ -1219,27 +1917,27 @@ with tab_sweep:
                             line_width=0, annotation_text="Heuristic zone",
                             annotation_position="top left",
                             annotation_font_size=10,
-                            annotation_font_color="#92400E")
+                            annotation_font_color="#FBBF24")
         if max(xs) > 3500:
             fig_final.add_vrect(x0=3500, x1=max(xs), fillcolor="#10B981",
                                 opacity=0.10, line_width=0,
                                 annotation_text="Strict zone",
                                 annotation_position="top right",
                                 annotation_font_size=10,
-                                annotation_font_color="#065F46")
+                                annotation_font_color="#34D399")
         fig_final.add_trace(go.Scatter(
             x=xs, y=comp, mode="lines+markers",
             name="Completeness %",
-            line=dict(color="#1D4ED8", width=3),
-            marker=dict(size=11, color="#1D4ED8",
+            line=dict(color="#3B82F6", width=3),
+            marker=dict(size=11, color="#3B82F6",
                         line=dict(color="white", width=2)),
             hovertemplate="Wait %{x}ms<br>Completeness %{y:.2f}%<extra></extra>",
         ))
         fig_final.add_trace(go.Scatter(
             x=xs, y=lat, mode="lines+markers",
             name="Result latency (ms)",
-            line=dict(color="#DC2626", width=2.5, dash="dash"),
-            marker=dict(size=10, symbol="square", color="#DC2626",
+            line=dict(color="#EF4444", width=2.5, dash="dash"),
+            marker=dict(size=10, symbol="square", color="#EF4444",
                         line=dict(color="white", width=2)),
             yaxis="y2",
             hovertemplate="Wait %{x}ms<br>Latency %{y:.1f}ms<extra></extra>",
@@ -1247,13 +1945,14 @@ with tab_sweep:
         fig_final.update_layout(
             height=420, margin=dict(l=10, r=10, t=50, b=40),
             title=dict(text="Watermark Trade-off: Completeness vs Wait Time",
-                       font=dict(size=14)),
-            plot_bgcolor="#F8FAFC", paper_bgcolor="#FFFFFF",
+                       font=dict(size=14, color="#E2E8F0")),
+            plot_bgcolor="#0F172A", paper_bgcolor="#0F172A",
+            font=dict(color="#94A3B8"),
             xaxis=dict(title="Wait Time / allowed_lateness (ms)",
-                       gridcolor="#E5E7EB"),
-            yaxis=dict(title="Completeness %", color="#1D4ED8",
-                       range=[min(comp) - 2, 101], gridcolor="#E5E7EB"),
-            yaxis2=dict(title="Latency (ms)", color="#DC2626",
+                       gridcolor="#1E293B"),
+            yaxis=dict(title="Completeness %", color="#3B82F6",
+                       range=[min(comp) - 2, 101], gridcolor="#1E293B"),
+            yaxis2=dict(title="Latency (ms)", color="#EF4444",
                         overlaying="y", side="right", showgrid=False),
             legend=dict(orientation="h", yanchor="bottom", y=1.05, x=0),
             hovermode="x unified",
@@ -1282,6 +1981,8 @@ with tab_demos:
         events_recovery = st.number_input("Số log demo", min_value=1000, max_value=50000, value=5000, step=1000, key="recovery_events")
         run_recovery_btn = st.button("▶️ Chạy Crash Recovery")
         recovery_log = st.empty()
+        recovery_diag_placeholder = st.empty()
+        update_recovery_diagram(recovery_diag_placeholder, "init")
 
         if run_recovery_btn:
             log_output = []
@@ -1290,6 +1991,7 @@ with tab_demos:
                 recovery_log.markdown(f'<div class="demo-log">{"".join(log_output)}</div>', unsafe_allow_html=True)
                 time.sleep(0.4)
 
+            update_recovery_diagram(recovery_diag_placeholder, "eng1_running", processed_e=0)
             log_print("🚀 Khởi chạy Crash Recovery Demo...\n")
             df = generate_logs(n_events=events_recovery)
             rows = list(df.itertuples(index=False))
@@ -1297,11 +1999,17 @@ with tab_demos:
             ckpt_path = os.path.join(tempfile.gettempdir(), "web_recovery.json")
 
             log_print("⚙️ Tạo Engine 1 (window=10s, wait=2s) và nạp 50% dữ liệu đầu...\n")
-            eng = WatermarkEngine(window_size_s=10.0, allowed_lateness_s=2.0,
-                                  checkpoint_interval=100, checkpoint_path=ckpt_path)
+            _rec_cfg = EngineConfig(checkpoint_interval=100)
+            eng = WatermarkEngine(checkpoint_path=ckpt_path, **_rec_cfg.to_engine_kwargs())
             for r in rows[:half]:
                 eng.process({"event_id": r.event_id, "event_time": r.event_time, "status": r.status})
+            
+            update_recovery_diagram(recovery_diag_placeholder, "eng1_running", processed_e=half)
+            log_print("💾 Ghi Checkpoint Atomic lên đĩa...\n")
             eng.checkpoint()
+            
+            update_recovery_diagram(recovery_diag_placeholder, "checkpoint", processed_e=half)
+            time.sleep(0.8)
 
             before = dict(eng.metrics)
             log_print(f"📊 Trạng thái Engine 1 TRƯỚC khi crash:\n"
@@ -1311,10 +2019,18 @@ with tab_demos:
 
             log_print("🔥 !!! CRASH !!! Tiến trình DIE đột ngột.\n")
             del eng
+            
+            update_recovery_diagram(recovery_diag_placeholder, "crashed", processed_e=half)
+            time.sleep(1.0)
 
             log_print("🔄 Engine 2 khởi tạo và RESTORE từ checkpoint...\n")
-            eng2 = WatermarkEngine.restore(ckpt_path, window_size_s=10.0, allowed_lateness_s=2.0)
+            update_recovery_diagram(recovery_diag_placeholder, "eng2_restore", processed_e=half)
+            time.sleep(1.2)
+            
+            eng2 = WatermarkEngine.restore(ckpt_path, **_rec_cfg.to_engine_kwargs())
             rm = eng2.metrics
+            
+            update_recovery_diagram(recovery_diag_placeholder, "eng2_running", processed_e=half)
             log_print(f"📊 Trạng thái Engine 2 sau khôi phục:\n"
                       f"   - total = {rm['total']}\n"
                       f"   - unique = {rm['unique']}\n"
@@ -1323,8 +2039,12 @@ with tab_demos:
             log_print("⚙️ Engine 2 tiếp tục xử lý 50% còn lại...\n")
             for r in rows[half:]:
                 eng2.process({"event_id": r.event_id, "event_time": r.event_time, "status": r.status})
+            
+            update_recovery_diagram(recovery_diag_placeholder, "eng2_running", processed_e=len(rows))
             eng2.flush()
             s = eng2.summary()
+            
+            update_recovery_diagram(recovery_diag_placeholder, "done", processed_e=len(rows))
             log_print(f"✅ Sau Recovery: Completeness={s['data_completeness_pct']}% · "
                       f"Duplicates lọc={s['duplicates_filtered']}\n"
                       f"👉 Exactly-Once được đảm bảo!")
@@ -1376,11 +2096,10 @@ with tab_demos:
 
         if run_bp_btn:
             df = generate_logs(n_events=events_bp)
+            _bp_cfg = EngineConfig(checkpoint_interval=5000, max_queue=max_q_size)
             eng = WatermarkEngine(
-                window_size_s=10.0, allowed_lateness_s=2.0,
-                checkpoint_interval=5000,
                 checkpoint_path=os.path.join(tempfile.gettempdir(), "bp_ckpt.json"),
-                max_queue=max_q_size,
+                **_bp_cfg.to_engine_kwargs(),
             )
 
             queue_lengths = []
@@ -1431,7 +2150,7 @@ with tab_demos:
                     # Cumulative drops
                     fig_rt.add_trace(go.Scatter(
                         x=xs_bp, y=drop_counts, mode="lines",
-                        line=dict(color="#DC2626", width=2, dash="dash"),
+                        line=dict(color="#EF4444", width=2, dash="dash"),
                         name="Cumulative drops",
                         hovertemplate="tick %{x}<br>drops %{y:,}<extra></extra>",
                     ))
@@ -1442,23 +2161,24 @@ with tab_demos:
                         annotation_text=f"max_queue = {max_q_size:,}",
                         annotation_position="top right",
                         annotation_font_size=10,
-                        annotation_font_color="#9A3412",
+                        annotation_font_color="#FB923C",
                     )
                     fig_rt.update_layout(
                         height=260, margin=dict(l=10, r=10, t=40, b=30),
                         title=dict(
                             text=f"Backpressure realtime — {i + 1:,} events processed",
-                            font=dict(size=12)),
-                        plot_bgcolor="#F8FAFC", paper_bgcolor="#FFFFFF",
+                            font=dict(size=12, color="#E2E8F0")),
+                        plot_bgcolor="#0F172A", paper_bgcolor="#0F172A",
+                        font=dict(color="#94A3B8"),
                         xaxis=dict(title=f"Sample tick (×{SAMPLE} events)",
-                                   gridcolor="#E5E7EB"),
-                        yaxis=dict(title="Count", gridcolor="#E5E7EB"),
+                                   gridcolor="#1E293B"),
+                        yaxis=dict(title="Count", gridcolor="#1E293B"),
                         legend=dict(orientation="h", yanchor="bottom",
                                     y=1.06, x=0),
                         hovermode="x unified",
                     )
                     bp_plot.plotly_chart(fig_rt, width="stretch",
-                                         key=f"bp_rt_{i // REFRESH}")
+                                         key=f"bp_rt_{i}")
 
                     bp_metrics.markdown(
                         f"| Queue | Drops | Dup | Completeness |\n"
@@ -1549,6 +2269,42 @@ with tab_dist:
             width="stretch",
         )
 
+        # Cluster Tradeoff Sweep Chart
+        st.markdown("#### 📈 Biểu đồ Đánh đổi Cluster (Completeness & Late dropped vs Wait Time)")
+        xs_dist = df_dist["allowed_lateness_ms"].tolist()
+        comp_dist = df_dist["completeness_pct"].tolist()
+        drop_dist = df_dist["late_dropped"].tolist()
+        
+        fig_dist_sweep = go.Figure()
+        fig_dist_sweep.add_trace(go.Scatter(
+            x=xs_dist, y=comp_dist, mode="lines+markers",
+            name="Completeness %",
+            line=dict(color="#10B981", width=3),
+            marker=dict(size=10, color="#10B981", line=dict(color="white", width=2)),
+            hovertemplate="Wait %{x}ms<br>Completeness %{y:.2f}%<extra></extra>",
+        ))
+        fig_dist_sweep.add_trace(go.Scatter(
+            x=xs_dist, y=drop_dist, mode="lines+markers",
+            name="Late dropped (gộp)",
+            line=dict(color="#EF4444", width=2, dash="dash"),
+            marker=dict(size=9, symbol="square", color="#EF4444", line=dict(color="white", width=2)),
+            yaxis="y2",
+            hovertemplate="Wait %{x}ms<br>Late dropped %{y:,}<extra></extra>",
+        ))
+        fig_dist_sweep.update_layout(
+            height=320, margin=dict(l=10, r=10, t=40, b=30),
+            title=dict(text="Cluster Trade-off: Completeness vs allowed_lateness",
+                       font=dict(size=13, color="#E2E8F0")),
+            plot_bgcolor="#0F172A", paper_bgcolor="#0F172A",
+            font=dict(color="#94A3B8"),
+            xaxis=dict(title="Wait Time / allowed_lateness (ms)", gridcolor="#1E293B"),
+            yaxis=dict(title="Completeness %", color="#10B981", gridcolor="#1E293B"),
+            yaxis2=dict(title="Late dropped (gộp)", color="#EF4444", overlaying="y", side="right", showgrid=False),
+            legend=dict(orientation="h", yanchor="bottom", y=1.05, x=0),
+            hovermode="x unified",
+        )
+        st.plotly_chart(fig_dist_sweep, width="stretch", key="dist_sweep_chart")
+
         if first_run_counts:
             mx, mn = max(first_run_counts), min(first_run_counts)
             total = sum(first_run_counts)
@@ -1562,109 +2318,130 @@ with tab_dist:
 
             node_labels = [f"Node {i}" for i in range(dist_nodes)]
             node_df = pd.Series(first_run_counts, index=node_labels)
-            st.bar_chart(node_df, y_label="Events đã xử lý")
-
-            # Plotly cluster topology diagram
-            st.markdown("#### 🗺️ Sơ đồ Cluster Topology (Axon-style)")
-            st.caption(
-                "Mỗi node là một Watermark Engine độc lập. "
-                "Chiều dài thanh dưới mỗi node ≈ số events được định tuyến tới node đó "
-                "bằng `hash(host) % N`."
+            
+            fig_bar = go.Figure()
+            fig_bar.add_trace(go.Bar(
+                x=node_df.index,
+                y=node_df.values,
+                marker_color=['#3B82F6', '#10B981', '#F59E0B', '#EF4444', '#8B5CF6', '#EC4899', '#14B8A6', '#F97316'][:len(node_df)],
+                hovertemplate="Node: %{x}<br>Processed Events: %{y:,}<extra></extra>"
+            ))
+            fig_bar.update_layout(
+                height=320,
+                margin=dict(l=10, r=10, t=30, b=30),
+                plot_bgcolor="#0F172A",
+                paper_bgcolor="#0F172A",
+                font=dict(color="#94A3B8"),
+                xaxis=dict(title="Cluster Node", gridcolor="#1E293B"),
+                yaxis=dict(title="Processed Events Count", gridcolor="#1E293B"),
+                showlegend=False
             )
-            dist_fig = make_cluster_fig(
+            st.plotly_chart(fig_bar, width="stretch", key="dist_bar_chart")
+
+            # Animated SVG cluster topology diagram
+            st.markdown("#### 🗺️ Sơ đồ Cluster Topology")
+            st.caption(
+                "Mỗi node là một Watermark Engine độc lập. Dữ liệu được định tuyến tới các node "
+                "bằng thuật toán băm `hash(host) % N`."
+            )
+            svg_content = generate_svg_cluster(
                 statuses=["alive"] * dist_nodes,
                 processed=first_run_counts,
                 windows_closed=[0] * dist_nodes,
                 dlq_counts=[0] * dist_nodes,
-                cursor=sum(first_run_counts),
-                total=sum(first_run_counts),
+                ckpt_sizes=[0] * dist_nodes,
+                highlight_node=None,
                 tick=0,
             )
-            st.plotly_chart(dist_fig, width="content")
+            st.components.v1.html(svg_content, height=430)
             st.success("Mô phỏng Cluster phân tán thành công!")
 
 
 # ============================================================
 # TAB 5 — KILL NODE LIVE (mô phỏng node sống / chết / hồi sinh)
 # ============================================================
-with tab_kill:
-    st.header("🔪 Kill Node Live — Mô phỏng node sống, chết, hồi sinh")
+with tab_sim:
+    st.header("🔬 Simulation Lab — Nghiên cứu sự cố & Khôi phục phân tán")
     st.markdown(
-        "Mỗi node trong cluster là một **Watermark Engine độc lập** với checkpoint riêng. "
-        "Bấm **💀 Kill** một node giữa stream → events tới node đó được **Coordinator** "
-        "ghi nối tiếp vào **Dead-Letter Queue (DLQ)** trên đĩa "
-        "(`.simdata/dlq/dlq_node_X.jsonl`). Bấm **🔄 Revive** → engine **restore** từ "
-        "checkpoint atomic, **replay** từng dòng trong DLQ và xoá file ⇒ Exactly-Once "
-        "vẫn được giữ, không mất event, không đếm trùng."
+        "Môi trường mô phỏng sự cố phân tán nâng cao. Mỗi node trong cluster là một **Watermark Engine độc lập** "
+        "với checkpoint riêng. Bạn có thể tự kích hoạt lỗi (kill/revive) thủ công hoặc sử dụng các **Kịch bản có sẵn (Scenario Presets)** "
+        "để mô phỏng các hiện tượng bất thường của mạng phân tán (như bão log lệch thứ tự, tăng tải đột ngột, trễ truyền thông)."
     )
 
-    with st.expander("🧠 Buffer được lưu ở đâu? Định dạng gì?", expanded=False):
+    with st.expander("🧠 Cơ chế lưu trữ đệm DLQ & Phục hồi trạng thái", expanded=False):
         st.markdown(
-            "Khi một node chết, Coordinator KHÔNG được drop event. Thay vào đó "
-            "events được **persist xuống đĩa** ở một file JSONL append-only "
-            "(mỗi dòng = 1 event JSON). File để THẲNG trong project tại "
-            "`./.simdata/dlq/` (không phải %TEMP%) để dễ mở bằng VS Code / Explorer:"
-        )
-        st.code(
-            './.simdata/checkpoints/kill_node_2.json   ← state snapshot atomic\n'
-            './.simdata/dlq/dlq_node_2.jsonl           ← Dead-Letter Queue Node 2\n'
-            '{"event_id": "evt_00042", "event_time": 1700000123.45, "status": 200}\n'
-            '{"event_id": "evt_00043", "event_time": 1700000124.10, "status": 404}\n'
-            '{"event_id": "evt_00044", "event_time": 1700000124.71, "status": 200}\n'
-            '...',
-            language="text",
-        )
-        st.markdown(
-            "- **Append-only** ⇒ ghi nhanh, không cần lock phức tạp.\n"
-            "- **Persist trên đĩa** ⇒ nếu chính Coordinator cũng chết, vẫn không mất data.\n"
-            "- **Replay khi revive** ⇒ engine khôi phục từ checkpoint trước, "
-            "sau đó replay từng dòng DLQ. Dedup theo `event_id` đảm bảo Exactly-Once "
-            "kể cả khi cùng 1 event đã ghi vào DLQ nhưng vô tình cũng có trong checkpoint.\n"
-            "- Đây chính là pattern **Outbox / DLQ** thường thấy trong Kafka, "
-            "RabbitMQ, AWS SQS Dead-Letter."
+            "Khi một node bị sập, Partitioner vẫn định tuyến dữ liệu về node đó dựa trên khóa băm. Coordinator sẽ đóng vai trò "
+            "vùng đệm, **ghi nối tiếp (append-only) các log vào Dead-Letter Queue (DLQ) trên đĩa** dưới dạng file JSONL:\n"
+            "`./.simdata/dlq/dlq_node_[id].jsonl`.\n\n"
+            "- **Append-only** giúp tối ưu hóa IOPS và an toàn trước lỗi sập nguồn Coordinator.\n"
+            "- Khi **Revive** (hồi sinh node), node sẽ tự động **restore** trạng thái cửa sổ gần nhất từ Checkpoint Atomic "
+            "(`./.simdata/checkpoints/kill_node_[id].json`), sau đó **replay** toàn bộ log trong DLQ trên đĩa.\n"
+            "- Tập hợp `seen_ids` (id đã xử lý) được lưu cùng checkpoint sẽ tự động lọc trùng (dedup), đảm bảo **Exactly-Once Semantics** "
+            "cho toàn hệ thống."
         )
 
-    # ----- Usage guide -----
-    gu1, gu2, gu3, gu4 = st.columns(4)
-    with gu1, st.container(border=True):
-        st.markdown("**Bước 1 · Cấu hình**")
-        st.caption("Chọn số node, nguồn dữ liệu, tổng events rồi bấm **Khởi tạo Cluster**.")
-    with gu2, st.container(border=True):
-        st.markdown("**Bước 2 · Stream**")
-        st.caption("Bấm **Chạy chunk** từng bước, hoặc **Auto-Play** để stream tự động.")
-    with gu3, st.container(border=True):
-        st.markdown("**Bước 3 · Kill & Revive**")
-        st.caption("Click trực tiếp trên diagram, hoặc dùng nút dưới mỗi node.")
-    with gu4, st.container(border=True):
-        st.markdown("**Bước 4 · DLQ & Recovery**")
-        st.caption("Events của node chết ghi vào `.simdata/dlq/`. Revive → replay → Exactly-Once.")
+    # ----- Scenario Selection -----
+    st.markdown("### 🎬 Kịch bản mô phỏng")
+    preset_options = ["Chạy thủ công (Tự lập lịch)"] + list(PRESETS.keys())
+    selected_preset = st.selectbox(
+        "Chọn kịch bản sự cố (Scenario Presets)",
+        preset_options,
+        key="sim_preset_choice"
+    )
 
-    # ----- Config -----
+    preset_active = (selected_preset != "Chạy thủ công (Tự lập lịch)")
+    if preset_active:
+        scenario = PRESETS[selected_preset]
+        st.info(f"📝 **Mô tả kịch bản**: {scenario.description}")
+        
+        # Draw a beautiful preset timeline summary
+        timeline_desc = []
+        for a in scenario.timeline:
+            icon = "💀 Kill" if a.type == "kill" else ("🔄 Revive" if a.type == "revive" else f"⚡ {a.type.upper()}")
+            timeline_desc.append(f"`{icon} Node {a.target if a.target != -1 else 'Tất cả'} tại cursor {a.at:,}`")
+        st.markdown("**Timeline sự cố sẽ được nạp tự động:** " + " → ".join(timeline_desc))
+
+    # ----- Config / Setup -----
+    st.markdown("### 🏗️ Cấu hình Cluster")
     cc1, cc2, cc3, cc4 = st.columns(4)
-    kill_nodes = cc1.slider("Số Node", 2, 6, 4, key="kill_n_nodes")
-    kill_source = cc2.selectbox("Nguồn", ["Synthetic", "NASA HTTP Real"], key="kill_source")
-    kill_events = cc3.number_input("Tổng events", 2000, 100000, 10000, 1000, key="kill_events_n")
-    kill_chunk = cc4.number_input("Events / step", 100, 5000, 500, 100, key="kill_chunk_n")
+    
+    if preset_active:
+        default_nodes = scenario.n_nodes
+        default_events = 10000
+    else:
+        default_nodes = 4
+        default_events = 10000
+
+    kill_nodes = cc1.slider(
+        "Số Node", 2, 6, default_nodes, key="kill_n_nodes",
+        disabled=preset_active
+    )
+    kill_source = cc2.selectbox("Nguồn dữ liệu", ["Synthetic", "NASA HTTP Real"], key="kill_source")
+    kill_events = cc3.number_input(
+        "Tổng số events", 2000, 100000, default_events, 1000, key="kill_events_n",
+        disabled=preset_active
+    )
+    kill_chunk = cc4.number_input("Events / bước chạy", 100, 5000, 500, 100, key="kill_chunk_n")
 
     cinit, _, creset = st.columns([1, 4, 1])
-    init_btn = cinit.button("🏗️ Khởi tạo Cluster", type="primary")
-    reset_btn = creset.button("🗑️ Reset")
+    init_btn = cinit.button("🏗️ Khởi tạo & nạp kịch bản", type="primary")
+    reset_btn = creset.button("🗑️ Reset phòng lab")
 
     if reset_btn:
         st.session_state.pop("kill_state", None)
         st.rerun()
 
     if init_btn:
+        # Load dataset
         if kill_source == "NASA HTTP Real":
             if not os.path.exists("dataset/data.csv"):
-                st.error("Không tìm thấy `dataset/data.csv`!")
+                st.error("Không tìm thấy file dataset/data.csv trong hệ thống!")
                 st.stop()
-            df_k = load_nasa_csv("dataset/data.csv", limit=kill_events)
+            df_k = load_nasa_csv("dataset/data.csv", limit=int(kill_events))
         else:
-            df_k = generate_logs(n_events=kill_events)
+            df_k = generate_logs(n_events=int(kill_events))
             df_k = df_k.assign(host=df_k["endpoint"])
 
-        # Lưu vào thư mục project để dễ thấy (thay vì %TEMP% bị ẩn)
         sim_dir = os.path.abspath(os.path.join(os.getcwd(), ".simdata"))
         ckpt_dir = os.path.join(sim_dir, "checkpoints")
         dlq_dir = os.path.join(sim_dir, "dlq")
@@ -1677,7 +2454,6 @@ with tab_kill:
         for i in range(kill_nodes):
             p = os.path.join(ckpt_dir, f"kill_node_{i}.json")
             dlq = os.path.join(dlq_dir, f"dlq_node_{i}.jsonl")
-            # Xoá DLQ cũ nếu còn (để session mới sạch sẽ)
             if os.path.exists(dlq):
                 try:
                     os.remove(dlq)
@@ -1685,14 +2461,24 @@ with tab_kill:
                     pass
             ckpt_paths.append(p)
             dlq_paths.append(dlq)
+            
+            # Load scenario specific config or DEFAULT_CONFIG
+            cfg_to_use = scenario.config if preset_active else DEFAULT_CONFIG
             engines.append(WatermarkEngine(
-                window_size_s=10.0,
-                allowed_lateness_s=2.0,
-                checkpoint_interval=200,
                 checkpoint_path=p,
-                max_queue=10_000_000,
+                **cfg_to_use.to_engine_kwargs(),
             ))
 
+        # Build schedule list
+        schedule = []
+        if preset_active:
+            # Overwrite event cursor scale if dataset is smaller/larger than scenario base
+            # For NASA/Synthetic, we scale the absolute trigger positions relative to total events
+            scale = len(df_k) / 10000.0  # presets are defined for 10k events base
+            for a in scenario.timeline:
+                scaled_at = min(int(a.at * scale), len(df_k) - 1)
+                schedule.append((a.type, a.target, scaled_at, a.params, a.label))
+        
         st.session_state.kill_state = {
             "engines": engines,
             "ckpt_paths": ckpt_paths,
@@ -1708,992 +2494,495 @@ with tab_kill:
             "node_buffered_total": [0] * kill_nodes,
             "log": [
                 f"🏗️ Khởi tạo cluster {kill_nodes} node với {len(df_k):,} events",
-                f"📂 Thư mục mô phỏng: {sim_dir}",
+                f"🎬 Kịch bản: {selected_preset}",
                 f"📂 Checkpoints: {ckpt_dir}",
-                f"📂 DLQ (Dead-Letter Queue): {dlq_dir}",
+                f"📂 DLQ: {dlq_dir}",
             ],
-            # Lịch sử simulation — sampled mỗi chunk để vẽ live evolution chart
             "sim_history": {
                 "cursor": [0],
                 "completeness": [100.0],
                 "dlq_total": [0],
                 "alive_count": [kill_nodes],
-                "throughput": [0],   # events / sample tick (delta processed)
+                "throughput": [0],
             },
-            # Mốc events kill/revive để annotation lên chart
-            "events_markers": [],  # list of (cursor, kind, node_id) where kind in {"kill","revive"}
+            "events_markers": [],
+            "schedule": schedule,
+            "engine_config": scenario.config if preset_active else DEFAULT_CONFIG,
+            "selected_preset": selected_preset,
+            "burst_multiplier": 1.0,
+            "burst_end_at": 0
         }
         st.rerun()
 
     state = st.session_state.get("kill_state")
     if not state:
-        st.info("👉 Bấm **Khởi tạo Cluster** để bắt đầu mô phỏng.")
+        st.info("👉 Hãy bấm **Khởi tạo & nạp kịch bản** để bắt đầu phòng lab mô phỏng.")
     else:
-        n = len(state["engines"])
-        total = len(state["rows"])
-        cursor = state["cursor"]
-        done = cursor >= total
+        # Define a single fragment that encapsulates the entire simulation dashboard.
+        # This prevents duplication, layout shifting, and page flicker during autoplay.
+        _ap_interval = 0.5 if state.get("auto_play_active") else None
 
-        # Backward compat + khởi tạo sớm các key cần dùng trước phần Controls
-        if "auto_play_active" not in state:
-            state["auto_play_active"] = False
-        if "schedule" not in state:
-            state["schedule"] = []
-        if "sim_history" not in state:
-            state["sim_history"] = {
-                "cursor": [0], "completeness": [100.0],
-                "dlq_total": [0], "alive_count": [n], "throughput": [0],
-            }
-        if "events_markers" not in state:
-            state["events_markers"] = []
+        @st.fragment(run_every=_ap_interval)
+        def _sim_lab_dashboard_fragment():
+            n = len(state["engines"])
+            total = len(state["rows"])
+            cfg = state.get("engine_config", DEFAULT_CONFIG)
 
-        # ----- 🛰️ Cluster Health Card (live) -----
-        _tot_proc = sum(state["node_processed"])
-        _tot_dlq = sum(len(p) for p in state["pending"])
-        _agg_u = sum(e.metrics["unique"] for e in state["engines"])
-        _agg_o = sum(e.metrics["on_time"] for e in state["engines"])
-        _comp_now = 100.0 * _agg_o / max(_agg_u, 1)
-        render_cluster_health(st, state["status"], _tot_proc, _tot_dlq,
-                              _comp_now, cursor, total)
-
-        # ----- ⚡ Quick Actions row -----
-        qa1, qa2, qa3, qa4 = st.columns(4)
-        if qa1.button("💀 Kill ALL nodes",
-                      disabled=state.get("auto_play_active", False) or done,
-                      width="stretch"):
-            killed = 0
-            for i in range(n):
-                if state["status"][i] == "alive":
-                    try:
-                        state["engines"][i].checkpoint()
-                    except Exception:
-                        pass
-                    state["status"][i] = "dead"
-                    state.setdefault("events_markers", []).append(
-                        (state["cursor"], "kill", i))
-                    killed += 1
-            if killed:
-                state["log"].append(
-                    f"[cursor={cursor:,}] 💀 Kill ALL · {killed} node killed · "
-                    f"DLQ sẽ giữ events kế tiếp"
-                )
+            # Autoplay Step execution chunk
+            last_row, last_host, last_nid = None, None, None
+            if state.get("auto_play_active"):
+                ap_speed = state.get("auto_play_speed", 1000)
+                ap_refresh = state.get("auto_play_refresh_n", 50)
+                ap_end_at = state.get("auto_play_end_at", total)
+                ap_start = state.get("auto_play_start", 0)
+                
+                j_start = state["cursor"]
+                if j_start >= ap_end_at:
+                    state["auto_play_active"] = False
+                    state["log"].append(f"⏯️ Đã hoàn thành Auto-Play tại cursor={state['cursor']:,}.")
+                    st.rerun()
+                    
+                mult = state.get("burst_multiplier", 1.0)
+                if state.get("burst_end_at", 0) <= j_start:
+                    state["burst_multiplier"] = 1.0
+                    mult = 1.0
+                    
+                chunk_size = max(int(ap_speed * 0.5 * mult), 1)
+                j_end = min(j_start + chunk_size, ap_end_at)
+                
+                for j in range(j_start, j_end):
+                    execute_step(state, j, cfg)
+                    row = state["rows"][j]
+                    host = getattr(row, "host", "unknown")
+                    nid = partition_key(host, n)
+                    last_row, last_host, last_nid = row, host, nid
+                    
+                state["cursor"] = j_end
                 sample_sim_history(state)
-            st.rerun()
-        if qa2.button("🔄 Revive ALL nodes",
-                      disabled=state.get("auto_play_active", False),
-                      width="stretch"):
-            revived = 0
-            for i in range(n):
-                if state["status"][i] == "dead":
-                    ckpt = state["ckpt_paths"][i]
-                    try:
-                        eng_new = WatermarkEngine.restore(
-                            ckpt, window_size_s=10.0, allowed_lateness_s=2.0,
-                            checkpoint_interval=200, max_queue=10_000_000)
-                    except Exception:
-                        eng_new = WatermarkEngine(
-                            window_size_s=10.0, allowed_lateness_s=2.0,
-                            checkpoint_interval=200, checkpoint_path=ckpt,
-                            max_queue=10_000_000)
-                    dlq = state["dlq_paths"][i]
-                    replayed = 0
-                    if os.path.exists(dlq):
-                        with open(dlq, "r", encoding="utf-8") as f:
-                            for line in f:
-                                line = line.strip()
-                                if not line:
-                                    continue
-                                try:
-                                    eng_new.process(json.loads(line))
-                                    replayed += 1
-                                    state["node_processed"][i] += 1
-                                except Exception:
-                                    pass
-                        try:
-                            os.remove(dlq)
-                        except OSError:
-                            pass
-                    state["pending"][i] = []
-                    state["engines"][i] = eng_new
-                    state["status"][i] = "alive"
-                    state.setdefault("events_markers", []).append(
-                        (state["cursor"], "revive", i))
-                    revived += 1
-            if revived:
-                state["log"].append(
-                    f"[cursor={cursor:,}] 🔄 Revive ALL · {revived} node "
-                    f"khôi phục từ checkpoint · DLQ đã drain"
-                )
-                sample_sim_history(state)
-            st.rerun()
-        if qa3.button("🏁 Flush all alive",
-                      disabled=state.get("auto_play_active", False),
-                      width="stretch"):
-            flushed = 0
-            for i, eng in enumerate(state["engines"]):
-                if state["status"][i] == "alive":
-                    eng.flush()
-                    flushed += 1
-            state["log"].append(f"🏁 Flush all · {flushed} engines flushed")
-            st.rerun()
-        if qa4.button("📸 Save snapshot",
-                      disabled=state.get("auto_play_active", False),
-                      width="stretch"):
-            saved = 0
-            for i, eng in enumerate(state["engines"]):
-                if state["status"][i] == "alive":
-                    try:
-                        eng.checkpoint()
-                        saved += 1
-                    except Exception:
-                        pass
-            state["log"].append(
-                f"📸 Snapshot · {saved} checkpoint atomic đã ghi vào "
-                f"`.simdata/checkpoints/`"
-            )
-            st.rerun()
-
-        # ----- 🗺️ Cluster diagram -----
-        def _state_diagram_args(st_state, n_nodes):
-            processed = list(st_state["node_processed"])
-            windows = [len(e.closed_windows) for e in st_state["engines"]]
-            dlq_n = [len(p) for p in st_state["pending"]]
-            ckpt_sz = [os.path.getsize(p) if os.path.exists(p) else 0
-                       for p in st_state["ckpt_paths"]]
-            return processed, windows, dlq_n, ckpt_sz
-
-        st.markdown("#### Sơ đồ Cluster (Axon-style)")
-        st.caption(
-            "Click trực tiếp lên node trong diagram để Kill / Revive. "
-            "ALIVE → click → checkpoint atomic, đánh dấu DEAD. "
-            "DEAD → click → restore từ checkpoint + replay DLQ (Exactly-Once)."
-        )
-        _p, _w, _d, _c = _state_diagram_args(state, n)
-        diag_tick = state.get("diag_tick", 0)
-        state["diag_tick"] = diag_tick + 1
-
-        if not state["auto_play_active"]:
-            diag_fig = make_cluster_fig(
-                state["status"], _p, _w, [len(p) for p in state["pending"]],
-                cursor, total, highlight_node=None, tick=diag_tick,
-            )
-            clicked = st.plotly_chart(
-                diag_fig, key="cluster_static",
-                on_select="rerun", width="content",
-            )
-        else:
-            clicked = None
-            st.caption("⏯️ Đang Auto-Play — diagram realtime cập nhật ở "
-                       "khu vực live bên dưới ↓")
-        # ── Click-to-kill / revive directly on diagram ──────────
-        if clicked and clicked.selection and clicked.selection.points:
-            pt = clicked.selection.points[0]
-            cd = getattr(pt, "customdata", None)
-            if cd and len(cd) >= 1:
-                nid_click = int(cd[0])
-                if 0 <= nid_click < n:
-                    if state["status"][nid_click] == "alive":
-                        try:
-                            state["engines"][nid_click].checkpoint()
-                            ck_sz = os.path.getsize(state["ckpt_paths"][nid_click])
-                        except Exception:
-                            ck_sz = 0
-                        state["status"][nid_click] = "dead"
-                        state.setdefault("events_markers", []).append(
-                            (state["cursor"], "kill", nid_click))
-                        state["log"].append(
-                            f"[cursor={cursor:,}] 💀 DIAGRAM KILL Node {nid_click} · "
-                            f"checkpoint {ck_sz}B · DLQ: {os.path.basename(state['dlq_paths'][nid_click])}"
-                        )
-                        sample_sim_history(state)
-                    else:
-                        ckpt = state["ckpt_paths"][nid_click]
-                        try:
-                            eng_new = WatermarkEngine.restore(
-                                ckpt, window_size_s=10.0, allowed_lateness_s=2.0,
-                                checkpoint_interval=200, max_queue=10_000_000)
-                        except Exception:
-                            eng_new = WatermarkEngine(
-                                window_size_s=10.0, allowed_lateness_s=2.0,
-                                checkpoint_interval=200, checkpoint_path=ckpt,
-                                max_queue=10_000_000)
-                        dlq = state["dlq_paths"][nid_click]
-                        replayed = 0
-                        if os.path.exists(dlq):
-                            with open(dlq, "r", encoding="utf-8") as f:
-                                for line in f:
-                                    line = line.strip()
-                                    if not line:
-                                        continue
-                                    try:
-                                        eng_new.process(json.loads(line))
-                                        replayed += 1
-                                        state["node_processed"][nid_click] += 1
-                                    except Exception:
-                                        pass
-                            try:
-                                os.remove(dlq)
-                            except OSError:
-                                pass
-                        state["pending"][nid_click] = []
-                        state["engines"][nid_click] = eng_new
-                        state["status"][nid_click] = "alive"
-                        state.setdefault("events_markers", []).append(
-                            (state["cursor"], "revive", nid_click))
-                        state["log"].append(
-                            f"[cursor={cursor:,}] 🔄 DIAGRAM REVIVE Node {nid_click} · "
-                            f"replay {replayed:,} DLQ events"
-                        )
-                        sample_sim_history(state)
+                
+                log_period = max(int(ap_refresh) * 5, 1)
+                if (j_end - ap_start) % log_period < chunk_size and last_row is not None:
+                    state["log"].append(
+                        f"[cursor={j_end:,}] 📡 streaming log · event={last_row.event_id} host={last_host} "
+                        f"status={last_row.status} → Node {last_nid} ({state['status'][last_nid]})"
+                    )
+                    
+                if j_end >= ap_end_at:
+                    state["auto_play_active"] = False
+                    state["log"].append(f"⏯️ Đã hoàn thành mốc chạy Auto-Play tại cursor={j_end:,}.")
                     st.rerun()
 
-        # ----- Node grid -----
-        st.markdown("#### Trạng thái các Node")
-        cols = st.columns(n)
-        for i, c in enumerate(cols):
-            with c:
-                status = state["status"][i]
-                eng = state["engines"][i]
-                pending_n = len(state["pending"][i])
-                with st.container(border=True):
-                    if status == "alive":
-                        st.markdown(f"**Node {i}** &nbsp; :green[● alive]",
-                                    unsafe_allow_html=True)
-                    else:
-                        st.markdown(f"**Node {i}** &nbsp; :red[● dead]",
-                                    unsafe_allow_html=True)
-                    st.caption(
-                        f"Processed **{state['node_processed'][i]:,}** · "
-                        f"Unique **{eng.metrics['unique']:,}** · "
-                        f"Windows **{len(eng.closed_windows)}**"
-                    )
-                    st.caption(
-                        f"Late **{eng.metrics['late_dropped']}** · "
-                        f"Dup **{eng.metrics['duplicates']}** · "
-                        + (f":red[**DLQ {pending_n:,}**]" if pending_n
-                           else f"DLQ {pending_n:,}")
-                    )
+            cursor = state["cursor"]
+            done = cursor >= total
 
-                if status == "alive":
-                    if st.button(f"Kill node {i}", key=f"kill_{i}",
-                                 width="stretch",
-                                 disabled=state["auto_play_active"]):
-                        try:
-                            eng.checkpoint()
-                            ckpt_size = os.path.getsize(state["ckpt_paths"][i])
-                        except Exception:
-                            ckpt_size = 0
-                        state["status"][i] = "dead"
-                        state.setdefault("events_markers", []).append(
-                            (state["cursor"], "kill", i))
-                        state["log"].append(
-                            f"[cursor={cursor:,}] 💀 Node {i} KILLED · "
-                            f"checkpoint saved ({ckpt_size}B) tại "
-                            f"{os.path.basename(state['ckpt_paths'][i])} · "
-                            f"DLQ mở: {os.path.basename(state['dlq_paths'][i])}"
-                        )
-                        sample_sim_history(state)
-                        st.rerun()
-                else:
-                    # Hiển thị thông tin DLQ file ngay trên node chết
-                    dlq_path = state["dlq_paths"][i]
-                    dlq_exists = os.path.exists(dlq_path)
-                    dlq_size = os.path.getsize(dlq_path) if dlq_exists else 0
-                    dlq_lines = len(state["pending"][i])
-                    st.caption(
-                        f"📁 DLQ: `{os.path.basename(dlq_path)}` · "
-                        f"{dlq_lines:,} dòng · {dlq_size:,} B"
-                    )
-
-                    if st.button(f"🔄 Revive node {i}", key=f"revive_{i}",
-                                 width="stretch",
-                                 disabled=state["auto_play_active"]):
-                        ckpt_path = state["ckpt_paths"][i]
-                        if os.path.exists(ckpt_path):
-                            try:
-                                eng_new = WatermarkEngine.restore(
-                                    ckpt_path,
-                                    window_size_s=10.0,
-                                    allowed_lateness_s=2.0,
-                                    checkpoint_interval=200,
-                                    max_queue=10_000_000,
-                                )
-                            except Exception:
-                                eng_new = WatermarkEngine(
-                                    window_size_s=10.0, allowed_lateness_s=2.0,
-                                    checkpoint_interval=200, checkpoint_path=ckpt_path,
-                                    max_queue=10_000_000,
-                                )
-                        else:
-                            eng_new = WatermarkEngine(
-                                window_size_s=10.0, allowed_lateness_s=2.0,
-                                checkpoint_interval=200, checkpoint_path=ckpt_path,
-                                max_queue=10_000_000,
-                            )
-                        # Replay từ DLQ trên ĐĨA (nguồn sự thật) — không tin in-memory
-                        replayed = 0
-                        if os.path.exists(dlq_path):
-                            with open(dlq_path, "r", encoding="utf-8") as f:
-                                for line in f:
-                                    line = line.strip()
-                                    if not line:
-                                        continue
-                                    try:
-                                        ev = json.loads(line)
-                                    except json.JSONDecodeError:
-                                        continue
-                                    eng_new.process(ev)
-                                    replayed += 1
-                                    state["node_processed"][i] += 1
-                            # Xoá DLQ sau khi replay xong (đã drain)
-                            try:
-                                os.remove(dlq_path)
-                            except OSError:
-                                pass
-                        state["pending"][i] = []
-                        state["engines"][i] = eng_new
-                        state["status"][i] = "alive"
-                        state.setdefault("events_markers", []).append(
-                            (state["cursor"], "revive", i))
-                        state["log"].append(
-                            f"[cursor={cursor:,}] 🔄 Node {i} REVIVED · "
-                            f"restore từ checkpoint + drain {replayed:,} events từ DLQ · "
-                            f"DLQ file đã xoá · Exactly-Once OK"
-                        )
-                        sample_sim_history(state)
-                        st.rerun()
-
-        # ============================================================
-        # CONTROLS — 3-tab segmented: Thủ công / Auto-Play / Lập lịch
-        # ============================================================
-        st.markdown("#### Điều khiển stream")
-        # (schedule / auto_play_active đã khởi tạo sớm ở khối backward-compat)
-
-        def _buffer_to_dlq(nid: int, ev: dict):
-            """Append event vào Dead-Letter Queue trên ĐĨA (append-only JSONL)."""
-            with open(state["dlq_paths"][nid], "a", encoding="utf-8") as f:
-                f.write(json.dumps(ev, ensure_ascii=False) + "\n")
-            state["pending"][nid].append(ev)
-            state["node_buffered_total"][nid] += 1
-
-        ctrl_manual, ctrl_auto, ctrl_sched = st.tabs([
-            "Thủ công", "Auto-Play", "Lập lịch",
-        ])
-
-        # ── Tab: Thủ công ──
-        with ctrl_manual:
-            st.caption(
-                "Chạy stream từng bước hoặc kết thúc ngay. "
-                "Dùng khi muốn kiểm soát chính xác (kill thủ công giữa chừng)."
-            )
-            mc1, mc2, mc3 = st.columns(3)
-            run_chunk_btn = mc1.button(
-                f"Chạy {kill_chunk:,} events",
-                disabled=done or state["auto_play_active"],
-                width="stretch", key="man_chunk_btn",
-            )
-            run_all_btn = mc2.button(
-                "Chạy hết stream",
-                disabled=done or state["auto_play_active"],
-                width="stretch", key="man_all_btn",
-            )
-            flush_btn = mc3.button(
-                "Flush & tổng kết",
-                disabled=not done,
-                width="stretch", key="man_flush_btn",
-            )
-
-        # ── Tab: Auto-Play ──
-        with ctrl_auto:
-            st.caption(
-                "Stream tự động qua dataset với tốc độ tuỳ chỉnh. "
-                "Lịch ở tab **Lập lịch** sẽ tự kích hoạt đúng cursor."
-            )
-            ap1, ap2, ap3 = st.columns(3)
-            speed_eps = ap1.slider(
-                "Tốc độ (events/giây)", 100, 10000, 1000, 100,
-                key="auto_speed", disabled=state["auto_play_active"],
-            )
-            refresh_n = ap2.slider(
-                "Refresh UI mỗi N events", 10, 500, 50, 10,
-                key="auto_refresh", disabled=state["auto_play_active"],
-            )
-            auto_until = ap3.selectbox(
-                "Chạy tới",
-                ["Hết stream", "+5,000 events", "+10,000 events"],
-                key="auto_until", disabled=state["auto_play_active"],
-            )
-
-            play_btn = st.button(
-                "Auto-Play realtime", type="primary",
-                disabled=done or state["auto_play_active"],
-                width="stretch", key="auto_play_btn",
-            )
-
-            if state["auto_play_active"]:
-                st.error("Đang stream realtime — nút **DỪNG** nằm ở khu vực "
-                         "live phía dưới ↓", icon="🔴")
-            elif done:
-                st.success("Stream hoàn tất.", icon="✅")
-            else:
-                st.info(f"Sẵn sàng — cursor {cursor:,}/{total:,}.", icon="▶️")
-
-        # ── Tab: Lập lịch ──
-        with ctrl_sched:
-            # ── Timeline visualization ──
-            if state["schedule"]:
-                st.markdown("**📍 Dòng thời gian sự cố** (xem theo tỉ lệ cursor):")
-                # Build SVG-like timeline using HTML
-                tl_html = (
-                    '<div style="position:relative;height:46px;background:#F1F5F9;'
-                    'border-radius:8px;border:1px solid #CBD5E1;margin:6px 0 8px 0;">'
-                )
-                # Current cursor marker
-                cur_pct = 100.0 * cursor / max(total, 1)
-                tl_html += (
-                    f'<div style="position:absolute;left:{cur_pct}%;top:0;bottom:0;'
-                    f'width:2px;background:#3B82F6;"></div>'
-                    f'<div style="position:absolute;left:{cur_pct}%;top:-4px;'
-                    f'transform:translateX(-50%);font-size:0.65rem;color:#1E40AF;'
-                    f'font-weight:700;background:#DBEAFE;padding:1px 5px;'
-                    f'border-radius:4px;border:1px solid #93C5FD;white-space:nowrap;">cursor</div>'
-                )
-                # Schedule markers
-                for act, nid, at in state["schedule"]:
-                    pct = 100.0 * at / max(total, 1)
-                    icon = "💀" if act == "kill" else "🔄"
-                    bg = "#FEE2E2" if act == "kill" else "#DCFCE7"
-                    fg = "#991B1B" if act == "kill" else "#166534"
-                    border = "#FCA5A5" if act == "kill" else "#86EFAC"
-                    tl_html += (
-                        f'<div title="{act} Node {nid} @ cursor {at:,}" '
-                        f'style="position:absolute;left:{pct}%;top:14px;'
-                        f'transform:translateX(-50%);background:{bg};color:{fg};'
-                        f'border:1px solid {border};border-radius:14px;'
-                        f'padding:2px 7px;font-size:0.72rem;font-weight:700;'
-                        f'white-space:nowrap;">{icon} N{nid}@{at:,}</div>'
-                    )
-                tl_html += "</div>"
-                st.markdown(tl_html, unsafe_allow_html=True)
-
-                sched_df = pd.DataFrame(state["schedule"],
-                                        columns=["Hành động", "Node", "Tại cursor"])
-                st.dataframe(sched_df, hide_index=True, width="stretch")
-                ccol1, _ = st.columns([1, 4])
-                if ccol1.button("🗑️ Xoá toàn bộ lịch"):
-                    state["schedule"] = []
-                    st.rerun()
-            else:
-                st.caption("Chưa có lịch nào — auto-play sẽ chạy như cluster khoẻ mạnh.")
-
-            # ── Manual add row ──
-            ac1, ac2, ac3, ac4 = st.columns([1, 1, 1, 1])
-            sa = ac1.selectbox("Hành động", ["kill", "revive"], key="sched_act")
-            sn = ac2.selectbox("Node", list(range(n)), key="sched_node")
-            sc_default = min(cursor + max(1, (total - cursor) // 3), total - 1) if total > 0 else 0
-            sx = ac3.number_input("Tại cursor", 0, max(total - 1, 0), sc_default, key="sched_cursor")
-            if ac4.button("➕ Thêm vào lịch"):
-                state["schedule"].append((sa, int(sn), int(sx)))
-                state["schedule"].sort(key=lambda x: x[2])
-                st.rerun()
-
-            # ── Preset chaos scenarios ──
-            st.markdown("**🎲 Preset kịch bản sự cố** (1 nút = thêm nhiều dòng):")
-            pre1, pre2, pre3, pre4 = st.columns(4)
-            if pre1.button("⚡ 1 node chết 30% rồi sống 70%",
-                           width="stretch"):
-                a = max(int(total * 0.30), 1)
-                b = max(int(total * 0.70), a + 1)
-                state["schedule"] += [("kill", 0, a), ("revive", 0, b)]
-                state["schedule"].sort(key=lambda x: x[2])
-                st.rerun()
-            if pre2.button("💀 Kill chéo 2 node (25%, 60%)",
-                           width="stretch"):
-                state["schedule"] += [
-                    ("kill", 0, int(total * 0.25)),
-                    ("kill", min(1, n - 1), int(total * 0.60)),
-                ]
-                state["schedule"].sort(key=lambda x: x[2])
-                st.rerun()
-            if pre3.button("🌪️ Chaos: kill xen kẽ tất cả",
-                           width="stretch"):
-                step = max(int(total / (n * 2 + 1)), 1)
-                for i in range(n):
-                    state["schedule"].append(("kill", i, step * (2 * i + 1)))
-                    state["schedule"].append(("revive", i, step * (2 * i + 2)))
-                state["schedule"].sort(key=lambda x: x[2])
-                st.rerun()
-            if pre4.button("🧹 Xoá toàn bộ preset",
-                           width="stretch"):
+            # Backward compatibility for autoplay state variables
+            if "auto_play_active" not in state:
+                state["auto_play_active"] = False
+            if "schedule" not in state:
                 state["schedule"] = []
-                st.rerun()
+            if "sim_history" not in state:
+                state["sim_history"] = {
+                    "cursor": [0], "completeness": [100.0],
+                    "dlq_total": [0], "alive_count": [n], "throughput": [0],
+                }
+            if "events_markers" not in state:
+                state["events_markers"] = []
 
-        # ── Manual-tab handlers (run AFTER tabs render their widgets) ──
-        if run_chunk_btn:
-            end = min(cursor + int(kill_chunk), total)
-            for j in range(cursor, end):
-                row = state["rows"][j]
-                host = getattr(row, "host", "unknown")
-                nid = partition_key(host, n)
-                ev = {"event_id": row.event_id, "event_time": row.event_time,
-                      "status": row.status}
-                if state["status"][nid] == "alive":
-                    state["engines"][nid].process(ev)
-                    state["node_processed"][nid] += 1
+            # ----- 🛰️ Cluster Health Card (live dashboard UI) -----
+            _tot_proc = sum(state["node_processed"])
+            _tot_dlq = sum(len(p) for p in state["pending"])
+            _agg_u = sum(e.metrics["unique"] for e in state["engines"])
+            _agg_o = sum(e.metrics["on_time"] for e in state["engines"])
+            _comp_now = 100.0 * _agg_o / max(_agg_u, 1)
+            render_cluster_health(st, state["status"], _tot_proc, _tot_dlq,
+                                  _comp_now, cursor, total)
+
+            col_left, col_right = st.columns([6, 4])
+
+            with col_left:
+                # ----- ⚡ Cluster Control Grid -----
+                qa1, qa2, qa3, qa4 = st.columns(4)
+                if qa1.button("💀 Đánh sập toàn cluster (Kill ALL)",
+                              disabled=state.get("auto_play_active") or done,
+                              width="stretch"):
+                    killed = kill_all(state)
+                    if killed:
+                        state["log"].append(f"[cursor={cursor:,}] 💀 Sập cluster: KILLED toàn bộ {killed} nodes.")
+                        sample_sim_history(state)
+                    st.rerun()
+                if qa2.button("🔄 Hồi sinh toàn cluster (Revive ALL)",
+                              disabled=state.get("auto_play_active"),
+                              width="stretch"):
+                    revived = revive_all(state, cfg)
+                    if revived:
+                        state["log"].append(f"[cursor={cursor:,}] 🔄 Khôi phục cluster: REVIVED toàn bộ {revived} nodes từ checkpoint & DLQ.")
+                        sample_sim_history(state)
+                    st.rerun()
+                if qa3.button("🏁 Flush all engines",
+                              disabled=state.get("auto_play_active"),
+                              width="stretch"):
+                    flushed = 0
+                    for i, eng in enumerate(state["engines"]):
+                        if state["status"][i] == "alive":
+                            eng.flush()
+                            flushed += 1
+                    state["log"].append(f"[cursor={cursor:,}] 🏁 Flush all: Đã ép đóng cửa sổ trên {flushed} nodes.")
+                    st.rerun()
+                if qa4.button("📸 Chụp trạng thái (Checkpoint ALL)",
+                              disabled=state.get("auto_play_active"),
+                              width="stretch"):
+                    saved = 0
+                    for i, eng in enumerate(state["engines"]):
+                        if state["status"][i] == "alive":
+                            try:
+                                eng.checkpoint()
+                                saved += 1
+                            except Exception:
+                                pass
+                    state["log"].append(f"[cursor={cursor:,}] 📸 Checkpoint: Ghi nhận {saved} Consistent snapshots atomic lên đĩa.")
+                    st.rerun()
+
+                # ----- 🗺️ Live Animated SVG Cluster Diagram -----
+                st.markdown("#### Sơ đồ Cluster mô phỏng")
+                
+                # Calculate stats for diagram
+                processed_n = list(state["node_processed"])
+                windows_n = [len(e.closed_windows) for e in state["engines"]]
+                dlq_n = [len(p) for p in state["pending"]]
+                ckpt_sz = [os.path.getsize(p) if os.path.exists(p) else 0 for p in state["ckpt_paths"]]
+                
+                diag_tick = state.get("diag_tick", 0)
+                state["diag_tick"] = diag_tick + 1
+                
+                # During autoplay, highlight the last processed node and use cursor as tick trigger
+                if state.get("auto_play_active") and last_nid is not None:
+                    h_node = last_nid
+                    s_tick = state["cursor"] - state.get("auto_play_start", 0)
                 else:
-                    _buffer_to_dlq(nid, ev)
-            state["cursor"] = end
-            state["log"].append(
-                f"[cursor={cursor:,} → {end:,}] ▶️ Xử lý {end - cursor:,} events · "
-                f"dead nodes: {[i for i, s in enumerate(state['status']) if s == 'dead'] or 'none'}"
-            )
-            sample_sim_history(state)
-            st.rerun()
+                    h_node = None
+                    s_tick = diag_tick
+                    
+                svg_content = generate_svg_cluster(
+                    state["status"], processed_n, windows_n, dlq_n, ckpt_sz,
+                    highlight_node=h_node, tick=s_tick
+                )
+                st.components.v1.html(svg_content, height=430)
 
-        if run_all_btn:
-            for j in range(cursor, total):
-                row = state["rows"][j]
-                host = getattr(row, "host", "unknown")
-                nid = partition_key(host, n)
-                ev = {"event_id": row.event_id, "event_time": row.event_time,
-                      "status": row.status}
-                if state["status"][nid] == "alive":
-                    state["engines"][nid].process(ev)
-                    state["node_processed"][nid] += 1
-                else:
-                    _buffer_to_dlq(nid, ev)
-            state["cursor"] = total
-            state["log"].append(f"⏭️ Đã chạy hết stream tới cursor={total:,}")
-            sample_sim_history(state)
-            st.rerun()
-
-        if flush_btn:
-            for i, eng in enumerate(state["engines"]):
-                if state["status"][i] == "alive":
-                    eng.flush()
-            state["log"].append("🏁 Flush tất cả engines còn sống · tổng kết bên dưới")
-            st.rerun()
-
-        # (Nút Dừng + placeholders live đã chuyển vào _autoplay_fragment bên dưới)
-
-        def _render_live_grid(container, st_state, n_nodes):
-            with container.container():
-                cols = st.columns(n_nodes)
-                for ii, ccol in enumerate(cols):
-                    with ccol:
-                        status = st_state["status"][ii]
-                        eng = st_state["engines"][ii]
-                        pending_n = len(st_state["pending"][ii])
+                # ----- Node Controls Grid -----
+                st.markdown("#### Bảng điều khiển riêng từng Node")
+                cols = st.columns(n)
+                for i, c in enumerate(cols):
+                    with c:
+                        status = state["status"][i]
+                        eng = state["engines"][i]
+                        pending_n = len(state["pending"][i])
+                        
                         with st.container(border=True):
                             dot = ":green[● alive]" if status == "alive" else ":red[● dead]"
-                            st.markdown(f"**Node {ii}** &nbsp; {dot}")
-                            st.caption(
-                                f"Processed **{st_state['node_processed'][ii]:,}** · "
-                                f"Unique **{eng.metrics['unique']:,}** · "
-                                f"Win **{len(eng.closed_windows)}**"
-                            )
-                            st.caption(
-                                f"Late **{eng.metrics['late_dropped']}** · "
-                                f"Dup **{eng.metrics['duplicates']}** · "
-                                + (f":red[**DLQ {pending_n:,}**]" if pending_n
-                                   else f"DLQ {pending_n:,}")
-                            )
+                            st.markdown(f"**Node {i}** &nbsp; {dot}")
+                            st.caption(f"Đã xử lý: **{state['node_processed'][i]:,}**")
+                            st.caption(f"Cửa sổ đóng: **{len(eng.closed_windows)}**")
+                            
+                            if pending_n > 0:
+                                st.markdown(f":red[**Buffer DLQ: {pending_n:,}**]")
+                            else:
+                                st.caption(f"Buffer DLQ: {pending_n:,}")
+                                
+                            st.caption(f"Bỏ trễ: {eng.metrics['late_dropped']} · Lặp: {eng.metrics['duplicates']}")
 
-        def _render_live_metrics(container, st_state):
-            au = sum(e.metrics["unique"] for e in st_state["engines"])
-            ao = sum(e.metrics["on_time"] for e in st_state["engines"])
-            ad = sum(e.metrics["duplicates"] for e in st_state["engines"])
-            al = sum(e.metrics["late_dropped"] for e in st_state["engines"])
-            aw = sum(len(e.closed_windows) for e in st_state["engines"])
-            cp = 100.0 * ao / max(au, 1)
-            pt = sum(len(p) for p in st_state["pending"])
-            dc = sum(1 for s in st_state["status"] if s == "dead")
-            with container.container():
-                m1, m2, m3, m4, m5 = st.columns(5)
-                m1.metric("Completeness", f"{cp:.2f}%")
-                m2.metric("Unique", f"{au:,}")
-                m3.metric("Windows", f"{aw}")
-                m4.metric("DLQ buffered", f"{pt:,}",
-                          delta=f"{dc} node dead" if dc else None)
-                m5.metric("Duplicates", f"{ad:,}")
+                            if status == "alive":
+                                if st.button(f"💀 Kill node {i}", key=f"kill_btn_{i}", width="stretch", disabled=state["auto_play_active"]):
+                                    kill_node(state, i)
+                                    st.rerun()
+                            else:
+                                if st.button(f"🔄 Revive node {i}", key=f"revive_btn_{i}", width="stretch", disabled=state["auto_play_active"]):
+                                    revive_node(state, i, cfg)
+                                    st.rerun()
 
-        def _render_live_log(container, st_state):
-            with container.container():
-                colored = [colorize_log_line(ln) for ln in st_state["log"][-25:]]
-                log_html = "<br>".join(colored)
-                st.markdown(f'<div class="demo-log">{log_html}</div>',
-                            unsafe_allow_html=True)
+                # ----- Stream Controls -----
+                st.markdown("#### Bảng điều khiển luồng dữ liệu")
+                
+                # During Autoplay: render warning and STOP button at the top of stream controls
+                if state.get("auto_play_active"):
+                    stop_col1, stop_col2 = st.columns([1.5, 3.5])
+                    with stop_col1:
+                        if st.button("⏸️ DỪNG STREAM", type="primary", width="stretch", key="frag_stop"):
+                            state["auto_play_active"] = False
+                            state["log"].append(f"⏸️ Dừng Auto-Play theo yêu cầu tại cursor={state['cursor']:,}.")
+                            st.rerun()
+                    with stop_col2:
+                        st.error("⏯️ Đang Auto-Play — dữ liệu động cập nhật trong fragment bên dưới mà không làm giật trang.", icon="🔴")
+                
+                ctrl_manual, ctrl_auto, ctrl_sched = st.tabs([
+                    "Thủ công (Manual Step)", "Phát tự động (Auto-Play)", "Lịch trình sự cố"
+                ])
 
-        # ── Play button handler — initialize chunked auto-play state ──
-        if play_btn:
-            if auto_until == "Hết stream":
-                end_at = total
-            elif auto_until == "+5,000 events":
-                end_at = min(cursor + 5000, total)
-            else:
-                end_at = min(cursor + 10000, total)
+                with ctrl_manual:
+                    st.caption("Chạy stream theo từng bước để theo dõi chính xác hành vi của hệ thống.")
+                    c1, c2, c3 = st.columns(3)
+                    run_chunk_btn = c1.button(f"▶️ Chạy {kill_chunk:,} events tiếp theo", disabled=done or state["auto_play_active"], width="stretch", key="sim_run_chunk")
+                    run_all_btn = c2.button("⏭️ Xử lý toàn bộ dữ liệu", disabled=done or state["auto_play_active"], width="stretch", key="sim_run_all")
+                    flush_btn = c3.button("🏁 Flush & Đóng toàn bộ cửa sổ", disabled=not done, width="stretch", key="sim_flush")
 
-            state["auto_play_active"] = True
-            state["auto_play_end_at"] = int(end_at)
-            state["auto_play_speed"] = int(speed_eps)
-            state["auto_play_refresh_n"] = int(refresh_n)
-            state["auto_play_start"] = int(state["cursor"])
-            state["auto_play_sched_idx"] = 0
-            state["log"].append(
-                f"⏯️ AUTO-PLAY bắt đầu · cursor={state['cursor']:,} → {end_at:,} · "
-                f"speed={speed_eps} eps · scheduled={len(state.get('schedule', []))} events"
-            )
-            st.rerun()
+                with ctrl_auto:
+                    st.caption("Chạy luồng dữ liệu liên tục. Lịch trình sự cố sẽ tự động được kích hoạt.")
+                    ap1, ap2, ap3 = st.columns(3)
+                    speed_eps = ap1.slider("Tốc độ stream (events/giây)", 100, 10000, 1000, 100, key="sim_speed_slider", disabled=state["auto_play_active"])
+                    refresh_n = ap2.slider("Làm mới UI sau mỗi N events", 10, 500, 50, 10, key="sim_refresh_slider", disabled=state["auto_play_active"])
+                    auto_until = ap3.selectbox("Mốc dừng chạy", ["Hết stream", "+5,000 events", "+10,000 events"], key="sim_until_select", disabled=state["auto_play_active"])
+                    
+                    play_btn = st.button("⏯️ Kích hoạt Auto-Play realtime", type="primary", disabled=done or state["auto_play_active"], width="stretch", key="sim_play_autoplay")
 
-        # ── AUTO-PLAY FRAGMENT ──────────────────────────────────────
-        # Dùng @st.fragment + st.rerun(scope="fragment"): mỗi chunk CHỈ
-        # rerun vùng này, KHÔNG rerun header / sidebar / tabs / inspector
-        # → hết hiện tượng "đa số chức năng bị rerender" (flicker).
-        @st.fragment
-        def _autoplay_fragment():
-            if not state["auto_play_active"]:
-                return
-            # Nút Dừng nằm TRONG fragment để luôn bắt được click realtime
-            if st.button("⏸️ DỪNG STREAM", type="primary",
-                         width="stretch", key="frag_stop"):
-                state["auto_play_active"] = False
-                state["log"].append(
-                    f"⏸️ AUTO-PLAY DỪNG bởi user tại cursor={state['cursor']:,}")
-                st.rerun()
-                return
-            st.error("Đang stream realtime — chỉ vùng live này cập nhật, "
-                     "phần còn lại của trang đứng yên (không flicker).", icon="🔴")
-            live_progress = st.empty()
-            live_diag = st.empty()
-            live_grid = st.empty()
-            live_metrics = st.empty()
-            live_log = st.empty()
-            ap_speed = state.get("auto_play_speed", 1000)
-            ap_refresh = state.get("auto_play_refresh_n", 50)
-            ap_end_at = state.get("auto_play_end_at", total)
-            ap_start = state.get("auto_play_start", 0)
+                with ctrl_sched:
+                    if state["schedule"]:
+                        st.markdown("**📍 Dòng sự cố dự kiến** (theo cursor):")
+                        tl_html = '<div style="position:relative;height:50px;background:#1E293B;border-radius:10px;border:1px solid #334155;margin:10px 0 15px 0; overflow:hidden;">'
+                        cur_pct = 100.0 * cursor / max(total, 1)
+                        tl_html += f'<div style="position:absolute;left:{cur_pct}%;top:0;bottom:0;width:2px;background:#3B82F6;z-index:10;"></div>'
+                        tl_html += f'<div style="position:absolute;left:{cur_pct}%;top:2px;transform:translateX(-50%);font-size:0.65rem;color:#E0F2FE;font-weight:bold;background:#2563EB;padding:2px 6px;border-radius:4px;z-index:11;">{cursor:,}</div>'
+                        
+                        for item in state["schedule"]:
+                            act_type, nid, at = item[0], item[1], item[2]
+                            pct = 100.0 * at / max(total, 1)
+                            if act_type == "kill":
+                                icon, bg, border, fg = "💀", "#7F1D1D", "#EF4444", "#FEE2E2"
+                            elif act_type == "revive":
+                                icon, bg, border, fg = "🔄", "#064E3B", "#10B981", "#D1FAE5"
+                            elif act_type == "ooo_spike":
+                                icon, bg, border, fg = "🌪️", "#78350F", "#F59E0B", "#FEF3C7"
+                            elif act_type == "load_burst":
+                                icon, bg, border, fg = "⚡", "#4C1D95", "#8B5CF6", "#F5F3FF"
+                            else:
+                                icon, bg, border, fg = "⏳", "#1E3A8A", "#3B82F6", "#EFF6FF"
+                            tl_html += f'<div title="{act_type} Node {nid} tại {at:,}" style="position:absolute;left:{pct}%;top:20px;transform:translateX(-50%);background:{bg};color:{fg};border:1px solid {border};border-radius:12px;padding:1px 6px;font-size:0.68rem;font-weight:bold;white-space:nowrap;cursor:help;">{icon} N{nid if nid != -1 else "A"}@{at:,}</div>'
+                        tl_html += '</div>'
+                        st.markdown(tl_html, unsafe_allow_html=True)
+                        
+                        sched_data = []
+                        for item in state["schedule"]:
+                            act_type, nid, at = item[0], item[1], item[2]
+                            label = item[4] if len(item) > 4 else f"{act_type} Node {nid} at {at}"
+                            sched_data.append({"Cursor kích hoạt": at, "Loại hành động": act_type.upper(), "Mục tiêu (Node ID)": nid if nid != -1 else "Tất cả", "Nhãn kịch bản": label})
+                        st.dataframe(pd.DataFrame(sched_data), hide_index=True, width="stretch")
+                        if st.button("🗑️ Xóa toàn bộ lịch sự cố", disabled=state["auto_play_active"]):
+                            state["schedule"] = []
+                            st.rerun()
+                    else:
+                        st.caption("Chưa có lịch sự cố nào được thiết lập. Dữ liệu sẽ truyền đi bình thường.")
 
-            chunk_size = max(int(ap_refresh), 25)
-            j_start = state["cursor"]
+                    st.markdown("**➕ Thêm lịch sự cố thủ công**")
+                    ac1, ac2, ac3, ac4 = st.columns([1, 1, 1, 1])
+                    sa = ac1.selectbox("Hành động", ["kill", "revive", "ooo_spike", "load_burst", "delay_inject"], key="sched_act")
+                    sn = ac2.selectbox("Node mục tiêu", list(range(n)), key="sched_node")
+                    sc_default = min(cursor + max(1, (total - cursor) // 3), total - 1) if total > 0 else 0
+                    sx = ac3.number_input("Kích hoạt tại cursor", 0, max(total - 1, 0), int(sc_default), key="sched_cursor")
+                    if ac4.button("Thêm vào timeline", key="add_to_sched_btn"):
+                        lbl = f"{sa.upper()} Node {sn} tại {sx}"
+                        params = {}
+                        if sa == "ooo_spike":
+                            params = {"fraction": 0.8, "duration": 500}
+                        elif sa == "load_burst":
+                            params = {"multiplier": 3.0, "duration": 1000}
+                        elif sa == "delay_inject":
+                            params = {"delay_s": 5.0, "duration": 500}
+                        state["schedule"].append((sa, int(sn), int(sx), params, lbl))
+                        state["schedule"].sort(key=lambda x: x[2])
+                        st.rerun()
 
-            if j_start >= ap_end_at:
-                state["auto_play_active"] = False
-                state["log"].append(
-                    f"⏯️ AUTO-PLAY kết thúc tại cursor={state['cursor']:,} · "
-                    f"dead nodes: {[i for i, s in enumerate(state['status']) if s == 'dead'] or 'không có'}"
-                )
-                st.rerun()
+                # ----- Event Handlers (Click actions) -----
+                if not state.get("auto_play_active"):
+                    if run_chunk_btn:
+                        end = min(cursor + int(kill_chunk), total)
+                        for j in range(cursor, end):
+                            execute_step(state, j, cfg)
+                        state["cursor"] = end
+                        state["log"].append(f"[cursor={cursor:,} → {end:,}] ▶️ Đã xử lý {end - cursor:,} events thủ công.")
+                        sample_sim_history(state)
+                        st.rerun()
 
-            j_end = min(j_start + chunk_size, ap_end_at)
-            sched_sorted = sorted(state.get("schedule", []), key=lambda x: x[2])
-            sched_idx = state.get("auto_play_sched_idx", 0)
+                    if run_all_btn:
+                        for j in range(cursor, total):
+                            execute_step(state, j, cfg)
+                        state["cursor"] = total
+                        state["log"].append(f"⏭️ Đã xử lý toàn bộ luồng log tới cursor={total:,}")
+                        sample_sim_history(state)
+                        st.rerun()
 
-            last_row, last_host, last_nid = None, None, None
-            for j in range(j_start, j_end):
-                # ---- Trigger scheduled actions ----
-                while sched_idx < len(sched_sorted) and sched_sorted[sched_idx][2] <= j:
-                    act, nid, cur_at = sched_sorted[sched_idx]
-                    if act == "kill" and state["status"][nid] == "alive":
-                        try:
-                            state["engines"][nid].checkpoint()
-                            ck_sz = os.path.getsize(state["ckpt_paths"][nid])
-                        except Exception:
-                            ck_sz = 0
-                        state["status"][nid] = "dead"
-                        state.setdefault("events_markers", []).append(
-                            (j, "kill", nid))
-                        state["log"].append(
-                            f"[cursor={j:,}] ⏰💀 SCHEDULED KILL Node {nid} · "
-                            f"checkpoint {ck_sz}B saved"
-                        )
-                    elif act == "revive" and state["status"][nid] == "dead":
-                        ckpt = state["ckpt_paths"][nid]
-                        try:
-                            eng_new = WatermarkEngine.restore(
-                                ckpt, window_size_s=10.0, allowed_lateness_s=2.0,
-                                checkpoint_interval=200, max_queue=10_000_000)
-                        except Exception:
-                            eng_new = WatermarkEngine(
-                                window_size_s=10.0, allowed_lateness_s=2.0,
-                                checkpoint_interval=200, checkpoint_path=ckpt,
-                                max_queue=10_000_000)
-                        dlq = state["dlq_paths"][nid]
-                        replayed = 0
-                        if os.path.exists(dlq):
-                            with open(dlq, "r", encoding="utf-8") as f:
-                                for line in f:
-                                    line = line.strip()
-                                    if not line:
-                                        continue
-                                    try:
-                                        ev = json.loads(line)
-                                    except json.JSONDecodeError:
-                                        continue
-                                    eng_new.process(ev)
-                                    replayed += 1
-                                    state["node_processed"][nid] += 1
-                            try:
-                                os.remove(dlq)
-                            except OSError:
-                                pass
-                        state["pending"][nid] = []
-                        state["engines"][nid] = eng_new
-                        state["status"][nid] = "alive"
-                        state.setdefault("events_markers", []).append(
-                            (j, "revive", nid))
-                        state["log"].append(
-                            f"[cursor={j:,}] ⏰🔄 SCHEDULED REVIVE Node {nid} · "
-                            f"replay {replayed:,} DLQ events · Exactly-Once OK"
-                        )
-                    sched_idx += 1
+                    if flush_btn:
+                        for i, eng in enumerate(state["engines"]):
+                            if state["status"][i] == "alive":
+                                eng.flush()
+                        state["log"].append(f"[cursor={cursor:,}] 🏁 Đã hoàn thành flush toàn bộ node.")
+                        st.rerun()
 
-                # ---- Process event ----
-                row = state["rows"][j]
-                host = getattr(row, "host", "unknown")
-                nid = partition_key(host, n)
-                ev = {"event_id": row.event_id, "event_time": row.event_time,
-                      "status": row.status}
-                if state["status"][nid] == "alive":
-                    state["engines"][nid].process(ev)
-                    state["node_processed"][nid] += 1
-                else:
-                    with open(state["dlq_paths"][nid], "a", encoding="utf-8") as f:
-                        f.write(json.dumps(ev, ensure_ascii=False) + "\n")
-                    state["pending"][nid].append(ev)
-                    state["node_buffered_total"][nid] += 1
+                    if play_btn:
+                        if auto_until == "Hết stream":
+                            end_at = total
+                        elif auto_until == "+5,000 events":
+                            end_at = min(cursor + 5000, total)
+                        else:
+                            end_at = min(cursor + 10000, total)
+                        
+                        state["auto_play_active"] = True
+                        state["auto_play_end_at"] = int(end_at)
+                        state["auto_play_speed"] = int(speed_eps)
+                        state["auto_play_refresh_n"] = int(refresh_n)
+                        state["auto_play_start"] = int(state["cursor"])
+                        state["log"].append(f"⏯️ BẮT ĐẦU AUTO-PLAY: tốc độ {speed_eps} eps, mốc dừng {end_at:,}.")
+                        st.rerun()
 
-                last_row, last_host, last_nid = row, host, nid
+            with col_right:
+                # ============================================================
+                # INSPECTOR — 4-tab bottom panel: Metrics / DLQ / Files / Log
+                # ============================================================
+                agg = {"unique": 0, "on_time": 0, "duplicates": 0, "late_dropped": 0, "windows": 0}
+                for eng in state["engines"]:
+                    agg["unique"] += eng.metrics["unique"]
+                    agg["on_time"] += eng.metrics["on_time"]
+                    agg["duplicates"] += eng.metrics["duplicates"]
+                    agg["late_dropped"] += eng.metrics["late_dropped"]
+                    agg["windows"] += len(eng.closed_windows)
+                    
+                completeness = 100.0 * agg["on_time"] / max(agg["unique"], 1)
+                total_pending = sum(len(p) for p in state["pending"])
+                dead_count = sum(1 for s in state["status"] if s == "dead")
 
-            state["cursor"] = j_end
-            state["auto_play_sched_idx"] = sched_idx
-            sample_sim_history(state)
+                st.markdown("#### Chi tiết vận hành")
+                ins_metrics, ins_dlq, ins_files, ins_log = st.tabs([
+                    "📊 Biến động & Phân phối", "📭 Preview DLQ trên đĩa", "📁 File hệ thống", "📜 Logs thực thi"
+                ])
 
-            # ---- Periodic dataset log (1 lần / chunk nếu trùng nhịp) ----
-            log_period = max(int(ap_refresh) * 5, 1)
-            if (j_end - ap_start) % log_period < chunk_size and last_row is not None:
-                state["log"].append(
-                    f"[cursor={j_end:,}] 📡 streaming dataset · "
-                    f"event_id={last_row.event_id} host={last_host} "
-                    f"event_time={last_row.event_time:.2f} → Node {last_nid} "
-                    f"({state['status'][last_nid]})"
-                )
+                with ins_metrics:
+                    st.markdown("**Diễn biến toàn cluster theo dòng thời gian (events cursor)**")
+                    render_sim_evolution_chart(st, state, total)
+                    
+                    st.markdown("**Chỉ số KPI gộp**")
+                    m1, m2, m3, m4, m5 = st.columns(5)
+                    m1.metric("Độ đầy đủ (Completeness)", f"{completeness:.2f}%")
+                    m2.metric("Events duy nhất", f"{agg['unique']:,}")
+                    m3.metric("Cửa sổ đã đóng", f"{agg['windows']}")
+                    m4.metric("DLQ đang đệm", f"{total_pending:,}", delta=f"{dead_count} node sập" if dead_count else None)
+                    m5.metric("Lặp được lọc", f"{agg['duplicates']:,}")
 
-            # ---- Render live UI after chunk ----
-            if last_row is not None:
-                live_progress.progress(
-                    j_end / max(total, 1),
-                    text=(f"⏱️ Realtime stream: {j_end:,}/{total:,} · "
-                          f"speed={ap_speed} eps · "
-                          f"event_id={last_row.event_id} · "
-                          f"host={last_host} · status={last_row.status}")
-                )
-                live_diag.plotly_chart(
-                    make_cluster_fig(
-                        state["status"],
-                        list(state["node_processed"]),
-                        [len(e.closed_windows) for e in state["engines"]],
-                        [len(p) for p in state["pending"]],
-                        j_end, total,
-                        highlight_node=last_nid,
-                        tick=j_end - ap_start,
-                    ),
-                    width="content",
-                )
-                _render_live_grid(live_grid, state, n)
-                _render_live_metrics(live_metrics, state)
-                _render_live_log(live_log, state)
+                    st.markdown("**Biểu đồ tải của từng Node**")
+                    node_names = [f"Node {i}" for i in range(n)]
+                    processed_vals = state["node_processed"]
+                    dlq_vals = [len(p) for p in state["pending"]]
+                    color_processed = ["#10B981" if state["status"][i] == "alive" else "#9CA3AF" for i in range(n)]
+                    
+                    dist_fig = go.Figure()
+                    dist_fig.add_trace(go.Bar(
+                        x=node_names, y=processed_vals,
+                        marker_color=color_processed,
+                        name="Đã xử lý (Memory)",
+                        text=[f"{v:,}" for v in processed_vals],
+                        textposition="outside",
+                        hovertemplate="%{x}<br>processed: %{y:,}<extra></extra>",
+                    ))
+                    if any(dlq_vals):
+                        dist_fig.add_trace(go.Bar(
+                            x=node_names, y=dlq_vals,
+                            marker_color="#EF4444",
+                            name="Đệm DLQ (Đĩa)",
+                            text=[f"{v:,}" if v else "" for v in dlq_vals],
+                            textposition="outside",
+                            hovertemplate="%{x}<br>DLQ: %{y:,}<extra></extra>",
+                        ))
+                    dist_fig.update_layout(
+                        height=260, barmode="group",
+                        margin=dict(l=10, r=10, t=20, b=30),
+                        plot_bgcolor="#0F172A", paper_bgcolor="#0F172A",
+                        font=dict(color="#94A3B8"),
+                        xaxis=dict(showgrid=False),
+                        yaxis=dict(title="Events", gridcolor="#1E293B"),
+                        legend=dict(orientation="h", yanchor="bottom", y=1.02, x=0),
+                    )
+                    st.plotly_chart(dist_fig, width="stretch", key="sim_dist_bar")
 
-            # ---- Pace + loop: CHỈ rerun fragment, không rerun cả app ----
-            if j_end < ap_end_at:
-                time.sleep(chunk_size / max(ap_speed, 1))
-                st.rerun(scope="fragment")
-            else:
-                state["auto_play_active"] = False
-                state["log"].append(
-                    f"⏯️ AUTO-PLAY kết thúc tại cursor={state['cursor']:,} · "
-                    f"dead nodes: {[i for i, s in enumerate(state['status']) if s == 'dead'] or 'không có'}"
-                )
-                st.rerun()  # full rerun → khôi phục UI tĩnh
+                with ins_dlq:
+                    dlq_active = [i for i in range(n) if os.path.exists(state["dlq_paths"][i]) and os.path.getsize(state["dlq_paths"][i]) > 0]
+                    if not dlq_active:
+                        st.info("Thư mục Dead-Letter Queue hiện đang trống (Không có node nào sập).", icon="📭")
+                    else:
+                        st.caption("Logs được đệm an toàn trên đĩa dưới định dạng append-only JSONL. Revive node sẽ tự động replay.")
+                        dlq_cols = st.columns(min(len(dlq_active), 3))
+                        for idx, nid in enumerate(dlq_active):
+                            with dlq_cols[idx % len(dlq_cols)]:
+                                dlq_path = state["dlq_paths"][nid]
+                                size = os.path.getsize(dlq_path)
+                                with open(dlq_path, "r", encoding="utf-8") as f:
+                                    all_lines = f.readlines()
+                                n_lines = len(all_lines)
+                                
+                                with st.container(border=True):
+                                    st.markdown(f"**DLQ Node {nid}** &nbsp; :red[● dead]")
+                                    st.caption(f"Đường dẫn: `{os.path.basename(dlq_path)}`")
+                                    
+                                    c_col1, c_col2 = st.columns(2)
+                                    c_col1.metric("Events", f"{n_lines:,}")
+                                    c_col2.metric("Dung lượng", f"{size:,} B")
+                                    
+                                    parsed_events = []
+                                    for ln in all_lines[:5]:
+                                        try:
+                                            parsed_events.append(json.loads(ln))
+                                        except Exception:
+                                            pass
+                                            
+                                    if parsed_events:
+                                        st.caption("Preview 5 sự kiện đầu:")
+                                        st.dataframe(pd.DataFrame(parsed_events), width="stretch", hide_index=True)
 
-        _autoplay_fragment()
+                with ins_files:
+                    sim_dir = state.get("sim_dir", "")
+                    st.markdown("📂 **Thư mục lưu trữ hệ thống**: copy đường dẫn dưới đây để mở trên máy tính của bạn")
+                    st.code(sim_dir, language="text")
+                    
+                    fs_rows = []
+                    for i in range(n):
+                        cp = state["ckpt_paths"][i]
+                        dq = state["dlq_paths"][i]
+                        fs_rows.append({
+                            "Node": f"Node {i}",
+                            "Trạng thái": "SẬP (DEAD)" if state["status"][i] == "dead" else "KHOẺ (ALIVE)",
+                            "Dung lượng Checkpoint (B)": os.path.getsize(cp) if os.path.exists(cp) else 0,
+                            "Dung lượng DLQ đĩa (B)": os.path.getsize(dq) if os.path.exists(dq) else 0,
+                            "Dòng DLQ đệm (RAM)": len(state["pending"][i]),
+                        })
+                    st.dataframe(pd.DataFrame(fs_rows), width="stretch", hide_index=True)
 
-        # ============================================================
-        # INSPECTOR — 4-tab bottom panel: Metrics / DLQ / Files / Log
-        # ============================================================
-        # Pre-compute aggregate metrics (used by multiple tabs)
-        agg = {"unique": 0, "on_time": 0, "duplicates": 0, "late_dropped": 0, "windows": 0}
-        for eng in state["engines"]:
-            agg["unique"] += eng.metrics["unique"]
-            agg["on_time"] += eng.metrics["on_time"]
-            agg["duplicates"] += eng.metrics["duplicates"]
-            agg["late_dropped"] += eng.metrics["late_dropped"]
-            agg["windows"] += len(eng.closed_windows)
-        completeness = 100.0 * agg["on_time"] / max(agg["unique"], 1)
-        total_pending = sum(len(p) for p in state["pending"])
-        dead_count = sum(1 for s in state["status"] if s == "dead")
+                with ins_log:
+                    flt_col, _ = st.columns([1.5, 4])
+                    log_filter = flt_col.selectbox(
+                        "Lọc logs theo loại",
+                        ["Tất cả", "Chỉ sự cố (KILL/REVIVE)", "Chỉ lập lịch (SCHEDULED)", "Chỉ bão log/tăng tải (Spikes/Bursts)", "Chỉ log luồng dữ liệu (STREAM)"],
+                        key="sim_log_filter"
+                    )
+                    
+                    log_lines = state["log"]
+                    if log_filter == "Chỉ sự cố (KILL/REVIVE)":
+                        log_lines = [l for l in log_lines if "KILL" in l.upper() or "REVIVE" in l.upper() or "💀" in l or "🔄" in l]
+                    elif log_filter == "Chỉ lập lịch (SCHEDULED)":
+                        log_lines = [l for l in log_lines if "SCHEDULED" in l.upper() or "⏰" in l]
+                    elif log_filter == "Chỉ bão log/tăng tải (Spikes/Bursts)":
+                        log_lines = [l for l in log_lines if "BURST" in l.upper() or "SPIKE" in l.upper() or "🌪️" in l or "⚡" in l]
+                    elif log_filter == "Chỉ log luồng dữ liệu (STREAM)":
+                        log_lines = [l for l in log_lines if "streaming" in l.lower() or "📡" in l]
+                        
+                    colored = [colorize_log_line(ln) for ln in log_lines[-40:]]
+                    log_html = "<br>".join(colored) if colored else "<i style='color:#94A3B8'>không có log nào khớp bộ lọc</i>"
+                    st.markdown(f'<div class="demo-log">{log_html}</div>', unsafe_allow_html=True)
 
-        st.markdown("#### Chi tiết")
-        ins_metrics, ins_dlq, ins_files, ins_log = st.tabs([
-            "Metric cluster", "DLQ trên đĩa", "File hệ thống", "Event log",
-        ])
+                # Final Done Check
+                if done and total_pending == 0 and dead_count == 0:
+                    st.success(
+                        f"🎉 **Hoàn thành toàn bộ luồng mô phỏng sự cố!**\n\n"
+                        f"- Độ đầy đủ (Completeness) cluster đạt: **{completeness:.2f}%**\n"
+                        f"- Tổng số log đã đệm DLQ và khôi phục thành công: **{sum(state['node_buffered_total']):,} events**.\n"
+                        f"👉 **Đảm bảo Exactly-Once Semantics thành công cho toàn cluster dù có sập node giữa luồng stream!**",
+                        icon="✅"
+                    )
 
-        # ── Tab: Metric cluster (Evolution + Aggregate + Distribution) ──
-        with ins_metrics:
-            # ▶ Live Evolution Chart — completeness + DLQ + alive nodes vs cursor
-            st.markdown("**Diễn biến cluster theo thời gian (event cursor)**")
-            st.caption(
-                "Trục x = cursor (số event đã xử lý). "
-                ":green[Completeness] giảm khi node chết · "
-                ":red[DLQ] phình ra khi data dồn lại · "
-                ":blue[Alive count] tụt khi kill. "
-                "Vạch dọc = thời điểm kill (💀) / revive (🔄)."
-            )
-            render_sim_evolution_chart(st, state, total)
+        # Call the simulation tab fragment
+        _sim_lab_dashboard_fragment()
 
-            st.markdown("**KPI gộp toàn cluster**")
-            m1, m2, m3, m4, m5 = st.columns(5)
-            m1.metric("Completeness", f"{completeness:.2f}%")
-            m2.metric("Unique events", f"{agg['unique']:,}")
-            m3.metric("Windows closed", f"{agg['windows']}")
-            m4.metric("Đang buffer (dead)", f"{total_pending:,}",
-                      delta=f"{dead_count} node dead" if dead_count else None)
-            m5.metric("Duplicates lọc", f"{agg['duplicates']:,}")
-
-            st.markdown("**Phân phối tải theo Node**  (`hash(host) % N` skew)")
-            # Plotly horizontal bar — đẹp hơn st.bar_chart, có hover tooltip
-            node_names = [f"Node {i}" for i in range(n)]
-            processed_vals = state["node_processed"]
-            dlq_vals = [len(p) for p in state["pending"]]
-            color_processed = ["#10B981" if state["status"][i] == "alive" else "#9CA3AF"
-                               for i in range(n)]
-            dist_fig = go.Figure()
-            dist_fig.add_trace(go.Bar(
-                x=node_names, y=processed_vals,
-                marker_color=color_processed,
-                name="Processed",
-                text=[f"{v:,}" for v in processed_vals],
-                textposition="outside",
-                hovertemplate="%{x}<br>processed: %{y:,}<extra></extra>",
-            ))
-            if any(dlq_vals):
-                dist_fig.add_trace(go.Bar(
-                    x=node_names, y=dlq_vals,
-                    marker_color="#EF4444",
-                    name="DLQ buffered",
-                    text=[f"{v:,}" if v else "" for v in dlq_vals],
-                    textposition="outside",
-                    hovertemplate="%{x}<br>DLQ: %{y:,}<extra></extra>",
-                ))
-            dist_fig.update_layout(
-                height=260, barmode="group",
-                margin=dict(l=10, r=10, t=20, b=30),
-                plot_bgcolor="#F8FAFC", paper_bgcolor="#FFFFFF",
-                xaxis=dict(showgrid=False),
-                yaxis=dict(title="Events", gridcolor="#E5E7EB"),
-                legend=dict(orientation="h", yanchor="bottom", y=1.02, x=0),
-            )
-            st.plotly_chart(dist_fig, width="stretch",
-                            key="dist_bar")
-
-        # ── Tab: DLQ on disk ──
-        with ins_dlq:
-            dlq_active = [i for i in range(n)
-                          if os.path.exists(state["dlq_paths"][i])
-                          and os.path.getsize(state["dlq_paths"][i]) > 0]
-            if not dlq_active:
-                st.info("Hiện không có DLQ nào — không có node nào đang chết hoặc đã được revive.",
-                        icon="📭")
-            else:
-                st.caption(
-                    "Mỗi file JSONL append-only chứa events đáng lẽ tới node đang chết. "
-                    "Revive node → Coordinator đọc & replay từng dòng rồi xoá file."
-                )
-                dlq_cols = st.columns(min(len(dlq_active), 3))
-                for col_idx, nid in enumerate(dlq_active):
-                    with dlq_cols[col_idx % len(dlq_cols)]:
-                        dlq_path = state["dlq_paths"][nid]
-                        size = os.path.getsize(dlq_path)
-                        with open(dlq_path, "r", encoding="utf-8") as f:
-                            all_lines = f.readlines()
-                        n_lines = len(all_lines)
-                        preview_lines = all_lines[:5]
-                        if n_lines > 10:
-                            preview_lines += [f"...  ({n_lines - 10} dòng giữa)  ...\n"]
-                            preview_lines += all_lines[-5:]
-                        elif n_lines > 5:
-                            preview_lines += all_lines[5:]
-
-                        with st.container(border=True):
-                            st.markdown(f"**Node {nid}** &nbsp; :red[● dead]")
-                            st.caption(f"`{dlq_path}`")
-                            s1, s2 = st.columns(2)
-                            s1.metric("Events", f"{n_lines:,}")
-                            s2.metric("Size", f"{size:,} B")
-                            parsed = []
-                            for ln in all_lines[:8]:
-                                try:
-                                    parsed.append(json.loads(ln))
-                                except Exception:
-                                    continue
-                            if parsed:
-                                st.caption("Preview 8 events đầu:")
-                                st.dataframe(pd.DataFrame(parsed),
-                                             width="stretch",
-                                             hide_index=True, height=160)
-                            with st.expander("Xem raw JSONL (head + tail)"):
-                                st.code("".join(preview_lines), language="json")
-
-        # ── Tab: Filesystem explorer ──
-        with ins_files:
-            sim_dir = state.get("sim_dir", "")
-            st.caption("Copy path vào Explorer / VS Code để xem checkpoint + DLQ realtime.")
-            st.code(sim_dir, language="text")
-            fs_rows = []
-            for i in range(n):
-                cp = state["ckpt_paths"][i]
-                dq = state["dlq_paths"][i]
-                fs_rows.append({
-                    "Node": f"Node {i}",
-                    "Status": "dead" if state["status"][i] == "dead" else "alive",
-                    "Checkpoint": cp,
-                    "Ckpt size (B)": os.path.getsize(cp) if os.path.exists(cp) else 0,
-                    "DLQ file": dq,
-                    "DLQ size (B)": os.path.getsize(dq) if os.path.exists(dq) else 0,
-                    "DLQ events (mem)": len(state["pending"][i]),
-                })
-            st.dataframe(pd.DataFrame(fs_rows),
-                         width="stretch", hide_index=True)
-
-        # ── Tab: Event log (colorized + filter) ──
-        with ins_log:
-            flt_col, _ = st.columns([1, 4])
-            log_filter = flt_col.selectbox(
-                "Bộ lọc",
-                ["Tất cả", "Chỉ KILL/REVIVE", "Chỉ SCHEDULED", "Chỉ STREAM"],
-                key="log_filter", label_visibility="collapsed",
-            )
-            log_lines = state["log"]
-            if log_filter == "Chỉ KILL/REVIVE":
-                log_lines = [l for l in log_lines
-                             if "KILL" in l.upper() or "REVIVE" in l.upper()
-                             or "💀" in l or "🔄" in l]
-            elif log_filter == "Chỉ SCHEDULED":
-                log_lines = [l for l in log_lines
-                             if "SCHEDULED" in l.upper() or "⏰" in l]
-            elif log_filter == "Chỉ STREAM":
-                log_lines = [l for l in log_lines
-                             if "streaming" in l.lower() or "📡" in l]
-
-            colored = [colorize_log_line(ln) for ln in log_lines[-30:]]
-            log_html = ("<br>".join(colored) if colored
-                        else "<i style='color:#94A3B8'>không có log nào khớp bộ lọc</i>")
-            st.markdown(f'<div class="demo-log">{log_html}</div>',
-                        unsafe_allow_html=True)
-
-        if done and total_pending == 0 and dead_count == 0:
-            st.success(
-                f"Hoàn tất! Completeness toàn cluster = **{completeness:.2f}%** · "
-                f"Tổng buffered từng dùng = {sum(state['node_buffered_total']):,} events "
-                f"(đã replay sạch sau revive) → **Exactly-Once đạt được dù có node chết giữa chừng**.",
-                icon="✅",
-            )

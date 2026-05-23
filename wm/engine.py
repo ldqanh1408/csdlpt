@@ -161,6 +161,7 @@ class WatermarkEngine:
                              for k, v in self.windows.items()},
             "closed_windows": {str(k): v
                                for k, v in self.closed_windows.items()},
+            "seen_ids": sorted(self.seen_ids),
         }
         tmp = self.checkpoint_path + ".tmp"
         with open(tmp, "w") as f:
@@ -192,6 +193,7 @@ class WatermarkEngine:
             eng.windows[float(k)] = WindowState(count=c, status_500=s)
         eng.closed_windows = {float(k): v
                               for k, v in snap["closed_windows"].items()}
+        eng.seen_ids = set(snap.get("seen_ids", []))
         return eng
 
     # ---------- Tổng hợp ----------
