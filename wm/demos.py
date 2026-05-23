@@ -8,9 +8,10 @@
 import os
 import tempfile
 
-from wm.eôngngine import WatermarkEngine
+from wm.engine import WatermarkEngine
+from wm.config import EngineConfig
 
-WINDOW_S = 10.0
+CONFIG = EngineConfig()
 TMP = tempfile.gettempdir()
 
 
@@ -18,7 +19,7 @@ def crash_recovery_demo(df):
     """[State Management - Excellent] Chứng minh state sống sót qua crash."""
     print("\n=== STATE RECOVERY DEMO ===")
     ckpt = os.path.join(TMP, "recovery.json")
-    eng = WatermarkEngine(window_size_s=WINDOW_S, allowed_lateness_s=2.0,
+    eng = WatermarkEngine(window_size_s=CONFIG.window_size_s, allowed_lateness_s=2.0,
                           checkpoint_interval=500, checkpoint_path=ckpt)
     rows = list(df.itertuples(index=False))
     half = len(rows) // 2
@@ -31,7 +32,7 @@ def crash_recovery_demo(df):
           f"{before['on_time']}, unique={before['unique']}")
 
     del eng  # mô phỏng PROCESS BỊ CHẾT
-    eng2 = WatermarkEngine.restore(ckpt, window_size_s=WINDOW_S,
+    eng2 = WatermarkEngine.restore(ckpt, window_size_s=CONFIG.window_size_s,
                                    allowed_lateness_s=2.0)
     print(f"Sau khi khôi phục từ checkpoint: on_time="
           f"{eng2.metrics['on_time']}, unique={eng2.metrics['unique']}")
@@ -49,7 +50,7 @@ def backpressure_demo(df):
     kiểm soát thay vì crash. Không ảnh hưởng số liệu sweep chính."""
     print("\n=== BACKPRESSURE DEMO (separate from sweep) ===")
     eng = WatermarkEngine(
-        window_size_s=WINDOW_S, allowed_lateness_s=2.0,
+        window_size_s=CONFIG.window_size_s, allowed_lateness_s=2.0,
         checkpoint_interval=5000,
         checkpoint_path=os.path.join(TMP, "bp_ckpt.json"),
         max_queue=10_000)

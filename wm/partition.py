@@ -8,8 +8,9 @@ import os
 import tempfile
 
 from wm.engine import WatermarkEngine
+from wm.config import EngineConfig
 
-WINDOW_S = 10.0
+CONFIG = EngineConfig()
 TMP = tempfile.gettempdir()
 
 
@@ -25,7 +26,7 @@ def run_cluster(df, allowed_lateness_ms: float, n_nodes: int):
     windows) cùng phân phối event theo node để đo hot-key skew."""
     engines = [
         WatermarkEngine(
-            window_size_s=WINDOW_S,
+            window_size_s=CONFIG.window_size_s,
             allowed_lateness_s=allowed_lateness_ms / 1000.0,
             checkpoint_interval=5000,
             checkpoint_path=os.path.join(
