@@ -60,11 +60,13 @@ Logic core nằm trong package `wm/`; root chỉ có 3 script CLI/driver mỏng.
 | `wm/partition.py`      | Distributed N-node: `hash(host) % N`, merge metrics, đo hot-key skew |
 | `wm/data/synthetic.py` | Sinh `Web_Server_Logs` mô phỏng (out-of-order + duplicate) |
 | `wm/data/nasa.py`      | Đọc NASA-HTTP thật (`.gz` hoặc `dataset/data.csv`) + sinh arrival-time |
+| `ui/`                  | Package UI: styles, helpers, và 7 tab (overview, stream, sweep, demos, dist, sim, report) |
 | `analysis.py`          | CLI: sweep + recovery + backpressure demo |
 | `distributed_sweep.py` | CLI: chạy cluster N-node, in bảng kết quả |
-| `app.py`               | Dashboard Streamlit 6 tab — interface chính để demo (xem bảng tab ở trên) |
+| `app.py`               | Dashboard Streamlit 7 tab — entry point mỏng, delegate sang `ui/` |
 | `.simdata/`            | Sinh khi chạy tab Kill Node: `checkpoints/` (state snapshot atomic) + `dlq/` (Dead-Letter Queue `.jsonl` append-only) |
-| `REPORT.md`            | Bản phân tích Strict vs Heuristic (deliverable) |
+| `docs/`                | Tài liệu chính thức: DESIGN, SYSTEM_REPORT, EOS_MARKER, GLOSSARY, INFRASTRUCTURE, PERFORMANCE, INDEX |
+| `pending/`             | Tài liệu đang xem xét: PROPOSAL, REPORT, ARCHITECTURE |
 
 ## Bám vào rubric — vì sao đạt Excellent
 
