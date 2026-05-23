@@ -371,6 +371,153 @@ def make_cluster_fig(statuses, processed, windows_closed, dlq_counts,
 
 
 # ============================================================
+# STATE RECOVERY SVG DIAGRAM (TAB 4)
+# ============================================================
+def generate_recovery_svg(state, processed_e=0, dup_filtered=0):
+    e1_class = "node-box"
+    e2_class = "node-box"
+    disk_class = "node-box"
+    
+    path1_class = "flow-line"
+    path2_class = "flow-line"
+    
+    e1_status = "READY"
+    e1_sub = f"Processed: {processed_e} log" if state in ["eng1_running", "checkpoint", "crashed"] else "Processed: 0"
+    
+    disk_status = "No Snapshot"
+    disk_sub = "Empty"
+    
+    e2_status = "OFFLINE"
+    e2_sub = "Processed: 0"
+    
+    if state == "init":
+        e1_class += " status-ready"
+        e1_status = "READY"
+    elif state == "eng1_running":
+        e1_class += " status-running"
+        e1_status = "RUNNING 🔄"
+    elif state == "checkpoint":
+        e1_class += " status-running"
+        e1_status = "CHECKPOINTING 💾"
+        disk_class += " status-saved"
+        disk_status = "SNAPSHOT SAVED 💾"
+        disk_sub = "web_recovery.json"
+        path1_class += " flow-line-active-blue"
+    elif state == "crashed":
+        e1_class += " status-crashed"
+        e1_status = "CRASHED 💀"
+        disk_class += " status-saved"
+        disk_status = "SNAPSHOT SAVED 💾"
+        disk_sub = "web_recovery.json"
+    elif state == "eng2_restore":
+        e1_class += " status-muted"
+        e1_status = "CRASHED 💀"
+        disk_class += " status-saved"
+        disk_status = "SNAPSHOT SAVED 💾"
+        disk_sub = "web_recovery.json"
+        e2_class += " status-restore"
+        e2_status = "RESTORING... 🔄"
+        e2_sub = "Restoring state"
+        path2_class += " flow-line-active-green"
+    elif state == "eng2_running":
+        e1_class += " status-muted"
+        e1_status = "OFFLINE ❌"
+        disk_class += " status-saved"
+        disk_status = "SNAPSHOT SAVED 💾"
+        disk_sub = "web_recovery.json"
+        e2_class += " status-active-green"
+        e2_status = "RUNNING (RECOVERED)"
+        e2_sub = f"Processed: {processed_e} log"
+    elif state == "done":
+        e1_class += " status-muted"
+        e1_status = "OFFLINE ❌"
+        disk_class += " status-saved"
+        disk_status = "SNAPSHOT SAVED 💾"
+        disk_sub = "web_recovery.json"
+        e2_class += " status-active-green"
+        e2_status = "COMPLETED 🏁"
+        e2_sub = f"Exactly-Once: OK ✅"
+
+    svg = f"""
+    <svg width="100%" height="200" viewBox="0 0 650 200" xmlns="http://www.w3.org/2000/svg">
+      <defs>
+        <filter id="glow-blue" x="-20%" y="-20%" width="140%" height="140%">
+          <feGaussianBlur stdDeviation="6" result="blur" />
+          <feComposite in="SourceGraphic" in2="blur" operator="over" />
+        </filter>
+        <filter id="glow-red" x="-20%" y="-20%" width="140%" height="140%">
+          <feGaussianBlur stdDeviation="6" result="blur" />
+          <feComposite in="SourceGraphic" in2="blur" operator="over" />
+        </filter>
+        <filter id="glow-green" x="-20%" y="-20%" width="140%" height="140%">
+          <feGaussianBlur stdDeviation="6" result="blur" />
+          <feComposite in="SourceGraphic" in2="blur" operator="over" />
+        </filter>
+        <filter id="glow-amber" x="-20%" y="-20%" width="140%" height="140%">
+          <feGaussianBlur stdDeviation="6" result="blur" />
+          <feComposite in="SourceGraphic" in2="blur" operator="over" />
+        </filter>
+      </defs>
+      <style>
+        .node-box {{ fill: #1E293B; stroke: #334155; stroke-width: 2; transition: all 0.5s ease; }}
+        .node-title {{ font-family: 'Outfit', sans-serif; font-size: 13px; font-weight: bold; fill: #F8FAFC; text-anchor: middle; }}
+        .node-text {{ font-family: 'Outfit', sans-serif; font-size: 11px; fill: #94A3B8; text-anchor: middle; }}
+        .node-metric {{ font-family: 'JetBrains Mono', monospace; font-size: 11px; fill: #38BDF8; text-anchor: middle; }}
+        .node-metric-green {{ font-family: 'JetBrains Mono', monospace; font-size: 11px; fill: #34D399; text-anchor: middle; }}
+        
+        .status-ready {{ stroke: #64748B; }}
+        .status-running {{ stroke: #3B82F6; filter: url(#glow-blue); }}
+        .status-crashed {{ stroke: #EF4444; filter: url(#glow-red); }}
+        .status-saved {{ stroke: #F59E0B; filter: url(#glow-amber); }}
+        .status-restore {{ stroke: #06B6D4; filter: url(#glow-blue); }}
+        .status-active-green {{ stroke: #10B981; filter: url(#glow-green); }}
+        .status-muted {{ stroke: #1E293B; stroke-dasharray: 4,4; opacity: 0.5; }}
+        
+        .flow-line {{ fill: none; stroke: #334155; stroke-width: 3; transition: all 0.5s ease; }}
+        .flow-line-active-blue {{ stroke: #3B82F6; stroke-dasharray: 6, 4; animation: dash 1s linear infinite; }}
+        .flow-line-active-green {{ stroke: #10B981; stroke-dasharray: 6, 4; animation: dash 1s linear infinite; }}
+        
+        @keyframes dash {{
+          to {{
+            stroke-dashoffset: -20;
+          }}
+        }}
+      </style>
+      
+      <!-- Box 1: Engine 1 -->
+      <rect class="{e1_class}" x="15" y="30" width="160" height="130" rx="10" ry="10" />
+      <text class="node-title" x="95" y="60">ENGINE 1</text>
+      <text class="node-text" x="95" y="90">{e1_status}</text>
+      <text class="node-metric" x="95" y="120">{e1_sub}</text>
+      
+      <!-- Connection 1 -->
+      <path class="{path1_class}" d="M 175 95 L 245 95" />
+      
+      <!-- Box 2: State Store -->
+      <rect class="{disk_class}" x="245" y="30" width="160" height="130" rx="10" ry="10" />
+      <text class="node-title" x="325" y="60">💾 STATE STORE</text>
+      <text class="node-text" x="325" y="90">{disk_status}</text>
+      <text class="node-text" x="325" y="120" style="font-size: 10px; fill: #F59E0B;">{disk_sub}</text>
+      
+      <!-- Connection 2 -->
+      <path class="{path2_class}" d="M 405 95 L 475 95" />
+      
+      <!-- Box 3: Engine 2 -->
+      <rect class="{e2_class}" x="475" y="30" width="160" height="130" rx="10" ry="10" />
+      <text class="node-title" x="555" y="60">ENGINE 2</text>
+      <text class="node-text" x="555" y="90">{e2_status}</text>
+      <text class="node-metric-green" x="555" y="120">{e2_sub}</text>
+    </svg>
+    """
+    return svg
+
+
+def update_recovery_diagram(placeholder, state, processed_e=0):
+    with placeholder:
+        st.components.v1.html(generate_recovery_svg(state, processed_e), height=210)
+
+
+# ============================================================
 # ANIMATED DYNAMIC SVG TOPOLOGY DIAGRAM
 # ============================================================
 def generate_svg_cluster(statuses, processed, windows_closed, dlq_counts, ckpt_sizes, highlight_node=None, tick=0):
@@ -1191,20 +1338,40 @@ with tab_overview:
             width="stretch",
         )
 
-        fig_q, axq = plt.subplots(figsize=(8, 3.2))
-        axq.plot([r["allowed_lateness_ms"] for r in quick_rows],
-                 [r["data_completeness_pct"] for r in quick_rows],
-                 "o-", color="#1D4ED8", lw=2, label="Completeness %")
-        axq2 = axq.twinx()
-        axq2.plot([r["allowed_lateness_ms"] for r in quick_rows],
-                  [r["avg_result_latency_ms"] for r in quick_rows],
-                  "s--", color="#DC2626", lw=2, label="Result Latency (ms)")
-        axq.set_xlabel("Wait Time (ms)")
-        axq.set_ylabel("Completeness %", color="#1D4ED8")
-        axq2.set_ylabel("Result Latency (ms)", color="#DC2626")
-        axq.grid(alpha=0.3)
-        fig_q.tight_layout()
-        st.pyplot(fig_q)
+        import plotly.graph_objects as go
+        fig_q = go.Figure()
+        fig_q.add_trace(go.Scatter(
+            x=[r["allowed_lateness_ms"] for r in quick_rows],
+            y=[r["data_completeness_pct"] for r in quick_rows],
+            mode="lines+markers",
+            name="Độ đầy đủ (Completeness %)",
+            line=dict(color="#3B82F6", width=3),
+            marker=dict(size=9, color="#3B82F6", line=dict(color="white", width=1.5)),
+            hovertemplate="Wait %{x}ms<br>Completeness %{y:.2f}%<extra></extra>"
+        ))
+        fig_q.add_trace(go.Scatter(
+            x=[r["allowed_lateness_ms"] for r in quick_rows],
+            y=[r["avg_result_latency_ms"] for r in quick_rows],
+            mode="lines+markers",
+            name="Độ trễ (Result Latency ms)",
+            line=dict(color="#EF4444", width=2, dash="dash"),
+            marker=dict(size=8, symbol="square", color="#EF4444", line=dict(color="white", width=1.5)),
+            yaxis="y2",
+            hovertemplate="Wait %{x}ms<br>Latency %{y:.1f}ms<extra></extra>"
+        ))
+        fig_q.update_layout(
+            height=260,
+            margin=dict(l=10, r=10, t=30, b=30),
+            plot_bgcolor="#0F172A",
+            paper_bgcolor="#0F172A",
+            font=dict(color="#94A3B8"),
+            xaxis=dict(title="Wait Time (ms)", gridcolor="#1E293B"),
+            yaxis=dict(title="Completeness %", color="#3B82F6", gridcolor="#1E293B"),
+            yaxis2=dict(title="Latency (ms)", color="#EF4444", overlaying="y", side="right", showgrid=False),
+            legend=dict(orientation="h", yanchor="bottom", y=1.05, x=0),
+            hovermode="x unified"
+        )
+        st.plotly_chart(fig_q, width="stretch", key="quick_demo_chart")
         st.success("✅ Demo nhanh hoàn tất! Chuyển sang các tab khác để chạy các kịch bản đầy đủ.")
 
 
@@ -1234,6 +1401,117 @@ with tab_report:
 # TAB 2 — LIVE STREAM
 # ============================================================
 with tab_stream:
+    st.markdown("""
+<style>
+    .ingestion-card {
+        background: linear-gradient(135deg, #1E293B 0%, #0F172A 100%);
+        border: 1px solid #334155;
+        border-radius: 12px;
+        padding: 20px;
+        box-shadow: 0 8px 32px rgba(0, 0, 0, 0.4);
+        margin-bottom: 20px;
+    }
+    .card-header {
+        display: flex;
+        justify-content: space-between;
+        align-items: center;
+        border-bottom: 1px solid #334155;
+        padding-bottom: 12px;
+        margin-bottom: 16px;
+    }
+    .status-badge {
+        padding: 4px 12px;
+        border-radius: 999px;
+        font-size: 0.75rem;
+        font-weight: bold;
+        text-transform: uppercase;
+        letter-spacing: 0.5px;
+    }
+    .status-badge.ingesting {
+        background-color: rgba(16, 185, 129, 0.15);
+        color: #10B981;
+        border: 1px solid #10B981;
+        box-shadow: 0 0 10px rgba(16, 185, 129, 0.3);
+        animation: pulse-green-badge 2s infinite;
+    }
+    .status-badge.completed {
+        background-color: rgba(59, 130, 246, 0.15);
+        color: #3B82F6;
+        border: 1px solid #3B82F6;
+    }
+    .status-badge.paused {
+        background-color: rgba(245, 158, 11, 0.15);
+        color: #F59E0B;
+        border: 1px solid #F59E0B;
+    }
+    .status-badge.ready {
+        background-color: rgba(148, 163, 184, 0.15);
+        color: #94A3B8;
+        border: 1px solid #94A3B8;
+    }
+    .card-grid {
+        display: grid;
+        grid-template-columns: repeat(4, 1fr);
+        gap: 16px;
+        margin-bottom: 16px;
+    }
+    .metric-box {
+        background: rgba(30, 41, 59, 0.5);
+        border: 1px solid #334155;
+        border-radius: 8px;
+        padding: 12px;
+        display: flex;
+        flex-direction: column;
+    }
+    .metric-label {
+        font-size: 0.75rem;
+        color: #94A3B8;
+        margin-bottom: 4px;
+    }
+    .metric-val {
+        font-size: 1.25rem;
+        font-weight: bold;
+        color: #F8FAFC;
+    }
+    .metric-val.text-red {
+        color: #EF4444 !important;
+    }
+    .metric-val.text-blue {
+        color: #3B82F6 !important;
+    }
+    .queue-monitor {
+        background: rgba(15, 23, 42, 0.4);
+        border: 1px solid #1E293B;
+        border-radius: 8px;
+        padding: 12px;
+    }
+    .queue-info {
+        display: flex;
+        justify-content: space-between;
+        font-size: 0.8rem;
+        color: #94A3B8;
+        margin-bottom: 6px;
+    }
+    .queue-bar-container {
+        height: 8px;
+        background: #1E293B;
+        border-radius: 4px;
+        overflow: hidden;
+    }
+    .queue-bar {
+        height: 100%;
+        background: linear-gradient(90deg, #3B82F6 0%, #10B981 100%);
+        border-radius: 4px;
+        transition: width 0.3s ease;
+    }
+    @keyframes pulse-green-badge {
+        0% { box-shadow: 0 0 0 0 rgba(16, 185, 129, 0.4); }
+        70% { box-shadow: 0 0 0 10px rgba(16, 185, 129, 0); }
+        100% { box-shadow: 0 0 0 0 rgba(16, 185, 129, 0); }
+    }
+</style>
+""", unsafe_allow_html=True)
+
     st.header("📈 Trực quan hóa Live Stream (Data in Motion)")
     st.markdown(
         "Cửa sổ thời gian được gán theo **event-time**. Stream log nạp theo **arrival-time** "
@@ -1348,46 +1626,112 @@ with tab_stream:
     def _render_stream_ui(eng, src, end_idx, total_rows, qlen):
         uniq = max(eng.metrics["unique"], 1)
         comp = 100.0 * eng.metrics["on_time"] / uniq
-        mc1, mc2, mc3, mc4 = st.columns(4)
-        mc1.metric("Completeness", f"{comp:.2f}%")
-        # Watermark: -inf (chưa có event) / +inf (sau flush) → lọc trước
+        
+        # Calculate watermark string
         wm = eng.watermark
         if wm == float("-inf"):
-            mc2.metric("Watermark", "—")
+            wm_val = "—"
         elif wm == float("inf"):
-            mc2.metric("Watermark", "∞ (đã flush)")
+            wm_val = "∞ (đã flush)"
         else:
             try:
                 if src == "Synthetic":
                     wm_val = f"{wm - 1_700_000_000:.1f} s"
                 else:
                     wm_val = time.strftime("%H:%M:%S", time.localtime(wm))
-                mc2.metric("Watermark", wm_val)
-            except (OverflowError, ValueError, OSError):
-                mc2.metric("Watermark", f"{wm:.0f}")
-        mc3.metric("Late dropped", f"{eng.metrics['late_dropped']}")
-        mc4.metric("Duplicates", f"{eng.metrics['duplicates']}")
+            except:
+                wm_val = f"{wm:.0f}"
+                
+        # Determine state for status badge
+        active = st.session_state.get("stream_active", False)
+        done = st.session_state.get("stream_done", False)
+        cursor = st.session_state.get("stream_cursor", 0)
+        
+        if active:
+            status_text = "INGESTING"
+            status_class = "ingesting"
+        elif done:
+            status_text = "COMPLETED"
+            status_class = "completed"
+        elif cursor > 0:
+            status_text = "PAUSED"
+            status_class = "paused"
+        else:
+            status_text = "READY"
+            status_class = "ready"
+            
+        q_pct = min(100.0 * qlen / max(eng.max_queue, 1), 100.0)
+        
+        # Custom HTML Ingestion Monitor Card
+        html_card = f"""
+        <div class="ingestion-card">
+          <div class="card-header">
+             <h3 style="margin:0; font-family:'Outfit', sans-serif;">⚡ Ingestion Monitor</h3>
+             <span class="status-badge {status_class}">{status_text}</span>
+          </div>
+          <div class="card-grid">
+             <div class="metric-box">
+               <span class="metric-label">Completeness</span>
+               <span class="metric-val">{comp:.2f}%</span>
+             </div>
+             <div class="metric-box">
+               <span class="metric-label">Watermark</span>
+               <span class="metric-val">{wm_val}</span>
+             </div>
+             <div class="metric-box">
+               <span class="metric-label">Late Dropped</span>
+               <span class="metric-val text-red">{eng.metrics['late_dropped']:,}</span>
+             </div>
+             <div class="metric-box">
+               <span class="metric-label">Duplicates</span>
+               <span class="metric-val text-blue">{eng.metrics['duplicates']:,}</span>
+             </div>
+          </div>
+          <div class="queue-monitor">
+             <div class="queue-info">
+               <span>Queue depth: <strong>{qlen:,} / {eng.max_queue:,}</strong></span>
+               <span>{q_pct:.1f}% capacity</span>
+             </div>
+             <div class="queue-bar-container">
+               <div class="queue-bar" style="width: {q_pct}%"></div>
+             </div>
+          </div>
+        </div>
+        """
+        st.markdown(html_card, unsafe_allow_html=True)
 
-        cc1, cc2 = st.columns([3, 1])
-        with cc1:
-            if eng.closed_windows:
-                cw_keys = sorted(eng.closed_windows.keys())
-                if src == "Synthetic":
-                    cw = pd.Series({k - 1_700_000_000: eng.closed_windows[k]["count"]
-                                    for k in cw_keys})
-                    st.bar_chart(cw, horizontal=True,
-                                 x_label="Events (CLOSED)",
-                                 y_label="Window Start (s tương đối)")
-                else:
-                    cw = pd.Series({time.strftime("%H:%M:%S", time.localtime(k)):
-                                    eng.closed_windows[k]["count"] for k in cw_keys})
-                    st.bar_chart(cw, horizontal=True,
-                                 x_label="Events (CLOSED)",
-                                 y_label="Window time")
+        # Closed windows Plotly bar chart
+        if eng.closed_windows:
+            cw_keys = sorted(eng.closed_windows.keys())
+            if src == "Synthetic":
+                cw_x = [f"W {k - 1_700_000_000:.0f}s" for k in cw_keys]
+                cw_y = [eng.closed_windows[k]["count"] for k in cw_keys]
+                x_label = "Cửa sổ (event-time)"
             else:
-                st.caption("Chưa có cửa sổ nào đóng — watermark chưa vượt "
-                           "qua window đầu tiên.")
-        cc2.metric("Queue", f"{qlen} / {eng.max_queue}")
+                cw_x = [time.strftime("%H:%M:%S", time.localtime(k)) for k in cw_keys]
+                cw_y = [eng.closed_windows[k]["count"] for k in cw_keys]
+                x_label = "Thời gian cửa sổ"
+                
+            fig_cw = go.Figure()
+            fig_cw.add_trace(go.Bar(
+                x=cw_x, y=cw_y,
+                marker_color="#3B82F6",
+                hovertemplate="Cửa sổ: %{x}<br>Số sự kiện: %{y:,}<extra></extra>"
+            ))
+            fig_cw.update_layout(
+                height=280, margin=dict(l=10, r=10, t=30, b=30),
+                title=dict(text="📊 Phân phối sự kiện trong các cửa sổ ĐÃ CHỐT",
+                           font=dict(size=12, color="#E2E8F0")),
+                plot_bgcolor="#0F172A", paper_bgcolor="#0F172A",
+                font=dict(color="#94A3B8"),
+                xaxis=dict(title=x_label, gridcolor="#1E293B"),
+                yaxis=dict(title="Events Count", gridcolor="#1E293B"),
+                showlegend=False
+            )
+            st.plotly_chart(fig_cw, width="stretch", key=f"stream_cw_chart_{end_idx}")
+        else:
+            st.info("Chưa có cửa sổ nào đóng — watermark chưa vượt qua window đầu tiên.")
+
         st.progress(end_idx / max(total_rows, 1),
                     text=f"⏱️ Stream: {end_idx:,}/{total_rows:,}")
 
@@ -1637,6 +1981,8 @@ with tab_demos:
         events_recovery = st.number_input("Số log demo", min_value=1000, max_value=50000, value=5000, step=1000, key="recovery_events")
         run_recovery_btn = st.button("▶️ Chạy Crash Recovery")
         recovery_log = st.empty()
+        recovery_diag_placeholder = st.empty()
+        update_recovery_diagram(recovery_diag_placeholder, "init")
 
         if run_recovery_btn:
             log_output = []
@@ -1645,6 +1991,7 @@ with tab_demos:
                 recovery_log.markdown(f'<div class="demo-log">{"".join(log_output)}</div>', unsafe_allow_html=True)
                 time.sleep(0.4)
 
+            update_recovery_diagram(recovery_diag_placeholder, "eng1_running", processed_e=0)
             log_print("🚀 Khởi chạy Crash Recovery Demo...\n")
             df = generate_logs(n_events=events_recovery)
             rows = list(df.itertuples(index=False))
@@ -1656,7 +2003,13 @@ with tab_demos:
             eng = WatermarkEngine(checkpoint_path=ckpt_path, **_rec_cfg.to_engine_kwargs())
             for r in rows[:half]:
                 eng.process({"event_id": r.event_id, "event_time": r.event_time, "status": r.status})
+            
+            update_recovery_diagram(recovery_diag_placeholder, "eng1_running", processed_e=half)
+            log_print("💾 Ghi Checkpoint Atomic lên đĩa...\n")
             eng.checkpoint()
+            
+            update_recovery_diagram(recovery_diag_placeholder, "checkpoint", processed_e=half)
+            time.sleep(0.8)
 
             before = dict(eng.metrics)
             log_print(f"📊 Trạng thái Engine 1 TRƯỚC khi crash:\n"
@@ -1666,10 +2019,18 @@ with tab_demos:
 
             log_print("🔥 !!! CRASH !!! Tiến trình DIE đột ngột.\n")
             del eng
+            
+            update_recovery_diagram(recovery_diag_placeholder, "crashed", processed_e=half)
+            time.sleep(1.0)
 
             log_print("🔄 Engine 2 khởi tạo và RESTORE từ checkpoint...\n")
+            update_recovery_diagram(recovery_diag_placeholder, "eng2_restore", processed_e=half)
+            time.sleep(1.2)
+            
             eng2 = WatermarkEngine.restore(ckpt_path, **_rec_cfg.to_engine_kwargs())
             rm = eng2.metrics
+            
+            update_recovery_diagram(recovery_diag_placeholder, "eng2_running", processed_e=half)
             log_print(f"📊 Trạng thái Engine 2 sau khôi phục:\n"
                       f"   - total = {rm['total']}\n"
                       f"   - unique = {rm['unique']}\n"
@@ -1678,8 +2039,12 @@ with tab_demos:
             log_print("⚙️ Engine 2 tiếp tục xử lý 50% còn lại...\n")
             for r in rows[half:]:
                 eng2.process({"event_id": r.event_id, "event_time": r.event_time, "status": r.status})
+            
+            update_recovery_diagram(recovery_diag_placeholder, "eng2_running", processed_e=len(rows))
             eng2.flush()
             s = eng2.summary()
+            
+            update_recovery_diagram(recovery_diag_placeholder, "done", processed_e=len(rows))
             log_print(f"✅ Sau Recovery: Completeness={s['data_completeness_pct']}% · "
                       f"Duplicates lọc={s['duplicates_filtered']}\n"
                       f"👉 Exactly-Once được đảm bảo!")
@@ -1904,6 +2269,42 @@ with tab_dist:
             width="stretch",
         )
 
+        # Cluster Tradeoff Sweep Chart
+        st.markdown("#### 📈 Biểu đồ Đánh đổi Cluster (Completeness & Late dropped vs Wait Time)")
+        xs_dist = df_dist["allowed_lateness_ms"].tolist()
+        comp_dist = df_dist["completeness_pct"].tolist()
+        drop_dist = df_dist["late_dropped"].tolist()
+        
+        fig_dist_sweep = go.Figure()
+        fig_dist_sweep.add_trace(go.Scatter(
+            x=xs_dist, y=comp_dist, mode="lines+markers",
+            name="Completeness %",
+            line=dict(color="#10B981", width=3),
+            marker=dict(size=10, color="#10B981", line=dict(color="white", width=2)),
+            hovertemplate="Wait %{x}ms<br>Completeness %{y:.2f}%<extra></extra>",
+        ))
+        fig_dist_sweep.add_trace(go.Scatter(
+            x=xs_dist, y=drop_dist, mode="lines+markers",
+            name="Late dropped (gộp)",
+            line=dict(color="#EF4444", width=2, dash="dash"),
+            marker=dict(size=9, symbol="square", color="#EF4444", line=dict(color="white", width=2)),
+            yaxis="y2",
+            hovertemplate="Wait %{x}ms<br>Late dropped %{y:,}<extra></extra>",
+        ))
+        fig_dist_sweep.update_layout(
+            height=320, margin=dict(l=10, r=10, t=40, b=30),
+            title=dict(text="Cluster Trade-off: Completeness vs allowed_lateness",
+                       font=dict(size=13, color="#E2E8F0")),
+            plot_bgcolor="#0F172A", paper_bgcolor="#0F172A",
+            font=dict(color="#94A3B8"),
+            xaxis=dict(title="Wait Time / allowed_lateness (ms)", gridcolor="#1E293B"),
+            yaxis=dict(title="Completeness %", color="#10B981", gridcolor="#1E293B"),
+            yaxis2=dict(title="Late dropped (gộp)", color="#EF4444", overlaying="y", side="right", showgrid=False),
+            legend=dict(orientation="h", yanchor="bottom", y=1.05, x=0),
+            hovermode="x unified",
+        )
+        st.plotly_chart(fig_dist_sweep, width="stretch", key="dist_sweep_chart")
+
         if first_run_counts:
             mx, mn = max(first_run_counts), min(first_run_counts)
             total = sum(first_run_counts)
@@ -1917,7 +2318,25 @@ with tab_dist:
 
             node_labels = [f"Node {i}" for i in range(dist_nodes)]
             node_df = pd.Series(first_run_counts, index=node_labels)
-            st.bar_chart(node_df, y_label="Events đã xử lý")
+            
+            fig_bar = go.Figure()
+            fig_bar.add_trace(go.Bar(
+                x=node_df.index,
+                y=node_df.values,
+                marker_color=['#3B82F6', '#10B981', '#F59E0B', '#EF4444', '#8B5CF6', '#EC4899', '#14B8A6', '#F97316'][:len(node_df)],
+                hovertemplate="Node: %{x}<br>Processed Events: %{y:,}<extra></extra>"
+            ))
+            fig_bar.update_layout(
+                height=320,
+                margin=dict(l=10, r=10, t=30, b=30),
+                plot_bgcolor="#0F172A",
+                paper_bgcolor="#0F172A",
+                font=dict(color="#94A3B8"),
+                xaxis=dict(title="Cluster Node", gridcolor="#1E293B"),
+                yaxis=dict(title="Processed Events Count", gridcolor="#1E293B"),
+                showlegend=False
+            )
+            st.plotly_chart(fig_bar, width="stretch", key="dist_bar_chart")
 
             # Animated SVG cluster topology diagram
             st.markdown("#### 🗺️ Sơ đồ Cluster Topology")
