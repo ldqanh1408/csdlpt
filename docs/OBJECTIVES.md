@@ -107,7 +107,7 @@ Cụ thể hóa:
 | **R4 — Backpressure** | `wm/engine.py` — `max_queue`, `backpressure_drops` | đã có |
 | **R4 — Dedup** | `wm/engine.py` — `seen_ids` (exactly-once) | đã có |
 | **R4 — Crash recovery** | `wm/demos.py:crash_recovery_demo()` — kill→restore | đã có |
-| **R4 — Node death** | `pending/CONTAINER_COORDINATION.md` §8.13 — heartbeat + diagnosis | design done, code trong `coordinator/` cần build |
+| **R4 — Node death** | `deploy/{node,coordinator}/main.py` — heartbeat + diagnosis (§8.13 + §9.5) | đã có (chờ Docker build/test) |
 | **Deliverable — chart** | `tradeoff.png` + `wm/sweep.py:write_report` | đã có |
 | **Deliverable — data** | `tradeoff.csv` (9 mức Wait Time) | đã có |
 | **Deliverable — report** | `pending/REPORT.md` (Strict vs Heuristic analysis) | đã có |

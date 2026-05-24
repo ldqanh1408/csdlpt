@@ -6,6 +6,34 @@ của rubric.
 
 ## Cách chạy
 
+### Hạ tầng container (branch `rebuild/d1-skeleton`)
+
+Triển khai phân tán thật theo `pending/CONTAINER_COORDINATION.md` §9 —
+4 node + 1 coordinator + 1 ingestor + Prometheus + Grafana.
+
+```bash
+make build                # build 3 image (cần Docker Desktop + WSL integration)
+make up-obs               # start cluster + Prometheus + Grafana
+
+# Acceptance tests
+make smoke                # D1 — /health gate
+make happy                # D2 — 10K events, ALL_DONE
+make test-all             # 10 test (smoke + happy + 8 chaos)
+
+# Demo 10 phút có pause cho giảng viên
+make demo
+
+# Cleanup
+make down                 # container + volumes + dlq
+make clean                # + xoá image
+```
+
+Sau `make up-obs`:
+- Coordinator: http://localhost:8000 (`/health`, `/api/wait`, `/metrics`)
+- Nodes: http://localhost:810{1..4}
+- Prometheus: http://localhost:9090
+- Grafana: http://localhost:3000 (dashboard "Watermark Tracker — Realtime")
+
 ### Giao diện Dashboard (Khuyến nghị cho trình bày & cấu hình)
 `app.py` là một **Dashboard Streamlit 6 tab** tích hợp toàn bộ chức năng —
 chạy live stream, quét Sweep, demo khôi phục lỗi, mô phỏng cluster phân tán

@@ -1,16 +1,25 @@
 {
   "version": "1.0.0",
-  "lastScanned": 1779517960487,
+  "lastScanned": 1779617518970,
   "projectRoot": "D:\\dev\\csdlpt",
   "techStack": {
-    "languages": [],
+    "languages": [
+      {
+        "name": "C/C++",
+        "version": null,
+        "confidence": "high",
+        "markers": [
+          "Makefile"
+        ]
+      }
+    ],
     "frameworks": [],
     "packageManager": null,
     "runtime": null
   },
   "build": {
-    "buildCommand": null,
-    "testCommand": null,
+    "buildCommand": "make build",
+    "testCommand": "python -m pytest refactor/tests/ -x -q 2>&1 | tail -10",
     "lintCommand": null,
     "devCommand": null,
     "scripts": {}
@@ -25,7 +34,8 @@
     "isMonorepo": false,
     "workspaces": [],
     "mainDirectories": [
-      "docs"
+      "docs",
+      "scripts"
     ],
     "gitBranches": null
   },
@@ -35,24 +45,97 @@
       "path": "dataset",
       "purpose": null,
       "fileCount": 2,
-      "lastAccessed": 1779517960380,
+      "lastAccessed": 1779617518911,
       "keyFiles": [
         "access.log.zip",
         "data.csv"
       ]
     },
+    "deploy": {
+      "path": "deploy",
+      "purpose": null,
+      "fileCount": 2,
+      "lastAccessed": 1779617518911,
+      "keyFiles": [
+        "docker-compose.yml",
+        "prometheus.yml"
+      ]
+    },
+    "dlq": {
+      "path": "dlq",
+      "purpose": null,
+      "fileCount": 0,
+      "lastAccessed": 1779617518912,
+      "keyFiles": []
+    },
     "docs": {
       "path": "docs",
       "purpose": "Documentation",
-      "fileCount": 0,
-      "lastAccessed": 1779517960381,
-      "keyFiles": []
+      "fileCount": 9,
+      "lastAccessed": 1779617518913,
+      "keyFiles": [
+        "ARCHITECTURE.md",
+        "DESIGN.md",
+        "EOS_MARKER.md",
+        "GLOSSARY.md",
+        "INDEX.md"
+      ]
+    },
+    "pending": {
+      "path": "pending",
+      "purpose": null,
+      "fileCount": 5,
+      "lastAccessed": 1779617518913,
+      "keyFiles": [
+        "ARCHITECTURE.md",
+        "CONTAINER_COORDINATION.md",
+        "Online assessment v1.docx",
+        "PROPOSAL.md",
+        "REPORT.md"
+      ]
+    },
+    "refactor": {
+      "path": "refactor",
+      "purpose": null,
+      "fileCount": 3,
+      "lastAccessed": 1779617518913,
+      "keyFiles": [
+        "requirements.txt",
+        "run.py",
+        "__init__.py"
+      ]
+    },
+    "scripts": {
+      "path": "scripts",
+      "purpose": "Build/utility scripts",
+      "fileCount": 13,
+      "lastAccessed": 1779617518914,
+      "keyFiles": [
+        "demo_live.sh",
+        "lib.sh",
+        "run_all.sh",
+        "test_01_smoke.sh",
+        "test_02_happy.sh"
+      ]
+    },
+    "ui": {
+      "path": "ui",
+      "purpose": null,
+      "fileCount": 10,
+      "lastAccessed": 1779617518914,
+      "keyFiles": [
+        "demos.py",
+        "dist.py",
+        "helpers.py",
+        "overview.py",
+        "report.py"
+      ]
     },
     "wm": {
       "path": "wm",
       "purpose": null,
       "fileCount": 9,
-      "lastAccessed": 1779517960382,
+      "lastAccessed": 1779617518915,
       "keyFiles": [
         "actions.py",
         "config.py",
@@ -65,7 +148,7 @@
       "path": "__pycache__",
       "purpose": null,
       "fileCount": 5,
-      "lastAccessed": 1779517960382,
+      "lastAccessed": 1779617518915,
       "keyFiles": [
         "app.cpython-310.pyc",
         "app.cpython-314.pyc",
@@ -74,11 +157,33 @@
         "watermark_engine.cpython-310.pyc"
       ]
     },
+    "refactor\\docs": {
+      "path": "refactor\\docs",
+      "purpose": "Documentation",
+      "fileCount": 3,
+      "lastAccessed": 1779617518918,
+      "keyFiles": [
+        "Thiet_Ke_Heuristic_Watermark.md",
+        "Thiet_Ke_Strict_Watermark.md",
+        "Trien_Khai_He_Thong.md"
+      ]
+    },
+    "refactor\\tests": {
+      "path": "refactor\\tests",
+      "purpose": "Test files",
+      "fileCount": 12,
+      "lastAccessed": 1779617518919,
+      "keyFiles": [
+        "test_backpressure.py",
+        "test_chaos.py",
+        "test_ddsketch.py"
+      ]
+    },
     "wm\\data": {
       "path": "wm\\data",
       "purpose": "Data files",
       "fileCount": 3,
-      "lastAccessed": 1779517960384,
+      "lastAccessed": 1779617518920,
       "keyFiles": [
         "nasa.py",
         "synthetic.py",
@@ -88,45 +193,231 @@
   },
   "hotPaths": [
     {
-      "path": "app.py",
-      "accessCount": 54,
-      "lastAccessed": 1779440564950,
+      "path": "refactor\\run.py",
+      "accessCount": 53,
+      "lastAccessed": 1779623137381,
       "type": "file"
     },
     {
-      "path": "INDEX.md",
+      "path": "refactor\\docs\\Thiet_Ke_Strict_Watermark.md",
+      "accessCount": 35,
+      "lastAccessed": 1779621177194,
+      "type": "file"
+    },
+    {
+      "path": "refactor",
+      "accessCount": 28,
+      "lastAccessed": 1779622288059,
+      "type": "directory"
+    },
+    {
+      "path": "refactor\\docs\\Trien_Khai_He_Thong.md",
+      "accessCount": 21,
+      "lastAccessed": 1779619377767,
+      "type": "file"
+    },
+    {
+      "path": "refactor\\common\\monitoring.py",
+      "accessCount": 15,
+      "lastAccessed": 1779623289597,
+      "type": "file"
+    },
+    {
+      "path": "refactor\\heuristic\\engine.py",
+      "accessCount": 15,
+      "lastAccessed": 1779623336882,
+      "type": "file"
+    },
+    {
+      "path": "refactor\\docs\\Thiet_Ke_Heuristic_Watermark.md",
+      "accessCount": 14,
+      "lastAccessed": 1779621177137,
+      "type": "file"
+    },
+    {
+      "path": "refactor\\common\\tiered_storage.py",
+      "accessCount": 12,
+      "lastAccessed": 1779622929571,
+      "type": "file"
+    },
+    {
+      "path": "refactor\\heuristic\\aggregator.py",
+      "accessCount": 10,
+      "lastAccessed": 1779622754801,
+      "type": "file"
+    },
+    {
+      "path": "refactor\\heuristic\\cold_start.py",
+      "accessCount": 9,
+      "lastAccessed": 1779623057936,
+      "type": "file"
+    },
+    {
+      "path": "refactor\\strict\\disaster_recovery.py",
+      "accessCount": 8,
+      "lastAccessed": 1779621486485,
+      "type": "file"
+    },
+    {
+      "path": "refactor\\strict\\engine.py",
       "accessCount": 7,
-      "lastAccessed": 1779436661157,
+      "lastAccessed": 1779621073843,
       "type": "file"
     },
     {
-      "path": "README.md",
-      "accessCount": 4,
-      "lastAccessed": 1779419755474,
+      "path": "refactor\\common\\alerting.py",
+      "accessCount": 6,
+      "lastAccessed": 1779620400109,
       "type": "file"
     },
     {
-      "path": "DESIGN.md",
-      "accessCount": 4,
-      "lastAccessed": 1779419832137,
+      "path": "refactor\\docs",
+      "accessCount": 5,
+      "lastAccessed": 1779620225277,
       "type": "directory"
     },
     {
-      "path": "REPORT.md",
+      "path": "refactor\\strict\\worker.py",
+      "accessCount": 5,
+      "lastAccessed": 1779620503133,
+      "type": "file"
+    },
+    {
+      "path": "refactor\\common\\config.py",
+      "accessCount": 5,
+      "lastAccessed": 1779620707775,
+      "type": "file"
+    },
+    {
+      "path": "refactor\\common\\differentiated_eviction.py",
+      "accessCount": 5,
+      "lastAccessed": 1779622880169,
+      "type": "file"
+    },
+    {
+      "path": "refactor\\strict\\raft_coordinator.py",
+      "accessCount": 4,
+      "lastAccessed": 1779620610726,
+      "type": "file"
+    },
+    {
+      "path": "refactor\\common\\rocks_store.py",
+      "accessCount": 4,
+      "lastAccessed": 1779622504551,
+      "type": "file"
+    },
+    {
+      "path": "refactor\\heuristic\\dlq.py",
+      "accessCount": 4,
+      "lastAccessed": 1779622703216,
+      "type": "file"
+    },
+    {
+      "path": "refactor\\strict\\backpressure.py",
+      "accessCount": 3,
+      "lastAccessed": 1779620708477,
+      "type": "file"
+    },
+    {
+      "path": "refactor\\strict\\ingestor_health.py",
+      "accessCount": 3,
+      "lastAccessed": 1779621269695,
+      "type": "file"
+    },
+    {
+      "path": "refactor\\strict",
+      "accessCount": 3,
+      "lastAccessed": 1779622579312,
+      "type": "directory"
+    },
+    {
+      "path": "refactor\\deploy\\docker-compose.yml",
       "accessCount": 2,
-      "lastAccessed": 1779419832195,
-      "type": "directory"
-    },
-    {
-      "path": "PROPOSAL.md",
-      "accessCount": 1,
-      "lastAccessed": 1779436613781,
+      "lastAccessed": 1779619482201,
       "type": "file"
     },
     {
-      "path": "wm\\engine.py",
+      "path": "refactor\\tests\\test_heuristic.py",
+      "accessCount": 2,
+      "lastAccessed": 1779619580324,
+      "type": "file"
+    },
+    {
+      "path": "refactor\\hybrid\\router.py",
+      "accessCount": 2,
+      "lastAccessed": 1779620156504,
+      "type": "file"
+    },
+    {
+      "path": "refactor\\strict\\failover.py",
+      "accessCount": 2,
+      "lastAccessed": 1779620333891,
+      "type": "file"
+    },
+    {
+      "path": "refactor\\heuristic",
+      "accessCount": 2,
+      "lastAccessed": 1779620415240,
+      "type": "directory"
+    },
+    {
+      "path": "refactor\\common\\window.py",
+      "accessCount": 2,
+      "lastAccessed": 1779621216033,
+      "type": "directory"
+    },
+    {
+      "path": "refactor\\heuristic\\aggregator_ha.py",
+      "accessCount": 2,
+      "lastAccessed": 1779621316828,
+      "type": "file"
+    },
+    {
+      "path": "refactor\\heuristic\\negative_lag.py",
+      "accessCount": 2,
+      "lastAccessed": 1779622308917,
+      "type": "file"
+    },
+    {
+      "path": "refactor\\strict\\output_manager.py",
+      "accessCount": 2,
+      "lastAccessed": 1779622339370,
+      "type": "file"
+    },
+    {
+      "path": "refactor\\common\\types.py",
+      "accessCount": 2,
+      "lastAccessed": 1779622887015,
+      "type": "file"
+    },
+    {
+      "path": "refactor\\strict\\coordinator.py",
       "accessCount": 1,
-      "lastAccessed": 1779439252222,
+      "lastAccessed": 1779619035361,
+      "type": "file"
+    },
+    {
+      "path": "Makefile",
+      "accessCount": 1,
+      "lastAccessed": 1779619614705,
+      "type": "file"
+    },
+    {
+      "path": "refactor\\requirements.txt",
+      "accessCount": 1,
+      "lastAccessed": 1779619614747,
+      "type": "file"
+    },
+    {
+      "path": "refactor\\ddsketch\\sketch.py",
+      "accessCount": 1,
+      "lastAccessed": 1779620848544,
+      "type": "file"
+    },
+    {
+      "path": "C:\\Users\\CYBORG\\AppData\\Local\\Temp\\claude\\D--dev-csdlpt\\c8ab605f-d8bb-4992-bd78-a1b23ec74813\\tasks\\bi8tuujmw.output",
+      "accessCount": 1,
+      "lastAccessed": 1779621276072,
       "type": "file"
     }
   ],

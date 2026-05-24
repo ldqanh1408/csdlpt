@@ -1,1 +1,5 @@
 dataset/
+
+# Deployment runtime state
+dlq/
+deploy/grafana/data/

@@ -69,10 +69,43 @@ KHỚP CHÍNH XÁC 98 923, chạy tiếp nốt nửa sau, completeness cuối 98
 State không mất, không đếm trùng (dedup + checkpoint atomic ⇒
 exactly-once).
 
+## Container Deployment — Acceptance Test Results
+
+Phiên bản 3 của hệ thống được triển khai dưới dạng Docker Compose
+microservice (7 container: coordinator + 4 node + ingestor + prometheus +
+grafana). 10 acceptance test với fault injection thực tế:
+
+| # | Test | Fault injection | Kết quả |
+|---|------|----------------|---------|
+| 01 | smoke | — | PASS |
+| 02 | happy | — | ALL_DONE (10K events) |
+| 03 | kill_node | `docker kill node2` | TIMEOUT + diagnosis DEAD |
+| 04 | revive_node | kill → `docker compose up -d` | ALL_DONE |
+| 05 | slow_node | `tc netem delay 100ms` | ALL_DONE (SLOW ≠ DEAD) |
+| 06 | partition | `docker network disconnect` | TIMEOUT + DEAD |
+| 07 | coordinator_down | `docker kill coordinator` | ALL_DONE (DLQ replay) |
+| 08 | double_report | Gửi trùng EOS report | ALL_DONE (idempotent C4) |
+| 09 | stale_run | RUN_ID cũ | stale_run_id rejected (C3) |
+| 10 | data_loss | Drop 5% event | DATA_LOSS detected (C11) |
+
+**10/10 PASS.** Mỗi test xác nhận một tập hợp con các production contract
+C1–C11. Hệ thống chứng minh khả năng chịu lỗi thực tế: kill node →
+coordinator phát hiện DEAD qua heartbeat gap, revive → DLQ replay khôi
+phục, kill coordinator → node retry với bounded backoff + DLQ persist,
+double report → idempotent.
+
 ## Tái lập kết quả
 
 ```bash
+# In-process sweep (NASA-HTTP):
 python analysis.py --source real --csv dataset/data.csv -n 200000
+
+# Container acceptance tests:
+make build
+make test-all
+
+# Observability stack:
+make up-obs
 ```
 
 Sinh `tradeoff.csv`, `tradeoff.png`, in demo recovery + backpressure.

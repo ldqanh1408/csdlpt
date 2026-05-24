@@ -1,0 +1,158 @@
+# Prometheus Alert Rules for CSDLPT Stream Processor
+groups:
+  - name: csdlpt_critical
+    interval: 10s
+    rules:
+      - alert: DataLossRateHigh
+        expr: csdlpt_data_completeness_pct < 99.5
+        for: 30s
+        labels: {severity: critical}
+        annotations:
+          summary: "Data loss rate exceeded threshold"
+          description: "Completeness {{ $value }}% < 99.5%"
+
+      - alert: WorkerDown
+        expr: csdlpt_worker_alive_count < csdlpt_worker_total_count
+        for: 10s
+        labels: {severity: critical}
+        annotations:
+          summary: "Worker instance is down"
+
+      - alert: WatermarkLagCritical
+        expr: csdlpt_watermark_lag_s > 60
+        for: 30s
+        labels: {severity: critical}
+        annotations:
+          summary: "Watermark lag critical ({{ $value }}s > 60s)"
+
+      - alert: WatermarkLagWarning
+        expr: csdlpt_watermark_lag_s > 30
+        for: 1m
+        labels: {severity: warning}
+        annotations:
+          summary: "Watermark lag elevated ({{ $value }}s > 30s)"
+
+      - alert: NodeSkewHigh
+        expr: csdlpt_node_skew_max_ms > 5000
+        for: 30s
+        labels: {severity: warning}
+        annotations:
+          summary: "Node skew high ({{ $value }}ms > 5000ms)"
+
+      - alert: BackpressureActive
+        expr: csdlpt_backpressure_pause_count > 0
+        for: 5m
+        labels: {severity: warning}
+        annotations:
+          summary: "Backpressure active for > 5 min"
+
+      - alert: DLQBacklogHigh
+        expr: csdlpt_dlq_backlog > 10000
+        for: 5m
+        labels: {severity: warning}
+        annotations:
+          summary: "DLQ backlog {{ $value }} > 10000"
+
+      - alert: NegativeLagRateHigh
+        expr: csdlpt_negative_lag_rate > 0.1
+        for: 1m
+        labels: {severity: warning}
+        annotations:
+          summary: "Negative lag rate {{ $value }} > 10%"
+
+      - alert: TieredStorageError
+        expr: csdlpt_tier_storage_status == 0
+        for: 1m
+        labels: {severity: warning}
+        annotations:
+          summary: "Tiered storage connection failing"
+
+      - alert: IngestorSilent
+        expr: csdlpt_ingestor_silent_count > 0
+        for: 15s
+        labels: {severity: critical}
+        annotations:
+          summary: "{{ $value }} ingestor(s) silent"
+
+      - alert: FailoverEvent
+        expr: rate(csdlpt_failover_events_total[1m]) > 0
+        labels: {severity: warning}
+        annotations:
+          summary: "Failover event in last minute"
+
+      - alert: ReplayModeActive
+        expr: csdlpt_replay_mode_active > 0
+        for: 5m
+        labels: {severity: info}
+        annotations:
+          summary: "Replay mode active > 5 min"
+
+      - alert: CoordinatorLeaderChanges
+        expr: rate(csdlpt_coordinator_leader_changes_total[5m]) > 0
+        for: 1m
+        labels: {severity: warning}
+        annotations:
+          summary: "Coordinator leader changed in last 5 min"
+
+      - alert: AggregatorLeaderChanges
+        expr: rate(csdlpt_aggregator_leader_changes_total[5m]) > 0
+        for: 1m
+        labels: {severity: warning}
+        annotations:
+          summary: "Aggregator leader changed in last 5 min"
+
+      - alert: WorkerRAMHigh
+        expr: csdlpt_worker_ram_usage_bytes / csdlpt_worker_ram_limit_bytes > 0.85
+        for: 5m
+        labels: {severity: warning}
+        annotations:
+          summary: "Worker RAM usage > 85%"
+
+      - alert: WorkerDiskHigh
+        expr: csdlpt_worker_disk_usage_bytes / csdlpt_worker_disk_limit_bytes > 0.85
+        for: 5m
+        labels: {severity: warning}
+        annotations:
+          summary: "Worker disk usage > 85%"
+
+      - alert: KafkaPartitionLagCritical
+        expr: csdlpt_kafka_partition_lag > 100000
+        for: 5m
+        labels: {severity: critical}
+        annotations:
+          summary: "Kafka partition lag {{ $value }} > 100k"
+
+      - alert: MinIOUploadLag
+        expr: rate(csdlpt_minio_upload_errors_total[5m]) > 0
+        for: 5m
+        labels: {severity: warning}
+        annotations:
+          summary: "MinIO upload errors detected"
+
+      - alert: SketchSampleCountLow
+        expr: csdlpt_sketch_total_count < 100
+        for: 10m
+        labels: {severity: warning}
+        annotations:
+          summary: "DDSketch has < 100 samples for > 10 min"
+
+      - alert: ReplayModeMultipleWorkers
+        expr: csdlpt_replay_mode_active >= 2
+        for: 5m
+        labels: {severity: warning}
+        annotations:
+          summary: "2+ workers in replay mode for > 5 min"
+
+      - alert: FencingViolationRate
+        expr: rate(csdlpt_fencing_violations_total[5m]) > 0.1
+        for: 5m
+        labels: {severity: warning}
+        annotations:
+          summary: "Fencing violations detected"
+
+      - alert: AggregatorFailover
+        expr: rate(csdlpt_aggregator_failover_total[10m]) > 0
+        for: 1m
+        labels: {severity: critical}
+        annotations:
+          summary: "Aggregator HA failover occurred"

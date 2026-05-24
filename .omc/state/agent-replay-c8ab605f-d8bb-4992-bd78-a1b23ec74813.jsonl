@@ -1,0 +1,14 @@
+{"t":0,"agent":"system","event":"skill_invoked","skill_name":"oh-my-claudecode:ultrawork"}
+{"t":0,"agent":"a99a111","agent_type":"executor","event":"agent_start","parent_mode":"none"}
+{"t":0,"agent":"a298148","agent_type":"executor","event":"agent_start","parent_mode":"none"}
+{"t":0,"agent":"a3c4597","agent_type":"executor","event":"agent_start","parent_mode":"none"}
+{"t":0,"agent":"a3c4597","agent_type":"executor","event":"agent_stop","success":true,"duration_ms":27719}
+{"t":0,"agent":"a99a111","agent_type":"executor","event":"agent_stop","success":true,"duration_ms":85728}
+{"t":0,"agent":"a298148","agent_type":"executor","event":"agent_stop","success":true,"duration_ms":158398}
+{"t":0,"agent":"aa78531","agent_type":"unknown","event":"agent_stop","success":true}
+{"t":0,"agent":"a726a20","agent_type":"architect","event":"agent_start","parent_mode":"none"}
+{"t":0,"agent":"ad7ab00","agent_type":"architect","event":"agent_start","parent_mode":"none"}
+{"t":0,"agent":"a0fc8c0","agent_type":"unknown","event":"agent_stop","success":true}
+{"t":0,"agent":"a720b7f","agent_type":"architect","event":"agent_start","parent_mode":"none"}
+{"t":0,"agent":"a55ee5c","agent_type":"architect","event":"agent_start","parent_mode":"none"}
+{"t":0,"agent":"a3b743a","agent_type":"unknown","event":"agent_stop","success":true}
