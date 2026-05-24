@@ -1,0 +1,168 @@
+# Scaled-down deployment for the refactor project
+# Single-machine simulation of the full distributed architecture.
+# No real Kafka/ZK/MinIO needed - uses in-memory/file-based alternatives.
+
+services:
+  coordinator:
+    build:
+      context: ../..
+      dockerfile: refactor/deploy/Dockerfile
+    image: csdlpt/refactor:latest
+    container_name: refactor-coordinator
+    command: ["python3", "-m", "refactor.run", "--role", "coordinator", "--mode", "strict"]
+    environment:
+      ROLE: coordinator
+      MODE: strict
+      DELTA_BASE_S: "10.0"
+      WINDOW_SIZE_S: "5.0"
+      CHECKPOINT_DIR: /data/checkpoint
+    ports:
+      - "9000:8000"
+    volumes:
+      - refactor_data:/data
+    healthcheck:
+      test: ["CMD", "curl", "-sf", "http://localhost:8000/health"]
+      interval: 3s
+      timeout: 2s
+      retries: 5
+    deploy:
+      resources:
+        limits:
+          cpus: '2.0'
+          memory: 2G
+        reservations:
+          cpus: '0.5'
+          memory: 512M
+
+  aggregator:
+    image: csdlpt/refactor:latest
+    container_name: refactor-aggregator
+    command: ["python3", "-m", "refactor.run", "--role", "aggregator", "--mode", "heuristic"]
+    environment:
+      ROLE: aggregator
+      MODE: heuristic
+      WINDOW_SIZE_S: "5.0"
+      ALPHA: "0.01"
+      P_NORMAL: "0.99"
+    ports:
+      - "9001:8000"
+    volumes:
+      - refactor_data:/data
+    profiles: ["heuristic", "hybrid"]
+    deploy:
+      resources:
+        limits:
+          cpus: '2.0'
+          memory: 2G
+        reservations:
+          cpus: '0.5'
+          memory: 512M
+
+  node0: &node-base
+    image: csdlpt/refactor:latest
+    container_name: refactor-node0
+    command: ["python3", "-m", "refactor.run", "--role", "worker", "--mode", "${MODE:-strict}"]
+    environment:
+      NODE_ID: "0"
+      ROLE: worker
+      MODE: "${MODE:-strict}"
+      COORDINATOR_URL: http://coordinator:8000
+      AGGREGATOR_URL: http://aggregator:8000
+      PARTITIONS: "0,1,2"
+      WINDOW_SIZE_S: "5.0"
+    ports:
+      - "9101:8000"
+    volumes:
+      - refactor_data_node0:/data
+    depends_on:
+      coordinator:
+        condition: service_healthy
+    deploy:
+      resources:
+        limits:
+          cpus: '4.0'
+          memory: 4G
+        reservations:
+          cpus: '0.5'
+          memory: 512M
+
+  node1:
+    <<: *node-base
+    container_name: refactor-node1
+    environment:
+      NODE_ID: "1"
+      ROLE: worker
+      MODE: "${MODE:-strict}"
+      COORDINATOR_URL: http://coordinator:8000
+      AGGREGATOR_URL: http://aggregator:8000
+      PARTITIONS: "3,4,5"
+      WINDOW_SIZE_S: "5.0"
+    ports:
+      - "9102:8000"
+    volumes:
+      - refactor_data_node1:/data
+
+  node2:
+    <<: *node-base
+    container_name: refactor-node2
+    environment:
+      NODE_ID: "2"
+      ROLE: worker
+      MODE: "${MODE:-strict}"
+      COORDINATOR_URL: http://coordinator:8000
+      AGGREGATOR_URL: http://aggregator:8000
+      PARTITIONS: "6,7,8"
+      WINDOW_SIZE_S: "5.0"
+    ports:
+      - "9103:8000"
+    volumes:
+      - refactor_data_node2:/data
+
+  node3:
+    <<: *node-base
+    container_name: refactor-node3
+    environment:
+      NODE_ID: "3"
+      ROLE: worker
+      MODE: "${MODE:-strict}"
+      COORDINATOR_URL: http://coordinator:8000
+      AGGREGATOR_URL: http://aggregator:8000
+      PARTITIONS: "9,10,11"
+      WINDOW_SIZE_S: "5.0"
+    ports:
+      - "9104:8000"
+    volumes:
+      - refactor_data_node3:/data
+
+  ingestor:
+    image: csdlpt/refactor:latest
+    container_name: refactor-ingestor
+    command: ["python3", "-m", "refactor.run", "--role", "ingestor"]
+    environment:
+      ROLE: ingestor
+      NODE_HOSTS: "node0:8000,node1:8000,node2:8000,node3:8000"
+      COORDINATOR_URL: http://coordinator:8000
+      MODE: "${MODE:-strict}"
+    volumes:
+      - ../../dataset:/data:ro
+    profiles: ["manual"]
+    depends_on:
+      - node0
+      - node1
+      - node2
+      - node3
+    deploy:
+      resources:
+        limits:
+          cpus: '1.0'
+          memory: 1G
+        reservations:
+          cpus: '0.5'
+          memory: 512M
+
+volumes:
+  refactor_data:
+  refactor_data_node0:
+  refactor_data_node1:
+  refactor_data_node2:
+  refactor_data_node3:

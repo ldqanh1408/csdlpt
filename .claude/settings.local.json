@@ -9,7 +9,13 @@
       "Skill(oh-my-claudecode:plan)",
       "Skill(oh-my-claudecode:plan:*)",
       "Bash(git ls-tree *)",
-      "Bash(git push *)"
+      "Bash(git push *)",
+      "Bash(git checkout *)",
+      "Bash(grep *)",
+      "Bash(bash *)",
+      "Bash(docker compose *)",
+      "Bash(export *)",
+      "Bash(python *)"
     ]
   }
 }

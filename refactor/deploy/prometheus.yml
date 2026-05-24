@@ -1,0 +1,57 @@
+# Prometheus scrape configuration for CSDLPT stream processor.
+# Targets the refactor app on port 8000.
+#
+# Usage:
+#   prometheus --config.file=refactor/deploy/prometheus.yml
+
+global:
+  scrape_interval: 5s
+  scrape_timeout: 4s
+  evaluation_interval: 10s
+
+alerting:
+  alertmanagers:
+    - static_configs:
+        - targets: []
+      # Uncomment and configure to enable Alertmanager:
+      # - static_configs:
+      #     - targets: ['alertmanager:9093']
+
+rule_files: []
+  # - "alerts.yml"
+
+scrape_configs:
+  - job_name: "csdlpt-coordinator"
+    metrics_path: "/metrics"
+    static_configs:
+      - targets:
+          - "localhost:9000"
+        labels:
+          role: "coordinator"
+
+  - job_name: "csdlpt-aggregator"
+    metrics_path: "/metrics"
+    static_configs:
+      - targets:
+          - "localhost:9001"
+        labels:
+          role: "aggregator"
+
+  - job_name: "csdlpt-workers"
+    metrics_path: "/metrics"
+    static_configs:
+      - targets:
+          - "localhost:9101"
+          - "localhost:9102"
+          - "localhost:9103"
+          - "localhost:9104"
+        labels:
+          role: "worker"
+
+  - job_name: "csdlpt-ingestor"
+    metrics_path: "/metrics"
+    static_configs:
+      - targets:
+          - "localhost:8100"
+        labels:
+          role: "ingestor"

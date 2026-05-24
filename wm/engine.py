@@ -54,6 +54,7 @@ class WatermarkEngine:
         self.max_event_time = float("-inf")
         self.true_max_event_time = float("-inf")  # chỉ từ event thật
         self.watermark = float("-inf")
+        self._global_watermark = float("-inf")  # từ coordinator heartbeat response
         self.seen_ids: set[str] = set()       # dùng cho deduplication
 
         # ---- Metrics ----
@@ -72,8 +73,18 @@ class WatermarkEngine:
         """Tumbling window gán theo EVENT-TIME, KHÔNG theo processing-time."""
         return ts - (ts % self.window_size)
 
+    def update_global_watermark(self, gw: float) -> None:
+        """Called from heartbeat loop — coordinator computes global watermark
+        as min(all nodes' max_event_time) - allowed_lateness."""
+        self._global_watermark = gw
+
     def _advance_watermark(self):
-        self.watermark = self.max_event_time - self.allowed_lateness
+        # Use global watermark when available (from coordinator heartbeat),
+        # otherwise fall back to local max_event_time.
+        if self._global_watermark > float("-inf"):
+            self.watermark = self._global_watermark
+        else:
+            self.watermark = self.max_event_time - self.allowed_lateness
         to_close = [w for w in self.windows
                     if w + self.window_size <= self.watermark]
         for w in sorted(to_close):
@@ -81,9 +92,6 @@ class WatermarkEngine:
             self.closed_windows[w] = {
                 "count": st.count, "status_500": st.status_500,
             }
-            # Latency của KẾT QUẢ (event-time): cửa sổ kết thúc lúc
-            # w+window_size, nhưng phải chờ tới khi max_event_time vượt
-            # qua đó cộng allowed_lateness mới chốt được.
             result_latency = self.true_max_event_time - (w + self.window_size)
             result_latency = max(result_latency, 0.0)
             self.emit_log.append((w, result_latency, None))
