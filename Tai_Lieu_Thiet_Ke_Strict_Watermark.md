@@ -200,7 +200,7 @@ Do hiện tượng out-of-order, các bản ghi thuộc nhiều Window khác nha
 Định kỳ hoặc theo dung lượng gói dữ liệu, Ingestor phát một gói tin đặc biệt chứa mốc `T_commit` vào luồng. Token mang ngữ nghĩa: *"Từ thời điểm này, không còn log nào có `T_event < T_commit` được sinh ra tại Upstream nữa."*
 
 **Bước 2 — Sắp xếp tuần tự qua Priority Queue**
-Token di chuyển dọc theo partition đã được sắp xếp ưu tiên của Kafka, đảm bảo nó chỉ đến Worker Node sau khi toàn bộ dữ liệu có `T_event < T_commit` của partition đó đã được tiêu thụ thành công.
+Token di chuyển dọc theo partition đã được sắp xếp ưu tiên của Kafka (đối với môi trường chạy thật qua Kafka: Punctuation Token được ghi trực tiếp vào cùng Kafka topic `"events"` - cơ chế In-band Signaling; đối với chế độ giả lập không có Kafka: gửi out-of-band qua cuộc gọi HTTP POST), đảm bảo nó chỉ đến Worker Node sau khi toàn bộ dữ liệu có `T_event < T_commit` của partition đó đã được tiêu thụ thành công.
 
 **Bước 3 — Hội tụ tại Coordinator**
 Khi Worker Node `i` đọc được Punctuation Token, nó cập nhật:

@@ -20,4 +20,4 @@ HEALTHCHECK --interval=3s --timeout=2s --retries=5 \
   CMD curl -sf http://localhost:8000/health || exit 1
 
 # Default command overridden by docker-compose
-CMD ["python3", "-m", "pytest", "refactor/tests/", "-v"]
+CMD ["python3", "-m", "refactor.run"]

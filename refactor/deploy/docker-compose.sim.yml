@@ -1,0 +1,193 @@
+# Simulation Docker Compose for Strict and Heuristic Watermark modes
+# No real Kafka/ZK/MinIO needed - uses HTTP-based communication only.
+#
+# Usage:
+#   Strict mode:    docker compose -f docker-compose.sim.yml --profile strict up --build
+#   Heuristic mode: docker compose -f docker-compose.sim.yml --profile heuristic up --build
+#   Stop:           docker compose -f docker-compose.sim.yml --profile <mode> down -v
+
+services:
+  # ================================================================
+  #  STRICT MODE - Punctuation-based watermark (0% data loss target)
+  # ================================================================
+
+  strict-coordinator:
+    build:
+      context: ../..
+      dockerfile: refactor/deploy/Dockerfile
+    image: csdlpt/sim:latest
+    container_name: sim-strict-coordinator
+    command: ["python3", "-m", "refactor.run", "--role", "coordinator", "--mode", "strict"]
+    environment:
+      PYTHONUNBUFFERED: "1"
+      MODE: strict
+      PORT: "8000"
+      DELTA_BASE_S: "10.0"
+      WINDOW_SIZE_S: "5.0"
+      CHECKPOINT_DIR: /data/checkpoint
+      HEARTBEAT_TIMEOUT_S: "15.0"
+      KAFKA_ENABLE: "false"
+    ports:
+      - "9000:8000"
+    volumes:
+      - sim_strict_coord:/data
+    profiles: ["strict"]
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "curl", "-sf", "http://localhost:8000/health"]
+      interval: 3s
+      timeout: 2s
+      retries: 10
+
+  strict-worker:
+    build:
+      context: ../..
+      dockerfile: refactor/deploy/Dockerfile
+    image: csdlpt/sim:latest
+    container_name: sim-strict-worker
+    command: ["python3", "-m", "refactor.run", "--role", "worker", "--mode", "strict"]
+    environment:
+      PYTHONUNBUFFERED: "1"
+      MODE: strict
+      PORT: "8000"
+      NODE_ID: "0"
+      PARTITIONS: "0,1,2,3,4,5,6,7,8,9,10,11"
+      COORDINATOR_URL: http://strict-coordinator:8000
+      DELTA_BASE_S: "10.0"
+      WINDOW_SIZE_S: "5.0"
+      CHECKPOINT_DIR: /data/checkpoint
+      KAFKA_ENABLE: "false"
+      BP_PAUSE_THRESHOLD: "1000"
+      BP_RESUME_THRESHOLD: "200"
+    ports:
+      - "9101:8000"
+    volumes:
+      - sim_strict_worker:/data
+    profiles: ["strict"]
+    restart: unless-stopped
+    depends_on:
+      strict-coordinator:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "curl", "-sf", "http://localhost:8000/health"]
+      interval: 3s
+      timeout: 2s
+      retries: 10
+
+  strict-ingestor:
+    build:
+      context: ../..
+      dockerfile: refactor/deploy/Dockerfile
+    image: csdlpt/sim:latest
+    container_name: sim-strict-ingestor
+    command: ["python3", "-m", "refactor.run", "--role", "ingestor", "--mode", "strict"]
+    environment:
+      PYTHONUNBUFFERED: "1"
+      MODE: strict
+      NODE_HOSTS: "strict-worker:8000"
+      COORDINATOR_URL: http://strict-coordinator:8000
+      SOURCE: "/data/${DATASET_FILE:-data.csv}"
+      KAFKA_ENABLE: "false"
+      TOTAL_PARTITIONS: "12"
+    ports:
+      - "9200:8100"
+    volumes:
+      - ../../dataset:/data:ro
+    profiles: ["strict"]
+    restart: unless-stopped
+    depends_on:
+      strict-worker:
+        condition: service_healthy
+
+  # ================================================================
+  #  HEURISTIC MODE - DDSketch-based lag estimation (~1% loss target)
+  # ================================================================
+
+  heuristic-aggregator:
+    build:
+      context: ../..
+      dockerfile: refactor/deploy/Dockerfile
+    image: csdlpt/sim:latest
+    container_name: sim-heuristic-aggregator
+    command: ["python3", "-m", "refactor.run", "--role", "aggregator", "--mode", "heuristic"]
+    environment:
+      PYTHONUNBUFFERED: "1"
+      MODE: heuristic
+      PORT: "8000"
+      CHECKPOINT_DIR: /data/checkpoint
+      KAFKA_ENABLE: "false"
+    ports:
+      - "9017:8000"
+    volumes:
+      - sim_heuristic_agg:/data
+    profiles: ["heuristic"]
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "curl", "-sf", "http://localhost:8000/health"]
+      interval: 3s
+      timeout: 2s
+      retries: 10
+
+  heuristic-worker:
+    build:
+      context: ../..
+      dockerfile: refactor/deploy/Dockerfile
+    image: csdlpt/sim:latest
+    container_name: sim-heuristic-worker
+    command: ["python3", "-m", "refactor.run", "--role", "worker", "--mode", "heuristic"]
+    environment:
+      PYTHONUNBUFFERED: "1"
+      MODE: heuristic
+      PORT: "8000"
+      NODE_ID: "0"
+      PARTITIONS: "0,1,2,3,4,5,6,7,8,9,10,11"
+      AGGREGATOR_URL: http://heuristic-aggregator:8000
+      CHECKPOINT_DIR: /data/checkpoint
+      KAFKA_ENABLE: "false"
+      BP_PAUSE_THRESHOLD: "1000"
+      BP_RESUME_THRESHOLD: "200"
+    ports:
+      - "9111:8000"
+    volumes:
+      - sim_heuristic_worker:/data
+    profiles: ["heuristic"]
+    restart: unless-stopped
+    depends_on:
+      heuristic-aggregator:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "curl", "-sf", "http://localhost:8000/health"]
+      interval: 3s
+      timeout: 2s
+      retries: 10
+
+  heuristic-ingestor:
+    build:
+      context: ../..
+      dockerfile: refactor/deploy/Dockerfile
+    image: csdlpt/sim:latest
+    container_name: sim-heuristic-ingestor
+    command: ["python3", "-m", "refactor.run", "--role", "ingestor", "--mode", "heuristic"]
+    environment:
+      PYTHONUNBUFFERED: "1"
+      MODE: heuristic
+      NODE_HOSTS: "heuristic-worker:8000"
+      AGGREGATOR_URL: http://heuristic-aggregator:8000
+      SOURCE: "/data/${DATASET_FILE:-data.csv}"
+      KAFKA_ENABLE: "false"
+      TOTAL_PARTITIONS: "12"
+    ports:
+      - "9210:8100"
+    volumes:
+      - ../../dataset:/data:ro
+    profiles: ["heuristic"]
+    restart: unless-stopped
+    depends_on:
+      heuristic-worker:
+        condition: service_healthy
+
+volumes:
+  sim_strict_coord:
+  sim_strict_worker:
+  sim_heuristic_agg:
+  sim_heuristic_worker:

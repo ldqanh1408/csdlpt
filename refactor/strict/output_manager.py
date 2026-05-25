@@ -4,7 +4,9 @@ Spec §9.2-9.3: Idempotent Sink (dedup key = window_id) and
 Transactional Sink (Two-Phase Commit via MockTransactionalSink).
 """
 
+import json
 import logging
+import os
 import threading
 import time
 from enum import Enum
@@ -189,11 +191,12 @@ class OutputManager:
 
     def __init__(self, mode: str = "idempotent", kafka_producer=None,
                  kafka_topic: str = "strict_results",
-                 audit_producer=None, audit_topic: str = "audit_results"):
+                 audit_producer=None, audit_topic: str = "audit_results",
+                 store: Optional[RocksStore] = None):
         self.mode = mode
         self._emitted: set[str] = set()
         self._lock = threading.Lock()
-        self._sink = MockTransactionalSink() if mode == "transactional" else None
+        self._sink = MockTransactionalSink(store=store) if mode == "transactional" else None
         self._emission_log: list[dict] = []
         self._emission_count: int = 0
         self._kafka_producer = kafka_producer
@@ -257,6 +260,29 @@ class OutputManager:
     def is_emitted(self, window_id: str) -> bool:
         with self._lock:
             return window_id in self._emitted
+
+    def save_emitted(self, path: str) -> None:
+        """Persist _emitted set to a JSON file for crash recovery."""
+        with self._lock:
+            data = {"emitted": sorted(self._emitted), "count": self._emission_count}
+        tmp = path + ".tmp"
+        with open(tmp, "w") as f:
+            json.dump(data, f)
+        os.replace(tmp, path)
+
+    def load_emitted(self, path: str) -> None:
+        """Restore _emitted set from a JSON file after restart."""
+        if not os.path.exists(path):
+            return
+        try:
+            with open(path) as f:
+                data = json.load(f)
+            with self._lock:
+                self._emitted.update(data.get("emitted", []))
+                self._emission_count = max(self._emission_count, data.get("count", 0))
+            logger.info("OutputManager: restored %d emitted window IDs", len(data.get("emitted", [])))
+        except Exception:
+            logger.warning("OutputManager: failed to load emitted set from %s", path)
 
     def summary(self) -> dict:
         with self._lock:

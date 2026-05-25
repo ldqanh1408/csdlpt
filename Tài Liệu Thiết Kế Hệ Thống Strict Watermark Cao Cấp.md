@@ -26,7 +26,7 @@ Dữ liệu log vô hạn được phân chia thành các cửa sổ thời gian
 Để đáp ứng cam kết **Strict Watermark** — bảo đảm tỷ lệ mất dữ liệu do đến muộn bằng ![][image6] (![][image6] Data Loss), hệ thống thiết lập cơ chế đồng bộ hóa thông qua các gói tin điều khiển đặc biệt gọi là **Punctuation Tokens**:
 
 1. **Phát sinh Punctuation từ Upstream:** Định kỳ hoặc theo dung lượng gói dữ liệu, bộ nạp (Ingestor) phát ra một gói tin cam kết đặc biệt chứa mốc thời gian ![][image7] vào luồng dữ liệu. Token này mang ý nghĩa pháp lý: *"Tôi cam kết từ thời điểm này trở đi, không còn log nào có Event-Time nhỏ hơn ![][image7] được sinh ra tại Upstream nữa."*  
-2. **Sắp xếp tuần tự qua Priority Queue:** Token cam kết di chuyển dọc theo phân vùng được sắp xếp ưu tiên của Kafka, đảm bảo nó chỉ cập bến Node xử lý sau khi toàn bộ dữ liệu có ![][image8] của phân vùng đó đã được tiêu thụ thành công.  
+2. **Sắp xếp tuần tự qua Priority Queue:** Token cam kết di chuyển dọc theo phân vùng được sắp xếp ưu tiên của Kafka (đối với môi trường chạy thật qua Kafka: Punctuation Token được ghi trực tiếp vào cùng Kafka topic `"events"` - cơ chế In-band Signaling; đối với chế độ giả lập không có Kafka: gửi out-of-band qua cuộc gọi HTTP POST), đảm bảo nó chỉ cập bến Node xử lý sau khi toàn bộ dữ liệu có ![][image8] của phân vùng đó đã được tiêu thụ thành công.  
 3. **Hội tụ mốc thời gian logic tại Coordinator:** Khi Worker Node ![][image9] đọc được Punctuation Token từ phân vùng của nó, nó sẽ cập nhật mốc Local Watermark:  
    ![][image10]  
    Đồng thời, Worker Node gửi thông điệp báo cáo mốc ![][image11] này về cho Coordinator trung tâm thông qua kết nối TCP thời gian thực.  

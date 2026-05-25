@@ -1,0 +1,105 @@
+syntax = "proto3";
+
+package csdlpt;
+
+service CoordinatorService {
+  // Worker -> Coordinator heartbeat
+  rpc WorkerHeartbeat (WorkerHeartbeatMsg) returns (EmptyReply);
+
+  // Ingestor -> Coordinator heartbeat
+  rpc IngestorHeartbeat (IngestorHeartbeatMsg) returns (EmptyReply);
+
+  // Worker -> Coordinator state pull
+  rpc GetGlobalState (StateRequest) returns (StateReply);
+
+  // Raft HA voting
+  rpc RaftVote (RaftVoteMsg) returns (RaftVoteReply);
+
+  // Raft HA state replication
+  rpc RaftState (RaftStateMsg) returns (EmptyReply);
+
+  // Simulated ZK HA voting
+  rpc ZkVote (ZkVoteMsg) returns (ZkVoteReply);
+
+  // Simulated ZK HA state replication
+  rpc ZkState (ZkStateMsg) returns (EmptyReply);
+}
+
+service AggregatorService {
+  // Heuristic Worker -> Aggregator watermark report
+  rpc SendWorkerWatermark (WorkerWatermarkMsg) returns (EmptyReply);
+}
+
+message WorkerHeartbeatMsg {
+  string worker_id = 1;
+  map<int32, double> partitions = 2;
+  double max_event_time = 3;
+  double timestamp = 4;
+  int64 fencing_token = 5;
+  repeated int32 idle_partitions = 6;
+  map<int32, bool> backpressure_partitions = 7;
+  map<int32, int64> kafka_offsets = 8;
+}
+
+message IngestorHeartbeatMsg {
+  string ingestor_id = 1;
+  double T_commit = 2;
+  double timestamp = 3;
+  repeated int32 partitions_assigned = 4;
+  int64 last_log_offset = 5;
+  double ingestor_clock = 6;
+  map<int32, int64> offsets = 7;
+}
+
+message StateRequest {
+  string worker_id = 1;
+}
+
+message StateReply {
+  double W_global = 1;
+  int64 term = 2;
+  map<int32, string> partition_types = 3;
+}
+
+message RaftVoteMsg {
+  int64 term = 1;
+  string candidate_id = 2;
+  double W_global = 3;
+}
+
+message RaftVoteReply {
+  bool granted = 1;
+  int64 term = 2;
+}
+
+message RaftStateMsg {
+  int64 term = 1;
+  string leader_id = 2;
+  double W_global = 3;
+  string json_state = 4; // Serialized coordinator broadcast dictionary
+}
+
+message ZkVoteMsg {
+  string action = 1;
+}
+
+message ZkVoteReply {
+  bool ok = 1;
+  string coordinator_id = 2;
+}
+
+message ZkStateMsg {
+  string leader_id = 1;
+  string mode = 2;
+  string json_state = 3; // Serialized coordinator broadcast dictionary
+}
+
+message WorkerWatermarkMsg {
+  string worker_id = 1;
+  int32 partition_id = 2;
+  double W_h = 3;
+}
+
+message EmptyReply {
+  bool ok = 1;
+}

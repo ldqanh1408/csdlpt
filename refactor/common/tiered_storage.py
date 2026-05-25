@@ -83,6 +83,11 @@ class TieredStorageManager:
         self.endpoint = endpoint
         self.bucket = bucket_name
         self.eviction = EvictionManager()
+        # Counter visible to MonitoringManager — incremented every time
+        # _do_upload exhausts retries. The monitoring loop reads this via
+        # `getattr(storage, 'upload_error_count', 0)` so the
+        # `csdlpt_minio_upload_errors_total` Counter can be inc'd by diff.
+        self.upload_error_count: int = 0
 
         try:
             from minio import Minio
@@ -114,13 +119,22 @@ class TieredStorageManager:
     def _object_key(self, window_id: str, partition_id: int) -> str:
         return f"strict-watermark/historical/{partition_id}/{window_id}.json"
 
-    def upload_window(self, window_id: str, window_data: dict, partition_id: int = 0) -> bool:
-        """Upload closed window to MinIO asynchronously. Returns True if upload started."""
+    def upload_window(self, window_id: str, window_data: dict, partition_id: int = 0,
+                      sync: bool = False) -> bool:
+        """Upload closed window to MinIO. Returns True if upload succeeded.
+
+        When sync=True, blocks until the upload completes and returns the actual
+        result. When sync=False (default), starts an async daemon thread and
+        returns True if the thread was started.
+        """
         if self.client is None:
             self.eviction.set_state(window_id, EvictionState.UPLOADED)
             return True
 
         self.eviction.set_state(window_id, EvictionState.UPLOADING)
+
+        if sync:
+            return self._do_upload(window_id, window_data, partition_id)
 
         t = threading.Thread(
             target=self._do_upload,
@@ -193,8 +207,15 @@ class TieredStorageManager:
             logger.warning("TieredStorage: stats query failed: %s", e)
             return {"status": "error", "total_objects": 0, "total_size_bytes": 0}
 
-    def _do_upload(self, window_id: str, window_data: dict, partition_id: int = 0):
         data = json.dumps(window_data).encode()
+        headers = {}
+        sse_kms_key = os.environ.get("MINIO_SSE_KMS_KEY_ID", "")
+        if sse_kms_key:
+            headers["x-amz-server-side-encryption"] = "aws:kms"
+            headers["x-amz-server-side-encryption-aws-kms-key-id"] = sse_kms_key
+        elif os.environ.get("MINIO_SSE_ENABLE", "false").lower() in ("true", "1", "yes"):
+            headers["x-amz-server-side-encryption"] = "AES256"
+
         for attempt in range(1, MAX_RETRIES + 1):
             try:
                 result = self.client.put_object(
@@ -202,6 +223,7 @@ class TieredStorageManager:
                     self._object_key(window_id, partition_id),
                     data=io.BytesIO(data),
                     length=len(data),
+                    headers=headers,
                 )
                 if hasattr(result, "etag") and result.etag:
                     self.eviction.set_etag(window_id, result.etag)
@@ -219,6 +241,7 @@ class TieredStorageManager:
                     time.sleep(delay)
                 else:
                     self.eviction.set_state(window_id, EvictionState.CLOSED)
+                    self.upload_error_count += 1
                     logger.error(
                         "TieredStorage: upload failed after %d attempts for %s: %s",
                         MAX_RETRIES, window_id, e,

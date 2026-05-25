@@ -9,23 +9,24 @@ global:
   scrape_timeout: 4s
   evaluation_interval: 10s
 
-alerting:
-  alertmanagers:
-    - static_configs:
-        - targets: []
-      # Uncomment and configure to enable Alertmanager:
-      # - static_configs:
-      #     - targets: ['alertmanager:9093']
+# alerting disabled — no alertmanager service in compose
+# alerting:
+#   alertmanagers:
+#     - static_configs:
+#         - targets:
+#             - "alertmanager:9093"
 
-rule_files: []
-  # - "alerts.yml"
+rule_files:
+  - "prometheus-rules.yml"
 
 scrape_configs:
   - job_name: "csdlpt-coordinator"
     metrics_path: "/metrics"
     static_configs:
       - targets:
-          - "localhost:9000"
+          - "coordinator-1:8000"
+          - "coordinator-2:8000"
+          - "coordinator-3:8000"
         labels:
           role: "coordinator"
 
@@ -33,7 +34,8 @@ scrape_configs:
     metrics_path: "/metrics"
     static_configs:
       - targets:
-          - "localhost:9001"
+          - "aggregator:8000"
+          - "aggregator-standby:8000"
         labels:
           role: "aggregator"
 
@@ -41,10 +43,10 @@ scrape_configs:
     metrics_path: "/metrics"
     static_configs:
       - targets:
-          - "localhost:9101"
-          - "localhost:9102"
-          - "localhost:9103"
-          - "localhost:9104"
+          - "node0:8000"
+          - "node1:8000"
+          - "node2:8000"
+          - "node3:8000"
         labels:
           role: "worker"
 
@@ -52,6 +54,6 @@ scrape_configs:
     metrics_path: "/metrics"
     static_configs:
       - targets:
-          - "localhost:8100"
+          - "ingestor:8000"
         labels:
           role: "ingestor"

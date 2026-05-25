@@ -1,6 +1,6 @@
 {
   "version": "1.0.0",
-  "lastScanned": 1779617518970,
+  "lastScanned": 1779717453307,
   "projectRoot": "D:\\dev\\csdlpt",
   "techStack": {
     "languages": [
@@ -19,7 +19,7 @@
   },
   "build": {
     "buildCommand": "make build",
-    "testCommand": "python -m pytest refactor/tests/ -x -q 2>&1 | tail -10",
+    "testCommand": "make test",
     "lintCommand": null,
     "devCommand": null,
     "scripts": {}
@@ -45,7 +45,7 @@
       "path": "dataset",
       "purpose": null,
       "fileCount": 2,
-      "lastAccessed": 1779617518911,
+      "lastAccessed": 1779717453281,
       "keyFiles": [
         "access.log.zip",
         "data.csv"
@@ -55,7 +55,7 @@
       "path": "deploy",
       "purpose": null,
       "fileCount": 2,
-      "lastAccessed": 1779617518911,
+      "lastAccessed": 1779717453282,
       "keyFiles": [
         "docker-compose.yml",
         "prometheus.yml"
@@ -65,14 +65,14 @@
       "path": "dlq",
       "purpose": null,
       "fileCount": 0,
-      "lastAccessed": 1779617518912,
+      "lastAccessed": 1779717453282,
       "keyFiles": []
     },
     "docs": {
       "path": "docs",
       "purpose": "Documentation",
       "fileCount": 9,
-      "lastAccessed": 1779617518913,
+      "lastAccessed": 1779717453282,
       "keyFiles": [
         "ARCHITECTURE.md",
         "DESIGN.md",
@@ -85,7 +85,7 @@
       "path": "pending",
       "purpose": null,
       "fileCount": 5,
-      "lastAccessed": 1779617518913,
+      "lastAccessed": 1779717453283,
       "keyFiles": [
         "ARCHITECTURE.md",
         "CONTAINER_COORDINATION.md",
@@ -97,9 +97,11 @@
     "refactor": {
       "path": "refactor",
       "purpose": null,
-      "fileCount": 3,
-      "lastAccessed": 1779617518913,
+      "fileCount": 6,
+      "lastAccessed": 1779717453283,
       "keyFiles": [
+        "docker-compose.yml",
+        "Dockerfile",
         "requirements.txt",
         "run.py",
         "__init__.py"
@@ -109,7 +111,7 @@
       "path": "scripts",
       "purpose": "Build/utility scripts",
       "fileCount": 13,
-      "lastAccessed": 1779617518914,
+      "lastAccessed": 1779717453284,
       "keyFiles": [
         "demo_live.sh",
         "lib.sh",
@@ -122,7 +124,7 @@
       "path": "ui",
       "purpose": null,
       "fileCount": 10,
-      "lastAccessed": 1779617518914,
+      "lastAccessed": 1779717453284,
       "keyFiles": [
         "demos.py",
         "dist.py",
@@ -135,7 +137,7 @@
       "path": "wm",
       "purpose": null,
       "fileCount": 9,
-      "lastAccessed": 1779617518915,
+      "lastAccessed": 1779717453285,
       "keyFiles": [
         "actions.py",
         "config.py",
@@ -148,7 +150,7 @@
       "path": "__pycache__",
       "purpose": null,
       "fileCount": 5,
-      "lastAccessed": 1779617518915,
+      "lastAccessed": 1779717453285,
       "keyFiles": [
         "app.cpython-310.pyc",
         "app.cpython-314.pyc",
@@ -160,30 +162,19 @@
     "refactor\\docs": {
       "path": "refactor\\docs",
       "purpose": "Documentation",
-      "fileCount": 3,
-      "lastAccessed": 1779617518918,
+      "fileCount": 8,
+      "lastAccessed": 1779717453287,
       "keyFiles": [
-        "Thiet_Ke_Heuristic_Watermark.md",
-        "Thiet_Ke_Strict_Watermark.md",
-        "Trien_Khai_He_Thong.md"
-      ]
-    },
-    "refactor\\tests": {
-      "path": "refactor\\tests",
-      "purpose": "Test files",
-      "fileCount": 12,
-      "lastAccessed": 1779617518919,
-      "keyFiles": [
-        "test_backpressure.py",
-        "test_chaos.py",
-        "test_ddsketch.py"
+        "00_TOC_AND_PROJECT_ONBOARDING.md",
+        "01_SYSTEM_ARCHITECTURE_OVERVIEW.md",
+        "02_STRICT_PATH_DETAILED_DESIGN.md"
       ]
     },
     "wm\\data": {
       "path": "wm\\data",
       "purpose": "Data files",
       "fileCount": 3,
-      "lastAccessed": 1779617518920,
+      "lastAccessed": 1779717453287,
       "keyFiles": [
         "nasa.py",
         "synthetic.py",
@@ -194,206 +185,248 @@
   "hotPaths": [
     {
       "path": "refactor\\run.py",
-      "accessCount": 53,
-      "lastAccessed": 1779623137381,
-      "type": "file"
-    },
-    {
-      "path": "refactor\\docs\\Thiet_Ke_Strict_Watermark.md",
-      "accessCount": 35,
-      "lastAccessed": 1779621177194,
+      "accessCount": 102,
+      "lastAccessed": 1779720263986,
       "type": "file"
     },
     {
       "path": "refactor",
-      "accessCount": 28,
-      "lastAccessed": 1779622288059,
+      "accessCount": 79,
+      "lastAccessed": 1779719535923,
       "type": "directory"
     },
     {
-      "path": "refactor\\docs\\Trien_Khai_He_Thong.md",
-      "accessCount": 21,
-      "lastAccessed": 1779619377767,
-      "type": "file"
-    },
-    {
-      "path": "refactor\\common\\monitoring.py",
-      "accessCount": 15,
-      "lastAccessed": 1779623289597,
+      "path": "refactor\\docs\\Thiet_Ke_Strict_Watermark.md",
+      "accessCount": 39,
+      "lastAccessed": 1779684445328,
       "type": "file"
     },
     {
       "path": "refactor\\heuristic\\engine.py",
-      "accessCount": 15,
-      "lastAccessed": 1779623336882,
+      "accessCount": 32,
+      "lastAccessed": 1779717691970,
+      "type": "file"
+    },
+    {
+      "path": "refactor\\common\\monitoring.py",
+      "accessCount": 26,
+      "lastAccessed": 1779684954385,
+      "type": "file"
+    },
+    {
+      "path": "refactor\\docs\\Trien_Khai_He_Thong.md",
+      "accessCount": 25,
+      "lastAccessed": 1779684533374,
       "type": "file"
     },
     {
       "path": "refactor\\docs\\Thiet_Ke_Heuristic_Watermark.md",
-      "accessCount": 14,
-      "lastAccessed": 1779621177137,
+      "accessCount": 18,
+      "lastAccessed": 1779684445385,
       "type": "file"
     },
     {
       "path": "refactor\\common\\tiered_storage.py",
-      "accessCount": 12,
-      "lastAccessed": 1779622929571,
-      "type": "file"
-    },
-    {
-      "path": "refactor\\heuristic\\aggregator.py",
-      "accessCount": 10,
-      "lastAccessed": 1779622754801,
-      "type": "file"
-    },
-    {
-      "path": "refactor\\heuristic\\cold_start.py",
-      "accessCount": 9,
-      "lastAccessed": 1779623057936,
-      "type": "file"
-    },
-    {
-      "path": "refactor\\strict\\disaster_recovery.py",
-      "accessCount": 8,
-      "lastAccessed": 1779621486485,
+      "accessCount": 17,
+      "lastAccessed": 1779684991670,
       "type": "file"
     },
     {
       "path": "refactor\\strict\\engine.py",
-      "accessCount": 7,
-      "lastAccessed": 1779621073843,
+      "accessCount": 17,
+      "lastAccessed": 1779717691886,
       "type": "file"
     },
     {
-      "path": "refactor\\common\\alerting.py",
-      "accessCount": 6,
-      "lastAccessed": 1779620400109,
+      "path": "refactor\\docs\\out_of_scope.md",
+      "accessCount": 14,
+      "lastAccessed": 1779685035708,
       "type": "file"
-    },
-    {
-      "path": "refactor\\docs",
-      "accessCount": 5,
-      "lastAccessed": 1779620225277,
-      "type": "directory"
     },
     {
       "path": "refactor\\strict\\worker.py",
-      "accessCount": 5,
-      "lastAccessed": 1779620503133,
+      "accessCount": 13,
+      "lastAccessed": 1779718545303,
       "type": "file"
     },
     {
-      "path": "refactor\\common\\config.py",
-      "accessCount": 5,
-      "lastAccessed": 1779620707775,
+      "path": "refactor\\heuristic\\aggregator.py",
+      "accessCount": 12,
+      "lastAccessed": 1779683446238,
       "type": "file"
     },
     {
-      "path": "refactor\\common\\differentiated_eviction.py",
-      "accessCount": 5,
-      "lastAccessed": 1779622880169,
+      "path": "refactor\\heuristic\\cold_start.py",
+      "accessCount": 12,
+      "lastAccessed": 1779683446302,
       "type": "file"
     },
     {
-      "path": "refactor\\strict\\raft_coordinator.py",
-      "accessCount": 4,
-      "lastAccessed": 1779620610726,
-      "type": "file"
-    },
-    {
-      "path": "refactor\\common\\rocks_store.py",
-      "accessCount": 4,
-      "lastAccessed": 1779622504551,
-      "type": "file"
-    },
-    {
-      "path": "refactor\\heuristic\\dlq.py",
-      "accessCount": 4,
-      "lastAccessed": 1779622703216,
-      "type": "file"
-    },
-    {
-      "path": "refactor\\strict\\backpressure.py",
-      "accessCount": 3,
-      "lastAccessed": 1779620708477,
-      "type": "file"
-    },
-    {
-      "path": "refactor\\strict\\ingestor_health.py",
-      "accessCount": 3,
-      "lastAccessed": 1779621269695,
+      "path": "refactor\\strict\\disaster_recovery.py",
+      "accessCount": 10,
+      "lastAccessed": 1779683478070,
       "type": "file"
     },
     {
       "path": "refactor\\strict",
-      "accessCount": 3,
-      "lastAccessed": 1779622579312,
+      "accessCount": 9,
+      "lastAccessed": 1779683994921,
       "type": "directory"
     },
     {
-      "path": "refactor\\deploy\\docker-compose.yml",
-      "accessCount": 2,
-      "lastAccessed": 1779619482201,
+      "path": "refactor\\common\\differentiated_eviction.py",
+      "accessCount": 8,
+      "lastAccessed": 1779683478100,
       "type": "file"
     },
     {
-      "path": "refactor\\tests\\test_heuristic.py",
-      "accessCount": 2,
-      "lastAccessed": 1779619580324,
+      "path": "refactor\\common\\alerting.py",
+      "accessCount": 8,
+      "lastAccessed": 1779683485617,
       "type": "file"
     },
     {
-      "path": "refactor\\hybrid\\router.py",
-      "accessCount": 2,
-      "lastAccessed": 1779620156504,
-      "type": "file"
-    },
-    {
-      "path": "refactor\\strict\\failover.py",
-      "accessCount": 2,
-      "lastAccessed": 1779620333891,
-      "type": "file"
-    },
-    {
-      "path": "refactor\\heuristic",
-      "accessCount": 2,
-      "lastAccessed": 1779620415240,
-      "type": "directory"
-    },
-    {
-      "path": "refactor\\common\\window.py",
-      "accessCount": 2,
-      "lastAccessed": 1779621216033,
-      "type": "directory"
-    },
-    {
-      "path": "refactor\\heuristic\\aggregator_ha.py",
-      "accessCount": 2,
-      "lastAccessed": 1779621316828,
-      "type": "file"
-    },
-    {
-      "path": "refactor\\heuristic\\negative_lag.py",
-      "accessCount": 2,
-      "lastAccessed": 1779622308917,
+      "path": "refactor\\common\\config.py",
+      "accessCount": 8,
+      "lastAccessed": 1779683817304,
       "type": "file"
     },
     {
       "path": "refactor\\strict\\output_manager.py",
-      "accessCount": 2,
-      "lastAccessed": 1779622339370,
+      "accessCount": 8,
+      "lastAccessed": 1779719568021,
+      "type": "file"
+    },
+    {
+      "path": "refactor\\strict\\raft_coordinator.py",
+      "accessCount": 7,
+      "lastAccessed": 1779683439435,
+      "type": "file"
+    },
+    {
+      "path": "refactor\\heuristic\\dlq.py",
+      "accessCount": 7,
+      "lastAccessed": 1779683446190,
+      "type": "file"
+    },
+    {
+      "path": "refactor\\heuristic\\aggregator_ha.py",
+      "accessCount": 7,
+      "lastAccessed": 1779684759724,
+      "type": "file"
+    },
+    {
+      "path": "refactor\\tests\\test_heuristic.py",
+      "accessCount": 7,
+      "lastAccessed": 1779686307485,
       "type": "file"
     },
     {
       "path": "refactor\\common\\types.py",
-      "accessCount": 2,
-      "lastAccessed": 1779622887015,
+      "accessCount": 7,
+      "lastAccessed": 1779717691373,
+      "type": "file"
+    },
+    {
+      "path": "refactor\\deploy\\docker-compose.yml",
+      "accessCount": 7,
+      "lastAccessed": 1779719576310,
+      "type": "file"
+    },
+    {
+      "path": "refactor\\docs",
+      "accessCount": 6,
+      "lastAccessed": 1779642770603,
+      "type": "directory"
+    },
+    {
+      "path": "refactor\\common\\rocks_store.py",
+      "accessCount": 6,
+      "lastAccessed": 1779683492277,
+      "type": "file"
+    },
+    {
+      "path": "refactor\\heuristic",
+      "accessCount": 6,
+      "lastAccessed": 1779683761609,
+      "type": "directory"
+    },
+    {
+      "path": "refactor\\heuristic\\negative_lag.py",
+      "accessCount": 5,
+      "lastAccessed": 1779683453095,
+      "type": "file"
+    },
+    {
+      "path": "refactor\\strict\\backpressure.py",
+      "accessCount": 5,
+      "lastAccessed": 1779683453109,
+      "type": "file"
+    },
+    {
+      "path": "refactor\\strict\\ingestor_health.py",
+      "accessCount": 5,
+      "lastAccessed": 1779683453182,
+      "type": "file"
+    },
+    {
+      "path": "refactor\\strict\\replay_checkpoint.py",
+      "accessCount": 4,
+      "lastAccessed": 1779683439415,
+      "type": "file"
+    },
+    {
+      "path": "refactor\\strict\\failover.py",
+      "accessCount": 4,
+      "lastAccessed": 1779683439705,
+      "type": "file"
+    },
+    {
+      "path": "refactor\\common\\window.py",
+      "accessCount": 4,
+      "lastAccessed": 1779683485702,
+      "type": "directory"
+    },
+    {
+      "path": "refactor\\hybrid\\router.py",
+      "accessCount": 4,
+      "lastAccessed": 1779683492296,
       "type": "file"
     },
     {
       "path": "refactor\\strict\\coordinator.py",
-      "accessCount": 1,
-      "lastAccessed": 1779619035361,
+      "accessCount": 3,
+      "lastAccessed": 1779683432698,
+      "type": "file"
+    },
+    {
+      "path": "refactor\\ddsketch\\sketch.py",
+      "accessCount": 3,
+      "lastAccessed": 1779683492233,
+      "type": "file"
+    },
+    {
+      "path": "refactor\\tests\\test_chaos.py",
+      "accessCount": 3,
+      "lastAccessed": 1779684572652,
+      "type": "directory"
+    },
+    {
+      "path": "refactor\\common\\metrics.py",
+      "accessCount": 3,
+      "lastAccessed": 1779717705238,
+      "type": "file"
+    },
+    {
+      "path": "refactor\\heuristic\\downstream_emitter.py",
+      "accessCount": 2,
+      "lastAccessed": 1779683453120,
+      "type": "file"
+    },
+    {
+      "path": "refactor\\requirements.txt",
+      "accessCount": 2,
+      "lastAccessed": 1779717709861,
       "type": "file"
     },
     {
@@ -403,22 +436,52 @@
       "type": "file"
     },
     {
-      "path": "refactor\\requirements.txt",
-      "accessCount": 1,
-      "lastAccessed": 1779619614747,
-      "type": "file"
-    },
-    {
-      "path": "refactor\\ddsketch\\sketch.py",
-      "accessCount": 1,
-      "lastAccessed": 1779620848544,
-      "type": "file"
-    },
-    {
       "path": "C:\\Users\\CYBORG\\AppData\\Local\\Temp\\claude\\D--dev-csdlpt\\c8ab605f-d8bb-4992-bd78-a1b23ec74813\\tasks\\bi8tuujmw.output",
       "accessCount": 1,
       "lastAccessed": 1779621276072,
       "type": "file"
+    },
+    {
+      "path": "refactor\\common\\tls.py",
+      "accessCount": 1,
+      "lastAccessed": 1779642526369,
+      "type": "file"
+    },
+    {
+      "path": "refactor\\ddsketch\\compat.py",
+      "accessCount": 1,
+      "lastAccessed": 1779642526377,
+      "type": "file"
+    },
+    {
+      "path": "refactor\\ddsketch",
+      "accessCount": 1,
+      "lastAccessed": 1779642791687,
+      "type": "directory"
+    },
+    {
+      "path": "refactor\\common",
+      "accessCount": 1,
+      "lastAccessed": 1779643343848,
+      "type": "directory"
+    },
+    {
+      "path": "refactor\\common\\kafka_sim.py",
+      "accessCount": 1,
+      "lastAccessed": 1779683761586,
+      "type": "directory"
+    },
+    {
+      "path": "C:\\Users\\CYBORG\\AppData\\Local\\Temp\\claude\\D--dev-csdlpt\\968ba314-e116-4daf-8cf2-fc2ccbc621c4\\tasks\\b7ujyrk7m.output",
+      "accessCount": 1,
+      "lastAccessed": 1779683765807,
+      "type": "file"
+    },
+    {
+      "path": "refactor\\hybrid",
+      "accessCount": 1,
+      "lastAccessed": 1779683808044,
+      "type": "directory"
     }
   ],
   "userDirectives": []

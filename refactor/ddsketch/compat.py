@@ -302,6 +302,15 @@ class SlidingWindowDDSketch:
         self._sketches: Dict[float, DDSketch] = {}  # start_ts -> sub-sketch
         self._latest_time: Optional[float] = None
 
+        # Merged-sketch cache: quantile() can be called up to 4 times per
+        # event in the hot path.  Rebuilding a merged sketch from ~60
+        # sub-sketches each time is expensive (O(sub_sketches * bins)).
+        # Cache the merged result for 200ms so all quantile calls within
+        # one event-processing cycle share a single merge.
+        self._cached_quantiles: dict[float, float] = {}
+        self._cache_ts: float = 0.0
+        self._cache_ttl_s: float = 0.2
+
     # --- helpers ------------------------------------------------------------
 
     def _sub_sketch_start(self, timestamp: float) -> float:
@@ -328,6 +337,9 @@ class SlidingWindowDDSketch:
         expired = [ts for ts in self._sketches if ts < cutoff]
         for ts in expired:
             del self._sketches[ts]
+        # Expired sub-sketches invalidate the merged-sketch cache.
+        if expired:
+            self._cache_ts = 0.0
 
     # --- insert -------------------------------------------------------------
 
@@ -360,6 +372,8 @@ class SlidingWindowDDSketch:
             self._sketches[start_ts] = self._make_sub_sketch()
 
         self._sketches[start_ts].add(value)
+        # New data invalidates the merged-sketch cache.
+        self._cache_ts = 0.0
 
     def add_many(
         self, values: List[Tuple[float, float]]
@@ -386,16 +400,33 @@ class SlidingWindowDDSketch:
         """Return the estimated *q*-quantile across all active sub-sketches.
 
         Returns 0.0 when no data is present in the window.
+
+        Uses a 200ms merged-sketch cache because this method can be called
+        up to 4 times per event in the hot path (L_eff update + 3x metrics
+        quantile queries).  Re-merging ~60 sub-sketches each time is
+        expensive; the cache amortises that cost over a single processing
+        cycle.
         """
         if not self._sketches:
             return 0.0
 
+        # Fast path: return cached quantile if still fresh.
+        if q in self._cached_quantiles and time.time() - self._cache_ts < self._cache_ttl_s:
+            return self._cached_quantiles[q]
+
+        # Slow path: rebuild merged sketch and precompute common quantiles.
         sketches = list(self._sketches.values())
         merged = sketches[0].copy()
         for sk in sketches[1:]:
             merged.merge_into(sk)
 
-        return merged.quantile(q)
+        COMMON_QS = (0.50, 0.95, 0.99, 0.999)
+        self._cached_quantiles = {cq: merged.quantile(cq) for cq in COMMON_QS}
+        # Also cache the requested q in case it is not one of the common set.
+        self._cached_quantiles[q] = merged.quantile(q)
+        self._cache_ts = time.time()
+
+        return self._cached_quantiles[q]
 
     # --- properties ---------------------------------------------------------
 

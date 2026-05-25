@@ -7,10 +7,23 @@ Expected loss <= 1% (steady state), <= 5% (burst, with adaptive p=0.999).
 End-to-end latency ~5s (vs ~15s for Strict).
 """
 
+import json
+import logging
+import os
 import time
 from collections import defaultdict
 from dataclasses import dataclass
 from typing import Optional
+
+logger = logging.getLogger(__name__)
+
+
+def _flag_enabled(name: str, default: bool = True) -> bool:
+    """Read a boolean feature flag from the environment (deployment §6.4)."""
+    raw = os.environ.get(name)
+    if raw is None:
+        return default
+    return raw.lower() in ("1", "true", "yes", "on")
 
 from refactor.ddsketch import DDSketch, SlidingWindowDDSketch
 from refactor.common.types import LogEvent, WindowResult
@@ -69,6 +82,8 @@ class HeuristicWatermarkEngine:
         # RocksDB path (extract before consuming kwargs)
         db_path: Optional[str] = cfg.pop("db_path", None)
         tiered_storage = cfg.pop("tiered_storage", None)
+        self.checkpoint_dir: str = cfg.pop("checkpoint_dir",
+                                            os.path.dirname(db_path) if db_path else "/tmp")
 
         # Windowing
         self.tumbling = TumblingWindow(cfg["window_size_s"])
@@ -93,10 +108,18 @@ class HeuristicWatermarkEngine:
         # Window state
         self.open_windows: dict[float, WindowAggregate] = defaultdict(WindowAggregate)
         self.closed_windows: dict[float, WindowResult] = {}
+        self._window_closed_at: dict[float, float] = {}
         self.late_events: list[dict] = []
 
-        # Dedup
-        self.seen_ids: set[str] = set()
+        # Extreme lag counter (spec §5.5)
+        self.extreme_lag_count: int = 0
+
+        # Dedup with TTL (§6.5 — bound memory; idempotent filter only needs
+        # to cover ~δ_base seconds of recent IDs). Each entry stores the
+        # arrival time so `_purge_seen_ids` can drop anything older than
+        # `_dedup_ttl_s`.
+        self.seen_ids: dict[str, float] = {}
+        self._dedup_ttl_s: float = 60.0
 
         # Adaptive percentile
         self.p_current: float = cfg["p_normal"]
@@ -124,11 +147,12 @@ class HeuristicWatermarkEngine:
 
         # Replay mode
         self.in_replay_mode: bool = False
+        self._replay_start_time: float = 0.0
         self.baseline_multiplier: float = cfg["baseline_multiplier"]
         self.exit_multiplier: float = cfg["exit_multiplier"]
         self.exit_streak_seconds: float = cfg["exit_streak_seconds"]
         self.baseline_lag: float = cfg["L_max"]
-        self._replay_exit_counter: int = 0
+        self._replay_stable_since: float = 0.0
 
         # Max allowed lag
         self.max_lag_accepted: float = cfg["max_lag_accepted"]
@@ -175,6 +199,9 @@ class HeuristicWatermarkEngine:
         if db_path is not None:
             self._store = RocksStore(db_path)
             self._restore_from_store()
+            self._restore_late_events()
+        # Secondary recovery: if RocksDB restored no state, try sketch.bin
+        self._restore_from_sketch_bin()
 
         # Dedup compaction
         self._last_dedup_sweep: float = 0.0
@@ -184,6 +211,11 @@ class HeuristicWatermarkEngine:
 
         # Idleness detection
         self.last_event_time: float = time.time()
+
+        # Inbound backpressure queue (spec §5.11)
+        self._inbound_queue: list = []
+        self._queue_maxsize: int = 500
+        self._backpressure_drops: int = 0
 
     # ---- RocksDB persistence helpers ----
 
@@ -207,7 +239,8 @@ class HeuristicWatermarkEngine:
     def _persist_seen_id(self, event_id: str) -> None:
         if self._store is None:
             return
-        self._store.put(f"{_PFX_SEEN}{event_id}", True)
+        ts = self.seen_ids.get(event_id, time.time())
+        self._store.put(f"{_PFX_SEEN}{event_id}", ts)
 
     def _restore_from_store(self) -> None:
         """Populate in-memory state from RocksDB on startup."""
@@ -228,9 +261,12 @@ class HeuristicWatermarkEngine:
             ws = float(key[len(_PFX_CLOSED):])
             self.closed_windows[ws] = val
 
-        for key, _val in self._store.items(prefix=_PFX_SEEN):
+        for key, val in self._store.items(prefix=_PFX_SEEN):
             eid = key[len(_PFX_SEEN):]
-            self.seen_ids.add(eid)
+            # Older RocksDB rows store True (legacy boolean format); treat
+            # them as just-seen so the TTL purge can phase them out.
+            ts = float(val) if isinstance(val, (int, float)) else time.time()
+            self.seen_ids[eid] = ts
 
         # Restore metadata
         meta = self._store.get(f"{_PFX_META}checkpoint")
@@ -244,20 +280,100 @@ class HeuristicWatermarkEngine:
             if sketch_data is not None:
                 self.sketch = SlidingWindowDDSketch.from_dict(sketch_data)
 
-    def checkpoint(self) -> None:
-        """Persist engine metadata to RocksDB."""
+    def _persist_late_events(self) -> None:
+        """Persist late_events list to RocksDB as JSON (spec §12.1, §13.4)."""
         if self._store is None:
             return
-        meta = {
-            "W_h": self.W_h,
-            "max_event_time": self.max_event_time,
-            "L_eff": self.L_eff,
-            "in_replay_mode": self.in_replay_mode,
-            "sketch": self.sketch.to_dict(),
-            "kafka_seek_offset": self.kafka_seek_offset,
-        }
-        self._store.put(f"{_PFX_META}checkpoint", meta)
-        self._store.flush()
+        # Serialize as JSON string (not pickle) so the data is inspectable
+        serialized = json.dumps(self.late_events)
+        self._store.put(f"{_PFX_META}late_events", serialized)
+
+    def _restore_late_events(self) -> None:
+        """Restore late_events from RocksDB on startup (spec §12.1)."""
+        if self._store is None:
+            return
+        raw = self._store.get(f"{_PFX_META}late_events")
+        if raw is None:
+            return
+        try:
+            if isinstance(raw, str):
+                self.late_events = json.loads(raw)
+            elif isinstance(raw, bytes):
+                self.late_events = json.loads(raw.decode("utf-8"))
+            else:
+                # Legacy pickle format fallback
+                self.late_events = raw if isinstance(raw, list) else []
+            # Restore extreme_lag_count from restored events
+            self.extreme_lag_count = sum(
+                1 for e in self.late_events if isinstance(e, dict) and e.get("extreme_lag")
+            )
+        except (json.JSONDecodeError, TypeError, UnicodeDecodeError):
+            logger.warning("Failed to decode late_events from RocksDB, starting fresh")
+            self.late_events = []
+
+    def _clear_persisted_late_events(self) -> None:
+        """Remove persisted late_events from RocksDB (called after DLQ drain)."""
+        if self._store is None:
+            return
+        self._store.delete(f"{_PFX_META}late_events")
+
+    def checkpoint(self) -> None:
+        """Persist engine metadata to RocksDB and export sketch.bin JSON."""
+        if self._store is not None:
+            meta = {
+                "W_h": self.W_h,
+                "max_event_time": self.max_event_time,
+                "L_eff": self.L_eff,
+                "in_replay_mode": self.in_replay_mode,
+                "sketch": self.sketch.to_dict(),
+                "kafka_seek_offset": self.kafka_seek_offset,
+            }
+            self._store.put(f"{_PFX_META}checkpoint", meta)
+            self._persist_late_events()
+            self._store.flush()
+
+        # Export sketch.bin JSON alongside RocksDB checkpoint for
+        # operational compatibility (backup/DR scripts can find it at a known path).
+        sketch_path = os.path.join(self.checkpoint_dir, "sketch.bin")
+        sketch_tmp = sketch_path + ".tmp"
+        try:
+            os.makedirs(self.checkpoint_dir, exist_ok=True)
+        except (OSError, PermissionError):
+            return
+        with open(sketch_tmp, "w") as f:
+            json.dump({
+                "W_h": self.W_h,
+                "L_eff": self.L_eff,
+                "max_event_time": self.max_event_time,
+                "sketch": self.sketch.to_dict(),
+                "updated_at": time.time(),
+            }, f)
+        os.replace(sketch_tmp, sketch_path)
+
+    def _restore_from_sketch_bin(self) -> None:
+        """Try loading state from sketch.bin as a secondary recovery path.
+
+        Called after RocksDB restore. If RocksDB is empty (state still at
+        defaults), attempt to recover from the JSON export.
+        """
+        sketch_path = os.path.join(self.checkpoint_dir, "sketch.bin")
+        if not os.path.exists(sketch_path):
+            return
+        # Only restore if core state was NOT already loaded from RocksDB
+        if self.W_h != float("-inf") or self.max_event_time != float("-inf"):
+            return
+        try:
+            with open(sketch_path, "r") as f:
+                data = json.load(f)
+            self.W_h = data.get("W_h", float("-inf"))
+            self.L_eff = data.get("L_eff", self.L_max)
+            self.max_event_time = data.get("max_event_time", float("-inf"))
+            sketch_data = data.get("sketch")
+            if sketch_data is not None:
+                self.sketch = SlidingWindowDDSketch.from_dict(sketch_data)
+            logger.info("Restored state from sketch.bin (RocksDB was empty)")
+        except (json.JSONDecodeError, OSError, KeyError) as e:
+            logger.warning("Failed to restore from sketch.bin: %s", e)
 
     # ---- Core watermark computation ----
     def _compute_watermark(self) -> float:
@@ -341,6 +457,9 @@ class HeuristicWatermarkEngine:
         self._check_adaptive_alpha()
 
     def _check_burst(self) -> None:
+        # §6.4 feature flag: when disabled, do not switch to p_safe.
+        if not _flag_enabled("ENABLE_ADAPTIVE_PERCENTILE", True):
+            return
         if len(self._quantile_history) < 30:
             return
         recent = self._quantile_history[-1]
@@ -407,11 +526,12 @@ class HeuristicWatermarkEngine:
                 version=1,
             )
             self.closed_windows[w] = result
+            self._window_closed_at[w] = time.time()
             self._persist_closed_window(w, result)
             self._pending_results.append(result)
 
     def get_expired_windows(self, age_s: float) -> list:
-        """Return closed windows where window_end < now - age_s as (window_id, count) tuples.
+        """Return closed windows where window_end < now - age_s as (window_id, count, emitted_at) tuples.
 
         Used by DownstreamEmitter.schedule_final_reconciliation() for 24h FINAL checks.
         """
@@ -420,7 +540,8 @@ class HeuristicWatermarkEngine:
         expired = []
         for w, result in self.closed_windows.items():
             if result.window_end < cutoff:
-                expired.append((result.window_id, result.count))
+                emitted_at = self._window_closed_at.get(w, 0.0)
+                expired.append((result.window_id, result.count, emitted_at))
         return expired
 
     def drain_results(self) -> list:
@@ -460,31 +581,53 @@ class HeuristicWatermarkEngine:
             pass  # deletions are immediate in RocksStore, no flush needed per key
 
     def _purge_seen_ids(self) -> None:
-        """Periodically clear RocksDB seen-ID storage for compaction every 60s."""
+        """TTL sweep on the in-memory dedup set + periodic RocksDB compaction.
+
+        Spec §6.5: idempotent filter only needs to cover recent late arrivals
+        (here `_dedup_ttl_s` = 60s). Drop expired entries from memory every
+        call; clear-and-repopulate RocksDB every 5 minutes so SSTs compact.
+        """
+        now = time.time()
+        cutoff = now - self._dedup_ttl_s
+        expired = [eid for eid, ts in self.seen_ids.items() if ts < cutoff]
+        for eid in expired:
+            del self.seen_ids[eid]
+            if self._store is not None:
+                self._store.delete(f"{_PFX_SEEN}{eid}")
+
         if self._store is None:
             return
-        now = time.time()
-        if now - self._last_dedup_sweep < 60.0:
+        if now - self._last_dedup_sweep < 300.0:
             return
-        self._store.clear_prefix(_PFX_SEEN)
         self._last_dedup_sweep = now
+        self._store.clear_prefix(_PFX_SEEN)
+        for eid, ts in self.seen_ids.items():
+            self._store.put(f"{_PFX_SEEN}{eid}", ts)
 
     # ---- Event processing ----
     def is_idle(self) -> bool:
         return time.time() - self.last_event_time > 2.0
 
     def process(self, event: LogEvent, arrival_time: float = None) -> Optional[float]:
+        # Backpressure: drop if inbound queue is full (spec §5.11).
+        if len(self._inbound_queue) >= self._queue_maxsize:
+            self._backpressure_drops += 1
+            return None
+        self._inbound_queue.append(event)
+        # Dequeue the oldest event for processing (FIFO order).
+        event = self._inbound_queue.pop(0)
+
         t0 = HighResTimer.now_ns()
         self.metrics.total_received += 1
 
         if arrival_time is None:
             arrival_time = time.time()
 
-        # Dedup
+        # Dedup (TTL-bounded — §6.5)
         if event.event_id in self.seen_ids:
             self.metrics.duplicates += 1
             return None
-        self.seen_ids.add(event.event_id)
+        self.seen_ids[event.event_id] = arrival_time
         self._persist_seen_id(event.event_id)
 
         # Periodic RocksDB dedup compaction
@@ -500,16 +643,39 @@ class HeuristicWatermarkEngine:
         # Compute lag
         lag = arrival_time - et
 
-        # Negative lag handling (spec §7)
+        # Negative lag handling (spec §7). §6.4 feature flag: when
+        # recalibration is disabled, observation/tier evaluation still runs
+        # (for metrics and BOO fallback) but the median-offset correction is
+        # skipped — original lag goes into the sketch unmodified.
         self.neg_lag.observe(lag)
         tier = self.neg_lag.evaluate()
-        adjusted_lag = self.neg_lag.adjust_lag(lag)
+
+        # Tier 2 (0.1%-1%): log warning per spec §7.2
+        if tier == LagTier.WARNING:
+            neg_count = sum(1 for _, is_neg in self.neg_lag._observations if is_neg)
+            logger.warning(
+                "Negative lag rate in warning range (Tier 2, 0.1%%-1%%): "
+                "rate=%.4f (%d negative / %d total observations)",
+                self.neg_lag.rate, neg_count, len(self.neg_lag._observations),
+            )
+
+        if _flag_enabled("ENABLE_NEGATIVE_LAG_RECALIBRATION", True):
+            adjusted_lag = self.neg_lag.adjust_lag(lag)
+        else:
+            adjusted_lag = lag
         self.metrics.negative_lag_rate = self.neg_lag.rate
+
+        # Extreme lag check (spec §5.5): lag > max_lag_accepted -> skip sketch, route to DLQ
+        _extreme_lag = lag > self.max_lag_accepted
 
         # Replay detection (spec §11.3)
         if self.detect_replay(lag):
             pass  # skip sketch update during replay
-        elif not self.neg_lag.should_degrade_to_boo():
+        elif self.neg_lag.should_degrade_to_boo():
+            pass  # skip sketch update during BOO fallback
+        elif _extreme_lag:
+            pass  # skip sketch update for extreme lag (treat as anomaly)
+        else:
             # Update sketch with adjusted lag
             ts = HighResTimer.now_ns()
             self.sketch.add(adjusted_lag, arrival_time)
@@ -534,37 +700,56 @@ class HeuristicWatermarkEngine:
         win_id = self.tumbling.window_id(self.partition_id, ws)
         if win_id not in self._window_loss:
             self._window_loss[win_id] = {"late": 0, "total": 0}
-        self._window_loss[win_id]["total"] += 1
 
-        if ws in self.closed_windows:
+        if _extreme_lag:
+            # Extreme lag (spec §5.5): skip window, route directly to DLQ
+            self.extreme_lag_count += 1
             self.metrics.late_dropped += 1
-            self._window_loss[win_id]["late"] += 1
             self.late_events.append({
                 "event_id": event.event_id,
                 "T_event": et,
                 "arrival_time": arrival_time,
                 "lag": lag,
                 "W_h_at_arrival": self.W_h,
-                "lateness": self.W_h - et if et < self.W_h else 0.0,
+                "lateness": lag,
                 "partition_id": self.partition_id,
                 "original_status": event.status,
                 "worker_id": self.worker_id,
                 "payload": event.payload,
+                "extreme_lag": True,
             })
-        elif ws in self.open_windows:
-            agg = self.open_windows[ws]
-            agg.count += 1
-            if event.status == 500:
-                agg.status_500 += 1
-            self._persist_open_window(ws)
-            self.metrics.on_time += 1
         else:
-            self.open_windows[ws] = WindowAggregate(
-                count=1,
-                status_500=1 if event.status == 500 else 0,
-            )
-            self._persist_open_window(ws)
-            self.metrics.on_time += 1
+            self._window_loss[win_id]["total"] += 1
+
+            if ws in self.closed_windows:
+                self.metrics.late_dropped += 1
+                self._window_loss[win_id]["late"] += 1
+                self.late_events.append({
+                    "event_id": event.event_id,
+                    "T_event": et,
+                    "arrival_time": arrival_time,
+                    "lag": lag,
+                    "W_h_at_arrival": self.W_h,
+                    "lateness": self.W_h - et if et < self.W_h else 0.0,
+                    "partition_id": self.partition_id,
+                    "original_status": event.status,
+                    "worker_id": self.worker_id,
+                    "payload": event.payload,
+                })
+            elif ws in self.open_windows:
+                agg = self.open_windows[ws]
+                agg.count += 1
+                if event.status == 500:
+                    agg.status_500 += 1
+                self._persist_open_window(ws)
+                self.metrics.on_time += 1
+            else:
+                self.open_windows[ws] = WindowAggregate(
+                    count=1,
+                    status_500=1 if event.status == 500 else 0,
+                )
+                self._persist_open_window(ws)
+                self.metrics.on_time += 1
 
         # Periodic snapshot
         if time.time() - self._last_snapshot >= self.snapshot_interval:
@@ -608,8 +793,11 @@ class HeuristicWatermarkEngine:
     # ---- Replay mode ----
     def detect_replay(self, lag: float) -> bool:
         if self.baseline_lag > 0 and lag > self.baseline_multiplier * self.baseline_lag:
+            was_already_in_replay = self.in_replay_mode
             self.in_replay_mode = True
             self.metrics.replay_mode_active = True
+            if not was_already_in_replay:
+                self._replay_start_time = time.time()
             rollback_target = time.time() - 5.0
             self.rollback_to(rollback_target)
             return True
@@ -618,16 +806,22 @@ class HeuristicWatermarkEngine:
     def check_exit_replay(self) -> None:
         if not self.in_replay_mode:
             return
+        # Enforce 30s wall-clock minimum for replay mode (§8.3, §11.3)
+        replay_elapsed = time.time() - self._replay_start_time
+        if replay_elapsed < 30.0:
+            return
         recent_lag = self.L_eff
         if recent_lag < self.exit_multiplier * self.baseline_lag:
-            self._replay_exit_counter += 1
-            if self._replay_exit_counter >= self.exit_streak_seconds:
+            now = time.time()
+            if self._replay_stable_since == 0.0:
+                self._replay_stable_since = now
+            elif now - self._replay_stable_since >= self.exit_streak_seconds:
                 self.in_replay_mode = False
                 self.metrics.replay_mode_active = False
-                self._replay_exit_counter = 0
+                self._replay_stable_since = 0.0
                 self.baseline_lag = recent_lag
         else:
-            self._replay_exit_counter = 0
+            self._replay_stable_since = 0.0
 
     def flush(self) -> None:
         for w in sorted(self.open_windows):
@@ -643,6 +837,7 @@ class HeuristicWatermarkEngine:
                 version=1,
             )
             self.closed_windows[w] = result
+            self._window_closed_at[w] = result.window_end
             self._persist_closed_window(w, result)
             self._pending_results.append(result)
 
@@ -657,6 +852,11 @@ class HeuristicWatermarkEngine:
         if self._store is not None:
             self._store.close()
             self._store = None
+
+    @property
+    def queue_size(self) -> int:
+        """Current depth of the inbound backpressure queue (spec §5.11)."""
+        return len(self._inbound_queue)
 
     def get_seek_offset(self) -> int:
         """Return Kafka seek offset (offset + 1 per spec §8.3)."""
@@ -700,6 +900,7 @@ class HeuristicWatermarkEngine:
             "open_windows": len(self.open_windows),
             "closed_windows": closed_count,
             "dlq_backlog": len(self.late_events),
+            "extreme_lag_count": self.extreme_lag_count,
             "cold_start": self.cold_start.status(),
             "negative_lag": self.neg_lag.status(),
             "per_window_loss": per_window_loss,

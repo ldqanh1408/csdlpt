@@ -110,6 +110,8 @@ class HybridRouter:
             return result
 
     def _resolve_priority(self, event: LogEvent) -> EventPriority:
+        if event.status is not None and event.status >= 500:
+            return EventPriority.CRITICAL
         raw = event.payload.get(self.config.priority_field, None)
         if raw is not None:
             try:

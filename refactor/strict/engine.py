@@ -4,6 +4,7 @@ import dataclasses
 import logging
 import os
 import json
+import tempfile
 import time
 import pickle
 from collections import defaultdict
@@ -46,6 +47,7 @@ class StrictWatermarkEngine:
         db_path: Optional[str] = None,
         output_manager=None,
         diff_eviction=None,
+        store: Optional[RocksStore] = None,
     ):
         self.tumbling = TumblingWindow(window_size_s)
         self.delta_base = delta_base_s
@@ -57,6 +59,7 @@ class StrictWatermarkEngine:
 
         # Partition identity (default 0, no Raft term tracking)
         self.partition_id: int = 0
+        self.raft_term: int = 0
 
         self.last_T_commit: float = float("-inf")
         self.local_watermark: float = float("-inf")
@@ -81,14 +84,30 @@ class StrictWatermarkEngine:
         self.metrics = SystemMetrics()
         self.proc_latencies_ns: list[float] = []
 
-        # RocksDB persistent storage (None = in-memory-only, backward compatible)
-        self._store: Optional[RocksStore] = None
-        if db_path is not None:
+        # RocksDB persistent storage (None = in-memory-only, backward compatible).
+        # §6.4 feature flag: ENABLE_TWO_PHASE_EVICTION gates the on-restart
+        # eviction-state recovery sweep (CLOSED/UPLOADING/UPLOADED check). When
+        # disabled, restart only restores in-memory state; closed windows
+        # remain in whatever state they were persisted in.
+        self._store: Optional[RocksStore] = store
+        if self._store is None and db_path is not None:
             self._store = RocksStore(db_path)
+        if self._store is not None:
             self._restore_from_store()
-            self._recover_eviction_states()
+            if os.environ.get("ENABLE_TWO_PHASE_EVICTION", "true").lower() in ("1", "true", "yes", "on"):
+                self._recover_eviction_states()
 
-        os.makedirs(checkpoint_dir, exist_ok=True)
+        try:
+            os.makedirs(checkpoint_dir, exist_ok=True)
+        except PermissionError:
+            checkpoint_dir = os.path.join(tempfile.gettempdir(), "csdlpt-checkpoint")
+            self.checkpoint_dir = checkpoint_dir
+            os.makedirs(checkpoint_dir, exist_ok=True)
+
+        # Restore emitted set for duplicate prevention after restart
+        if self.output_manager is not None:
+            emitted_path = os.path.join(self.checkpoint_dir, "emitted.json")
+            self.output_manager.load_emitted(emitted_path)
 
     # ------------------------------------------------------------------
     # RocksDB persistence helpers
@@ -230,6 +249,10 @@ class StrictWatermarkEngine:
                     self._persist_closed_window(ws, result, EvictionState.UPLOADING)
                     reupload_count += 1
                     logger.info("RECOVER eviction: %s re-uploading", window_id)
+                # Re-emit if upload completed but emission was lost before crash
+                if self.output_manager is not None and not self.output_manager.is_emitted(window_id):
+                    self.output_manager.emit(result)
+                    logger.info("RECOVER eviction: %s re-emitted after crash", window_id)
 
             elif eviction_str == EvictionState.UPLOADED.value:
                 if not file_exists:
@@ -238,6 +261,10 @@ class StrictWatermarkEngine:
                     self._persist_closed_window(ws, result, EvictionState.UPLOADING)
                     reupload_count += 1
                     logger.warning("RECOVER eviction: %s marked UPLOADED but file missing, re-uploading", window_id)
+                # Re-emit if output was persisted but not emitted before crash
+                if self.output_manager is not None and not self.output_manager.is_emitted(window_id):
+                    self.output_manager.emit(result)
+                    logger.info("RECOVER eviction: %s re-emitted after crash", window_id)
 
         if recovered_count or reupload_count:
             logger.info("RECOVER eviction complete: %d advanced, %d re-uploaded",
@@ -271,8 +298,8 @@ class StrictWatermarkEngine:
             self._delete_open_window(w)
             st.eviction = EvictionState.UPLOADING
             result = WindowResult(
-                window_id=self.tumbling.window_id(0, w),
-                partition_id=0,
+                window_id=self.tumbling.window_id(self.partition_id, w),
+                partition_id=self.partition_id,
                 window_start=w,
                 window_end=w + self.tumbling.size,
                 count=st.count,
@@ -282,30 +309,34 @@ class StrictWatermarkEngine:
             )
             self.closed_windows[w] = result
             self._persist_closed_window(w, result, EvictionState.UPLOADING)
-            self._upload_to_tiered_storage(w, result)
-            # If no external tiered storage, advance to UPLOADED immediately
-            if self.tiered_storage is None:
-                self._persist_closed_window(w, result, EvictionState.UPLOADED)
-            st.eviction = EvictionState.UPLOADED
+            self._upload_to_tiered_storage(w, result, sync=True)
+            # Emit BEFORE persisting UPLOADED so crash between emission and
+            # persist is safe: _recover_eviction_states sees UPLOADING and
+            # re-emits, the idempotent sink deduplicates by window_id.
             if self.output_manager is not None:
                 self.output_manager.emit(result)
-            # Transition to PURGED: delete local RocksDB data, keeping only tier-3 copy
+            st.eviction = EvictionState.UPLOADED
+            self._persist_closed_window(w, result, EvictionState.UPLOADED)
+            # Transition to PURGED only after upload is confirmed complete
             self._purge_window_from_store(w)
             st.eviction = EvictionState.PURGED
 
     def _purge_seen_ids(self) -> None:
         """Remove dedup entries older than TTL (60s spec §6.5).
 
-        In-memory purge runs every call to keep the active set lean.
+        Uses watermark-based cutoff (W_global - dedupe_window) per the spec,
+        NOT wall clock. Stored values are T_event (the log's event_time), so
+        entries are purged when T_event < W_global - 60s — i.e. only after the
+        global watermark has safely passed the event's time + the dedup window.
+
         RocksDB bulk cleanup uses efficient clear_prefix every 5 minutes
         (replacing the per-key-delete sweep for better compaction performance).
         The in-memory dict is the authoritative source; RocksDB is for crash
         recovery only, so bulk clearing is safe.
         """
-        now = time.time()
-        cutoff = now - self._dedup_ttl_s
+        cutoff = self.watermark - self._dedup_ttl_s
 
-        # Fast in-memory sweep
+        # Fast in-memory sweep — compare stored T_event against watermark-based cutoff
         expired = [eid for eid, ts in self._seen_ids_ttl.items() if ts < cutoff]
         for eid in expired:
             del self._seen_ids_ttl[eid]
@@ -317,6 +348,7 @@ class StrictWatermarkEngine:
         # trade-off for avoiding per-key iteration on every purge cycle.
         if self._store is None:
             return
+        now = time.time()
         last_bulk = getattr(self, "_last_dedup_bulk_cleanup", 0.0)
         if now - last_bulk < 300.0:  # 5 minutes
             return
@@ -332,39 +364,65 @@ class StrictWatermarkEngine:
         t0 = HighResTimer.now_ns()
         self.metrics.total_received += 1
 
-        # T_network_ingest: time since event creation
+        # Track highest committed offset for checkpoint snapshots (§6.3)
+        if event.offset > self.kafka_committed_offset:
+            self.kafka_committed_offset = event.offset
+
+        # T_network_ingest: end-to-end latency (event_time → engine arrival).
+        # In production with real Kafka, this should measure poll()+deserialize()
+        # duration. When poll_received_at is available, split into:
+        #   - T_network_ingest: network latency (event_time → HTTP/Kafka receive)
+        #   - T_poll_decode: poll+decode time (HTTP/Kafka receive → engine arrival)
         if event.arrival_time > 0:
-            self.metrics.T_network_ingest_ns.append(
-                (event.arrival_time - event.event_time) * 1_000_000_000
-            )
+            if event.poll_received_at > 0:
+                self.metrics.T_network_ingest_ns.append(
+                    (event.poll_received_at - event.event_time) * 1_000_000_000
+                )
+                self.metrics.T_poll_decode_ns.append(
+                    (event.arrival_time - event.poll_received_at) * 1_000_000_000
+                )
+            else:
+                self.metrics.T_network_ingest_ns.append(
+                    (event.arrival_time - event.event_time) * 1_000_000_000
+                )
 
         if queue_len > self.max_queue:
             self.metrics.backpressure_drops += 1
             return None
 
-        # Dedup with TTL
+        et = event.event_time
+        ws = self.tumbling.window_start(et)
+        window_end = ws + self.tumbling.size
+
+        # §8.4 + §6.5 — outer Watermark Filter runs BEFORE the inner Hash
+        # Filter. The TTL guarantee on the seen-IDs set (60s window) holds
+        # only because anything past `self.watermark` is dropped here first,
+        # so the hash table never needs to remember events older than
+        # δ_base + replay_safety_margin.
         t_dedup = HighResTimer.now_ns()
+        if window_end <= self.watermark or ws in self.closed_windows:
+            self.metrics.late_dropped += 1
+            self.metrics.T_deduplication_ns.append(HighResTimer.now_ns() - t_dedup)
+            return None
+
+        # Inner Hash Filter — drop duplicate event_id within the TTL window.
         if event.event_id in self._seen_ids_ttl:
             self.metrics.duplicates += 1
+            self.metrics.T_deduplication_ns.append(HighResTimer.now_ns() - t_dedup)
             return None
-        self._seen_ids_ttl[event.event_id] = time.time()
+        self._seen_ids_ttl[event.event_id] = event.event_time
         self._persist_seen_id(event.event_id)
         self.metrics.T_deduplication_ns.append(HighResTimer.now_ns() - t_dedup)
 
-        et = event.event_time
         self.max_event_time = max(self.max_event_time, et)
-        ws = self.tumbling.window_start(et)
 
         t_state = HighResTimer.now_ns()
-        if ws in self.closed_windows:
-            self.metrics.late_dropped += 1
-        else:
-            st = self.open_windows[ws]
-            st.count += 1
-            if event.status == 500:
-                st.status_500 += 1
-            self._persist_open_window(ws)
-            self.metrics.on_time += 1
+        st = self.open_windows[ws]
+        st.count += 1
+        if event.status == 500:
+            st.status_500 += 1
+        self._persist_open_window(ws)
+        self.metrics.on_time += 1
         self.metrics.T_state_write_ns.append(HighResTimer.now_ns() - t_state)
 
         self._advance_watermark()
@@ -374,14 +432,28 @@ class StrictWatermarkEngine:
             self.checkpoint()
             self._last_checkpoint_time = time.time()
 
-        # Periodic TTL purge
-        self._purge_seen_ids()
-
         lat_ns = HighResTimer.now_ns() - t0
         self.proc_latencies_ns.append(lat_ns)
         return lat_ns
 
+    def _list_sst_files(self, ckpt_dir: str) -> list[str]:
+        """List SST files in a RocksDB checkpoint directory."""
+        import glob
+        sst_files = []
+        for root, _dirs, files in os.walk(ckpt_dir):
+            for f in files:
+                if f.endswith(".sst"):
+                    sst_files.append(os.path.relpath(os.path.join(root, f), ckpt_dir))
+        return sorted(sst_files)
+
     def checkpoint(self) -> None:
+        # Purge stale dedup entries before checkpoint (spec §6.3 + §6.5)
+        self._purge_seen_ids()
+
+        # Create RocksDB checkpoint first so we can list actual SST files
+        rocksdb_ckpt_path = self._rocksdb_checkpoint()
+        sst_manifest = self._list_sst_files(rocksdb_ckpt_path) if rocksdb_ckpt_path else []
+
         # JSON checkpoint (always created as fallback)
         path = os.path.join(self.checkpoint_dir, "checkpoint.json")
         snap = {
@@ -399,16 +471,13 @@ class StrictWatermarkEngine:
             "last_checkpoint_time": self._last_checkpoint_time,
             "partition_id": self.partition_id,
             "active_windows": [str(w) for w in sorted(self.open_windows.keys())],
-            "sst_files_manifest": "rocksdb_checkpoint",
-            "term_at_checkpoint": 0,
+            "sst_files_manifest": sst_manifest,
+            "term_at_checkpoint": self.raft_term,
         }
         tmp = path + ".tmp"
         with open(tmp, "w") as f:
             json.dump(snap, f)
         os.replace(tmp, path)
-
-        # RocksDB checkpoint (incremental SST) alongside JSON
-        rocksdb_ckpt_path = self._rocksdb_checkpoint()
 
         # RocksDB checkpoint metadata (durable alongside JSON)
         if self._store is not None:
@@ -421,11 +490,16 @@ class StrictWatermarkEngine:
                 "rocksdb_checkpoint_path": rocksdb_ckpt_path,
                 "partition_id": self.partition_id,
                 "active_windows": [str(w) for w in sorted(self.open_windows.keys())],
-                "sst_files_manifest": "rocksdb_checkpoint",
-                "term_at_checkpoint": 0,
+                "sst_files_manifest": sst_manifest,
+                "term_at_checkpoint": self.raft_term,
             }
             self._store.put(f"{_PFX_META}checkpoint", meta)
             self._store.flush()
+
+        # Persist OutputManager emitted set for crash recovery
+        if self.output_manager is not None:
+            emitted_path = os.path.join(self.checkpoint_dir, "emitted.json")
+            self.output_manager.save_emitted(emitted_path)
 
     def _rocksdb_checkpoint(self) -> Optional[str]:
         """Create an incremental RocksDB SST checkpoint via rocksdict.Checkpoint.
@@ -499,8 +573,8 @@ class StrictWatermarkEngine:
             st = self.open_windows[w]
             st.eviction = EvictionState.UPLOADING
             result = WindowResult(
-                window_id=self.tumbling.window_id(0, w),
-                partition_id=0,
+                window_id=self.tumbling.window_id(self.partition_id, w),
+                partition_id=self.partition_id,
                 window_start=w,
                 window_end=w + self.tumbling.size,
                 count=st.count,
@@ -527,20 +601,24 @@ class StrictWatermarkEngine:
             self._store.flush()
         self.open_windows.clear()
 
-    def _upload_to_tiered_storage(self, window_start: float, window_result: WindowResult) -> None:
+    def _upload_to_tiered_storage(self, window_start: float, window_result: WindowResult,
+                                   sync: bool = False) -> bool:
+        """Upload window to tiered storage. Returns True if upload succeeded."""
         if self.tiered_storage is None:
-            return
+            return True
         if self.diff_eviction is not None:
             self.diff_eviction.evict_window(
                 window_result.partition_id,
                 window_result.window_id,
                 dataclasses.asdict(window_result),
             )
+            return True
         else:
-            self.tiered_storage.upload_window(
+            return self.tiered_storage.upload_window(
                 window_result.window_id,
                 dataclasses.asdict(window_result),
                 window_result.partition_id,
+                sync=sync,
             )
 
     def close(self) -> None:

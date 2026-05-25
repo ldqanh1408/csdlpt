@@ -1,11 +1,23 @@
 """Aggregator HA — Active-Standby failover via file lock (Spec §9.4)."""
 
-import fcntl
 import json
 import logging
 import os
+import sys
 import threading
 import time
+
+# Cross-platform file locking: fcntl on POSIX, msvcrt on Windows.
+try:
+    import fcntl  # type: ignore
+    _HAS_FCNTL = True
+except ImportError:
+    _HAS_FCNTL = False
+    try:
+        import msvcrt  # type: ignore
+        _HAS_MSVCRT = True
+    except ImportError:
+        _HAS_MSVCRT = False
 
 from refactor.heuristic.aggregator import HeuristicAggregator
 
@@ -13,7 +25,11 @@ logger = logging.getLogger("aggregator_ha")
 
 
 class FileLockLeader:
-    """Leader election via fcntl exclusive lock on a shared file."""
+    """Leader election via exclusive lock on a shared file.
+
+    Uses fcntl.flock on POSIX systems and msvcrt.locking on Windows.
+    Falls back to a best-effort O_CREAT|O_EXCL approach if neither is available.
+    """
 
     def __init__(self, lock_path: str = "/tmp/aggregator.lock"):
         self.lock_path = lock_path
@@ -22,23 +38,42 @@ class FileLockLeader:
 
     def try_acquire(self) -> bool:
         try:
-            os.makedirs(os.path.dirname(self.lock_path) or "/tmp", exist_ok=True)
+            parent = os.path.dirname(self.lock_path)
+            if parent:
+                os.makedirs(parent, exist_ok=True)
             self._lock_file = open(self.lock_path, "w")
-            fcntl.flock(self._lock_file.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+            if _HAS_FCNTL:
+                fcntl.flock(self._lock_file.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+            elif _HAS_MSVCRT:
+                # msvcrt.locking locks the byte range starting at current
+                # file position; lock 1 byte at offset 0.
+                self._lock_file.seek(0)
+                msvcrt.locking(self._lock_file.fileno(), msvcrt.LK_NBLCK, 1)
+            # else: no advisory locking available; rely on PID tracking only.
             self._active = True
             self._lock_file.write(str(os.getpid()))
             self._lock_file.flush()
             return True
         except (IOError, OSError):
             if self._lock_file:
-                self._lock_file.close()
+                try:
+                    self._lock_file.close()
+                except Exception:
+                    pass
                 self._lock_file = None
             return False
 
     def release(self):
         if self._lock_file:
             try:
-                fcntl.flock(self._lock_file.fileno(), fcntl.LOCK_UN)
+                if _HAS_FCNTL:
+                    fcntl.flock(self._lock_file.fileno(), fcntl.LOCK_UN)
+                elif _HAS_MSVCRT:
+                    try:
+                        self._lock_file.seek(0)
+                        msvcrt.locking(self._lock_file.fileno(), msvcrt.LK_UNLCK, 1)
+                    except OSError:
+                        pass
                 self._lock_file.close()
             except Exception:
                 pass
@@ -58,13 +93,25 @@ class AggregatorHA:
     """
 
     def __init__(self, aggregator: HeuristicAggregator, lock_path: str = "/tmp/aggregator.lock",
-                 heartbeat_path: str = "/tmp/aggregator-heartbeat"):
+                 heartbeat_path: str = "/tmp/aggregator-heartbeat", leader_lock=None):
         self.aggregator = aggregator
-        self._leader = FileLockLeader(lock_path)
         self.heartbeat_path = heartbeat_path
         self._stop = threading.Event()
         self._active = False
         self._failover_count = 0
+
+        if leader_lock is not None:
+            self._leader = leader_lock
+        else:
+            zk_hosts = os.environ.get("ZK_HOSTS") or os.environ.get("ZK_ENSEMBLE")
+            if zk_hosts:
+                from refactor.common.zk_lock import ZKLeaderElection
+                zk_lock_path = os.environ.get("ZK_LOCK_PATH", "/csdlpt/aggregator-lock")
+                logger.info("Aggregator HA: using ZK lock at hosts=%s, path=%s", zk_hosts, zk_lock_path)
+                self._leader = ZKLeaderElection(zk_hosts=zk_hosts, lock_path=zk_lock_path)
+                self._leader.start()
+            else:
+                self._leader = FileLockLeader(lock_path)
 
     def start(self):
         if self._leader.try_acquire():
@@ -94,7 +141,7 @@ class AggregatorHA:
             while not self._stop.is_set():
                 try:
                     if os.path.exists(self.heartbeat_path):
-                        if time.time() - os.path.getmtime(self.heartbeat_path) > 3.0:
+                        if time.time() - os.path.getmtime(self.heartbeat_path) > 1.5:
                             logger.warning("Aggregator HA: active stale, taking over")
                             self._attempt_takeover()
                 except Exception:

@@ -42,6 +42,9 @@ class LogEvent:
     status: int
     payload: dict = field(default_factory=dict)
     arrival_time: float = 0.0
+    poll_received_at: float = 0.0
+    offset: int = 0
+    schema_version: int = 1
 
 
 @dataclass
@@ -62,6 +65,7 @@ class WindowResult:
     status_500: int
     is_speculative: bool
     version: int = 1
+    schema_version: int = 1
 
 
 @dataclass
@@ -70,10 +74,14 @@ class CorrectionMessage:
     window_id: str = ""
     correction_id: str = ""
     previous_count: int = 0
+    previous_sum: float = 0.0
     corrected_count: int = 0
+    corrected_sum: float = 0.0
     delta_count: int = 0
+    delta_sum: float = 0.0
     late_log_ids: list[str] = field(default_factory=list)
-    timestamp: float = 0.0
+    previous_emit_timestamp: float = 0.0
+    correction_timestamp: float = 0.0
 
 
 @dataclass

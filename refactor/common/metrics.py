@@ -17,6 +17,7 @@ class HighResTimer:
 @dataclass
 class SystemMetrics:
     T_network_ingest_ns: list[float] = field(default_factory=list)
+    T_poll_decode_ns: list[float] = field(default_factory=list)
     T_deduplication_ns: list[float] = field(default_factory=list)
     T_state_write_ns: list[float] = field(default_factory=list)
     T_sketch_update_ns: list[float] = field(default_factory=list)

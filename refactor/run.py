@@ -19,7 +19,137 @@ import time
 import threading
 import random
 from http.server import HTTPServer, BaseHTTPRequestHandler
+from socketserver import ThreadingMixIn
+
+
+class ThreadingHTTPServer(ThreadingMixIn, HTTPServer):
+    daemon_threads = True
 from urllib.parse import urlparse, parse_qs
+import urllib.request
+import ssl
+
+try:
+    import grpc
+    from refactor.common import csdlpt_pb2, csdlpt_pb2_grpc
+except ImportError:
+    grpc = None
+
+_grpc_channels = {}
+
+def get_grpc_target(url_or_peer):
+    if not url_or_peer:
+        return None
+    if url_or_peer.startswith("http://") or url_or_peer.startswith("https://"):
+        parsed = urlparse(url_or_peer)
+        netloc = parsed.netloc
+    else:
+        netloc = url_or_peer
+    if ":" in netloc:
+        host, port_str = netloc.rsplit(":", 1)
+        try:
+            grpc_port = int(port_str) + 50
+            return f"{host}:{grpc_port}"
+        except ValueError:
+            pass
+    return None
+
+def get_grpc_stub(url_or_peer):
+    if grpc is None:
+        return None
+    target = get_grpc_target(url_or_peer)
+    if not target:
+        return None
+    if target not in _grpc_channels:
+        try:
+            channel = grpc.insecure_channel(target)
+            stub = csdlpt_pb2_grpc.CoordinatorServiceStub(channel)
+            _grpc_channels[target] = (channel, stub)
+        except Exception:
+            return None
+    return _grpc_channels[target][1]
+
+def get_grpc_aggregator_stub(url_or_peer):
+    if grpc is None:
+        return None
+    target = get_grpc_target(url_or_peer)
+    if not target:
+        return None
+    cache_key = f"agg_{target}"
+    if cache_key not in _grpc_channels:
+        try:
+            channel = grpc.insecure_channel(target)
+            stub = csdlpt_pb2_grpc.AggregatorServiceStub(channel)
+            _grpc_channels[cache_key] = (channel, stub)
+        except Exception:
+            return None
+    return _grpc_channels[cache_key][1]
+
+
+
+_original_urlopen = urllib.request.urlopen
+
+def _injected_urlopen(*args, **kwargs):
+    if "context" not in kwargs or kwargs["context"] is None:
+        cert_file = os.environ.get("TLS_CLIENT_CERT") or os.environ.get("TLS_CERT")
+        key_file = os.environ.get("TLS_CLIENT_KEY") or os.environ.get("TLS_KEY")
+        ca_file = os.environ.get("TLS_CA_FILE")
+        insecure = os.environ.get("TLS_INSECURE", "false").lower() in ("true", "1", "yes")
+
+        if cert_file or key_file or ca_file or insecure:
+            try:
+                ctx = ssl.create_default_context(ssl.Purpose.SERVER_AUTH)
+                if insecure:
+                    ctx.check_hostname = False
+                    ctx.verify_mode = ssl.CERT_NONE
+                if cert_file and key_file:
+                    ctx.load_cert_chain(cert_file, key_file)
+                if ca_file:
+                    ctx.load_verify_locations(cafile=ca_file)
+                kwargs["context"] = ctx
+            except Exception:
+                pass
+    return _original_urlopen(*args, **kwargs)
+
+urllib.request.urlopen = _injected_urlopen
+
+
+
+def parse_and_deduplicate_event(ev: dict, seen_ids_cache: set) -> dict | None:
+    """Validate, parse and deduplicate event according to schema version and migration step."""
+    if not isinstance(ev, dict):
+        return ev
+
+    event_id = ev.get("event_id")
+    schema_ver = ev.get("schema_version", 1)
+
+    # 1. Deduplication (important in dual_consume step where both V1 & V2 are received)
+    if event_id:
+        if event_id in seen_ids_cache:
+            return None
+        seen_ids_cache.add(event_id)
+        if len(seen_ids_cache) > 20000:
+            try:
+                seen_ids_cache.remove(next(iter(seen_ids_cache)))
+            except (StopIteration, KeyError):
+                pass
+
+    # 2. Schema Registry Validation
+    from refactor.common.schema_registry import validate_json_schema, LOG_EVENT_V1_SCHEMA, LOG_EVENT_V2_SCHEMA
+    schema = LOG_EVENT_V2_SCHEMA if schema_ver == 2 else LOG_EVENT_V1_SCHEMA
+    validate_json_schema(ev, schema)
+
+    # 3. Transform / Backward Compatibility mapping
+    if schema_ver == 2:
+        if "status" not in ev:
+            ev["status"] = ev.get("http_status", 200)
+    elif schema_ver == 1:
+        if "http_status" not in ev:
+            ev["http_status"] = ev.get("status", 200)
+        if "service_name" not in ev:
+            ev["service_name"] = "legacy-service"
+
+    return ev
+
 
 
 def _create_tiered_storage():
@@ -115,6 +245,33 @@ class HealthHandler(BaseHTTPRequestHandler):
                 self._json(200, {"W_meta_global": hm.W_meta_global, "ingestors": hm.summary(), "alerts": hm.alerts})
             else:
                 self._json(503, {"error": "no health monitor"})
+        elif path.startswith("/schemas/subjects/") and "/versions/" in path:
+            parts = path.split("/")
+            if len(parts) >= 6:
+                subject = parts[3]
+                try:
+                    version = int(parts[5])
+                    from refactor.common.schema_registry import _global_registry
+                    schema = _global_registry.get_version(subject, version)
+                    if schema:
+                        self._json(200, {"subject": subject, "version": version, "schema": schema})
+                        return
+                except ValueError:
+                    pass
+            self._json(404, {"error": "schema version not found"})
+        elif path.startswith("/schemas/ids/"):
+            parts = path.split("/")
+            if len(parts) >= 4:
+                try:
+                    schema_id = int(parts[3])
+                    from refactor.common.schema_registry import _global_registry
+                    schema = _global_registry.get_by_id(schema_id)
+                    if schema:
+                        self._json(200, {"schema": schema})
+                        return
+                except ValueError:
+                    pass
+            self._json(404, {"error": "schema id not found"})
         else:
             self._json(404, {"error": "not found"})
 
@@ -146,10 +303,17 @@ class HealthHandler(BaseHTTPRequestHandler):
         elif path == "/ingestor-heartbeat":
             hm = self.server_state.get("health_monitor")
             if hm:
+                # Strict §10.1 wire format: ingestor sends `T_commit` and
+                # `partitions_assigned`. Accept the spec field names directly;
+                # also keep `last_T_commit`/`partitions` for back-compat with
+                # any older clients (the receive_heartbeat parameter name
+                # happens to be `last_T_commit` for historical reasons).
                 hm.receive_heartbeat(
                     ingestor_id=data.get("ingestor_id", ""),
-                    partitions=data.get("partitions", []),
-                    last_T_commit=float(data.get("last_T_commit", 0.0)),
+                    partitions=data.get("partitions_assigned",
+                                        data.get("partitions", [])),
+                    last_T_commit=float(data.get("T_commit",
+                                                 data.get("last_T_commit", 0.0))),
                     ingestor_clock=float(data.get("ingestor_clock", time.time())),
                     offsets=data.get("offsets", {}),
                 )
@@ -198,6 +362,35 @@ class HealthHandler(BaseHTTPRequestHandler):
                 self._json(200, result)
             else:
                 self._json(503, {"error": "raft not enabled"})
+        elif path.startswith("/schemas/subjects/") and path.endswith("/versions"):
+            parts = path.split("/")
+            if len(parts) >= 5:
+                subject = parts[3]
+                schema = data.get("schema")
+                if schema:
+                    from refactor.common.schema_registry import _global_registry
+                    version = _global_registry.register(subject, schema)
+                    self._json(200, {"version": version})
+                    return
+            self._json(400, {"error": "bad request or missing schema"})
+        elif path.startswith("/compatibility/subjects/") and "/versions/" in path:
+            parts = path.split("/")
+            if len(parts) >= 6:
+                subject = parts[3]
+                try:
+                    version = int(parts[5])
+                    schema = data.get("schema")
+                    if schema:
+                        from refactor.common.schema_registry import _global_registry, check_backward_compatibility
+                        old = _global_registry.get_version(subject, version)
+                        compatible = True
+                        if old:
+                            compatible = check_backward_compatibility(old, schema)
+                        self._json(200, {"compatible": compatible})
+                        return
+                except ValueError:
+                    pass
+            self._json(400, {"error": "bad request or missing schema/version"})
         else:
             self._json(404, {"error": "not found"})
 
@@ -234,26 +427,32 @@ class HealthHandler(BaseHTTPRequestHandler):
         return {"status": "no metrics available"}
 
     def _build_state(self):
+        # Return fast-path cached state if available (avoids lock contention)
+        cached = self.server_state.get("cached_state")
+        if cached is not None:
+            return cached
         comp = self.server_state.get("component")
         if comp is None:
             return {"status": "initializing"}
         result = {}
-        if hasattr(comp, "broadcast"):
-            result.update(comp.broadcast())
-        elif hasattr(comp, "summary"):
-            result.update(comp.summary())
-        else:
-            result["status"] = "no state available"
-        # Include failover state if available
-        fm = self.server_state.get("failover_manager")
-        if fm:
-            result["failover"] = fm.summary()
+        try:
+            if hasattr(comp, "broadcast"):
+                result.update(comp.broadcast())
+            elif hasattr(comp, "summary"):
+                result.update(comp.summary())
+            else:
+                result["status"] = "no state available"
+            fm = self.server_state.get("failover_manager")
+            if fm:
+                result["failover"] = fm.summary()
+        except Exception:
+            result.setdefault("status", "state build error")
         return result
 
 
 def start_http_server(port: int, state: dict) -> HTTPServer:
     HealthHandler.server_state = state
-    srv = HTTPServer(("0.0.0.0", port), HealthHandler)
+    srv = ThreadingHTTPServer(("0.0.0.0", port), HealthHandler)
 
     # TLS support: wrap socket if cert_file and key_file are provided
     cert_file = state.get("tls_cert")
@@ -336,6 +535,14 @@ def _update_monitoring_from_component(mon_mgr, state: dict) -> None:
         try:
             broadcast = comp.broadcast()
             mon_mgr.update_from_coordinator(broadcast)
+            # Aggregator HA failover counter (mirrors leader-change rule)
+            ha_count = broadcast.get("ha_failover_count")
+            if ha_count is not None:
+                prev = mon_mgr._snapshot.get("_agg_ha_failover_prev", 0)
+                if ha_count > prev:
+                    mon_mgr.aggregator_leader_changes.inc(ha_count - prev)
+                    mon_mgr.aggregator_failover_total.inc(ha_count - prev)
+                mon_mgr._snapshot["_agg_ha_failover_prev"] = ha_count
         except Exception:
             pass
 
@@ -369,6 +576,34 @@ def _update_monitoring_from_component(mon_mgr, state: dict) -> None:
                     for pid in member.assigned_partitions:
                         lag_val = kb.partition_lag("events", gid, cid, pid)
                         mon_mgr.update_kafka_lag("events", gid, cid, pid, lag_val)
+        except Exception:
+            pass
+
+    # Trien_Khai §3 — push BackpressureController and TieredStorage status
+    bp = state.get("backpressure_controller")
+    if bp is not None and hasattr(bp, "_pause_count"):
+        worker_id = state.get("worker_id", "unknown")
+        try:
+            prev = mon_mgr._snapshot.get(f"_bp_pause_{worker_id}", 0)
+            cur = bp._pause_count
+            if cur > prev:
+                mon_mgr.backpressure_pause_count.labels(worker_id=worker_id).inc(cur - prev)
+            mon_mgr._snapshot[f"_bp_pause_{worker_id}"] = cur
+        except Exception:
+            pass
+
+    ts_mgr = state.get("tiered_storage")
+    if ts_mgr is not None:
+        try:
+            connected = 1 if getattr(ts_mgr, "client", None) is not None else 0
+            mon_mgr.tier_storage_status.set(connected)
+            # MinIO upload failure counter — inc by diff so Prometheus rate()
+            # works against `csdlpt_minio_upload_errors_total`.
+            err_count = getattr(ts_mgr, "upload_error_count", 0)
+            prev = mon_mgr._snapshot.get("_minio_upload_errors_prev", 0)
+            if err_count > prev:
+                mon_mgr.minio_upload_errors_total.inc(err_count - prev)
+            mon_mgr._snapshot["_minio_upload_errors_prev"] = err_count
         except Exception:
             pass
 
@@ -437,10 +672,12 @@ def run_coordinator(args):
         if tiered is not None:
             from refactor.strict.disaster_recovery import DisasterRecovery
             dr = DisasterRecovery(
-                tiered_storage=tiered,
+                storage=tiered,
                 backup_interval_s=float(os.environ.get("DR_BACKUP_INTERVAL_S", str(args.backup_interval))),
             )
-            dr.start_background_backup(coord)
+            # Coordinator has no per-partition engines; pass empty dict + coordinator
+            # broadcast as state callback so W_global and term are captured (§6.6)
+            dr.start_background_backup({}, get_state_callback=coord.broadcast)
 
     health_mon = IngestorHealthMonitor(
         silent_timeout_s=15.0,
@@ -448,8 +685,14 @@ def run_coordinator(args):
         clock_skew_critical_ms=2000.0,
         w_meta_deviation_s=10.0,
     )
+    coord.set_ingestor_health(health_mon)
 
     mon_mgr = _create_monitoring()
+
+    _coord_hb_count = [0]
+    _coord_last_hb_log = [0.0]
+    _coord_last_wglobal = [float("-inf")]
+    _coord_last_cache_update = [0.0]
 
     def heartbeat_handler(data):
         hb = WorkerHeartbeat(
@@ -458,7 +701,45 @@ def run_coordinator(args):
             max_event_time=data.get("max_event_time", 0.0),
             timestamp=data.get("timestamp", time.time()),
         )
+        old_wg = coord.W_global
         coord.receive_heartbeat(hb)
+        _coord_hb_count[0] += 1
+        now = time.time()
+
+        # Refresh cached state before acquiring fm lock (broadcast() needs fm._lock too)
+        if now - _coord_last_cache_update[0] >= 1.0:
+            try:
+                _cached = coord.broadcast() if hasattr(coord, "broadcast") else {}
+                if fm is not None:
+                    _cached["failover"] = fm.summary()
+                _cached["timestamp"] = now
+                state["cached_state"] = _cached
+                _coord_last_cache_update[0] = now
+            except Exception:
+                pass
+
+        if now - _coord_last_hb_log[0] >= 5.0:
+            wg = coord.W_global
+            wg_str = f"{wg:.1f}" if wg != float("-inf") else "-inf"
+            adv = "advancing" if wg > _coord_last_wglobal[0] else "stable"
+            n_workers = len(set(getattr(fm, '_worker_partitions', {}).keys())) if fm else "?"
+            part_watermarks = " ".join(
+                f"p{pid}:{info.local_watermark:.1f}"
+                for pid, info in sorted(coord.partitions.items())
+            ) if coord.partitions else "none"
+            print(f"[coordinator] W_global={wg_str} ({adv}) "
+                  f"delta={coord.delta_base}s "
+                  f"term={getattr(coord, 'term', 0)} "
+                  f"heartbeats={_coord_hb_count[0]} "
+                  f"workers={n_workers} "
+                  f"skew={coord._node_skew_max_ms:.0f}ms "
+                  f"lag={coord._watermark_lag_s:.1f}s "
+                  f"diag={coord._combined_diagnosis} "
+                  f"partitions=[{part_watermarks}] "
+                  f"from={hb.worker_id}",
+                  file=sys.stderr)
+            _coord_last_hb_log[0] = now
+            _coord_last_wglobal[0] = wg
         if "ingestor_id" in data:
             health_mon.receive_heartbeat(
                 ingestor_id=data.get("ingestor_id", "unknown"),
@@ -520,6 +801,7 @@ def run_coordinator(args):
         "role": "coordinator",
         "ready": True,
         "component": coord,
+        "cached_state": {"status": "initializing", "timestamp": time.time()},
         "ingest_handler": lambda events: 0,
         "punctuation_handler": heartbeat_handler,
         "reassign_handler": reassign_handler,
@@ -536,6 +818,99 @@ def run_coordinator(args):
 
     port = int(os.environ.get("PORT", args.port))
     srv = start_http_server(port, state)
+
+    grpc_server = None
+    grpc_port = port + 50
+    if grpc is not None:
+        from concurrent import futures
+        
+        class CoordinatorServicer(csdlpt_pb2_grpc.CoordinatorServiceServicer):
+            def __init__(self, coord, fm, health_mon):
+                self.coord = coord
+                self.fm = fm
+                self.health_mon = health_mon
+                
+            def WorkerHeartbeat(self, request, context):
+                hb = WorkerHeartbeat(
+                    worker_id=request.worker_id,
+                    partitions={int(k): float(v) for k, v in request.partitions.items()},
+                    max_event_time=request.max_event_time,
+                    timestamp=request.timestamp,
+                )
+                self.coord.receive_heartbeat(hb)
+                _coord_hb_count[0] += 1
+                if self.fm is not None:
+                    kafka_offsets = {int(k): int(v) for k, v in request.kafka_offsets.items()} if request.kafka_offsets else None
+                    self.fm.heartbeat(hb.worker_id, list(hb.partitions.keys()), offsets=kafka_offsets)
+                    failed = self.fm.detect_failures()
+                    if failed:
+                        self.fm.reassign_failed_partitions()
+                return csdlpt_pb2.EmptyReply(ok=True)
+                
+            def IngestorHeartbeat(self, request, context):
+                self.health_mon.receive_heartbeat(
+                    ingestor_id=request.ingestor_id,
+                    partitions=list(request.partitions_assigned),
+                    last_T_commit=request.T_commit,
+                    ingestor_clock=request.ingestor_clock,
+                    offsets={int(k): int(v) for k, v in request.offsets.items()},
+                )
+                return csdlpt_pb2.EmptyReply(ok=True)
+                
+            def GetGlobalState(self, request, context):
+                broadcast = self.coord.broadcast()
+                partition_types = {}
+                if self.fm is not None:
+                    partition_types = {int(k): str(v) for k, v in self.fm.broadcast().get("partition_types", {}).items()}
+                return csdlpt_pb2.StateReply(
+                    W_global=self.coord.W_global,
+                    term=getattr(self.coord, "term", 0),
+                    partition_types=partition_types
+                )
+                
+            def RaftVote(self, request, context):
+                if hasattr(self.coord, "handle_vote_request"):
+                    r = self.coord.handle_vote_request(
+                        term=request.term,
+                        candidate_id=request.candidate_id,
+                        W_global=request.W_global
+                    )
+                    return csdlpt_pb2.RaftVoteReply(granted=r.get("granted", False), term=r.get("term", 0))
+                return csdlpt_pb2.RaftVoteReply(granted=False, term=0)
+                
+            def RaftState(self, request, context):
+                if hasattr(self.coord, "receive_state"):
+                    data = json.loads(request.json_state) if request.json_state else {}
+                    data["term"] = request.term
+                    data["leader_id"] = request.leader_id
+                    data["W_global"] = request.W_global
+                    self.coord.receive_state(data)
+                    return csdlpt_pb2.EmptyReply(ok=True)
+                return csdlpt_pb2.EmptyReply(ok=False)
+                
+            def ZkVote(self, request, context):
+                if hasattr(self.coord, "handle_zk_vote"):
+                    r = self.coord.handle_zk_vote({"action": request.action})
+                    return csdlpt_pb2.ZkVoteReply(ok=r.get("ok", False), coordinator_id=r.get("coordinator_id", ""))
+                return csdlpt_pb2.ZkVoteReply(ok=False, coordinator_id="")
+                
+            def ZkState(self, request, context):
+                if hasattr(self.coord, "handle_zk_state"):
+                    data = json.loads(request.json_state) if request.json_state else {}
+                    data["leader_id"] = request.leader_id
+                    data["mode"] = request.mode
+                    self.coord.handle_zk_state(data)
+                    return csdlpt_pb2.EmptyReply(ok=True)
+                return csdlpt_pb2.EmptyReply(ok=False)
+
+        grpc_server = grpc.server(futures.ThreadPoolExecutor(max_workers=10))
+        csdlpt_pb2_grpc.add_CoordinatorServiceServicer_to_server(
+            CoordinatorServicer(coord, fm, health_mon), grpc_server
+        )
+        grpc_server.add_insecure_port(f"0.0.0.0:{grpc_port}")
+        grpc_server.start()
+        print(f"[coordinator] gRPC server listening on :{grpc_port}", file=sys.stderr)
+        state["grpc_server"] = grpc_server
 
     stop = threading.Event()
 
@@ -569,10 +944,11 @@ def run_coordinator(args):
     threading.Thread(target=monitoring_loop, daemon=True).start()
 
     print(f"[coordinator] listening on :{port}, W_global={coord.W_global}")
-
-    # Kafka broker — start embedded when --enable-kafka
+    
+    enable_kafka = args.enable_kafka or os.environ.get("KAFKA_ENABLE", "false").lower() in ("1", "true", "yes", "on")
+    # Kafka broker — start embedded when --enable-kafka and not real Kafka
     kafka_broker = None
-    if args.enable_kafka:
+    if enable_kafka and not os.environ.get("KAFKA_ENABLE_REAL", "false").lower() in ("1", "true", "yes", "on"):
         from refactor.common.kafka_sim import KafkaBroker
         kafka_port = int(os.environ.get("KAFKA_PORT", str(args.kafka_port)))
         kafka_broker = KafkaBroker()
@@ -634,6 +1010,33 @@ def run_aggregator(args):
     }
 
     srv = start_http_server(port, state)
+
+    grpc_server = None
+    grpc_port = port + 50
+    if grpc is not None:
+        from concurrent import futures
+        
+        class AggregatorServicer(csdlpt_pb2_grpc.AggregatorServiceServicer):
+            def __init__(self, agg_base):
+                self.agg_base = agg_base
+                
+            def SendWorkerWatermark(self, request, context):
+                self.agg_base.receive_worker_watermark(
+                    worker_id=request.worker_id,
+                    partition_id=request.partition_id,
+                    W_h=request.W_h,
+                )
+                return csdlpt_pb2.EmptyReply(ok=True)
+                
+        grpc_server = grpc.server(futures.ThreadPoolExecutor(max_workers=10))
+        csdlpt_pb2_grpc.add_AggregatorServiceServicer_to_server(
+            AggregatorServicer(agg_base), grpc_server
+        )
+        grpc_server.add_insecure_port(f"0.0.0.0:{grpc_port}")
+        grpc_server.start()
+        print(f"[aggregator] gRPC server listening on :{grpc_port}", file=sys.stderr)
+        state["grpc_server"] = grpc_server
+
 
     stop = threading.Event()
 
@@ -717,6 +1120,7 @@ def _run_strict_worker(node_id, parts, args):
         from refactor.common.differentiated_eviction import DifferentiatedEvictionManager
         diff_eviction = DifferentiatedEvictionManager(storage=tiered_storage)
 
+    kafka_audit_producer = None
     worker = StrictWorker(
         worker_id=node_id,
         partition_ids=parts,
@@ -728,13 +1132,22 @@ def _run_strict_worker(node_id, parts, args):
         kafka_producer=kafka_producer,
         kafka_results_topic="strict_results",
         diff_eviction=diff_eviction,
+        kafka_audit_producer=kafka_audit_producer,
+        kafka_audit_topic="audit_results",
     )
 
-    # Kafka consumer/producer setup — pull-based event ingestion +
-    # window results emission to strict_results topic
+    # Log level for tracing
+    _worker_log_level = os.environ.get("LOG_LEVEL", "info").lower()
+    _worker_trace = _worker_log_level in ("debug", "trace")
+
     kafka_broker_url = args.kafka_broker_url or os.environ.get("KAFKA_BROKER_URL", "")
-    if args.enable_kafka and kafka_broker_url:
-        from refactor.common.kafka_sim import KafkaConsumer, KafkaProducer
+    enable_kafka = args.enable_kafka or os.environ.get("KAFKA_ENABLE", "false").lower() in ("1", "true", "yes", "on")
+    if enable_kafka and kafka_broker_url:
+        if os.environ.get("KAFKA_ENABLE_REAL", "false").lower() in ("1", "true", "yes", "on"):
+            from refactor.common.kafka_real import KafkaConsumer, KafkaProducer, ensure_topics
+            ensure_topics(kafka_broker_url, ["events", "strict_results", "audit_results"], num_partitions=12)
+        else:
+            from refactor.common.kafka_sim import KafkaConsumer, KafkaProducer
         kafka_consumer = KafkaConsumer(broker_url=kafka_broker_url,
                                        group_id="strict-workers",
                                        client_id=f"strict-{node_id}")
@@ -742,20 +1155,38 @@ def _run_strict_worker(node_id, parts, args):
         print(f"[worker-strict:{node_id}] Kafka consumer assigned={assigned}", file=sys.stderr)
         kafka_producer = KafkaProducer(broker_url=kafka_broker_url, acks="all",
                                        client_id=f"strict-producer-{node_id}")
+        # §3 Architecture: Critical Audit Sink — mirror committed windows
+        # to an audit topic so compliance/billing consumers can replay
+        # independently of the primary strict_results stream.
+        kafka_audit_producer = KafkaProducer(broker_url=kafka_broker_url, acks="all",
+                                             client_id=f"strict-audit-{node_id}")
+
+    seen_event_ids = set()
 
     def ingest_handler(events):
         count = 0
-        for ev in events:
+        for ev_raw in events:
+            ev = parse_and_deduplicate_event(ev_raw, seen_event_ids)
+            if ev is None:
+                continue
             pid = ev.get("partition_id", parts[0])
             le = LogEvent(
                 event_id=str(ev.get("event_id", f"ev-{time.time_ns()}")),
                 event_time=float(ev.get("event_time", time.time())),
                 status=int(ev.get("status", 200)),
                 arrival_time=time.time(),
+                poll_received_at=time.time(),
+                schema_version=int(ev.get("schema_version", 1)),
             )
-            # Check replay mode before processing
-            if replay_mgr.detect_replay_mode(le):
-                replay_mgr.record_event(le)
+            # Check replay mode before processing (§8.7 sub-checkpointing).
+            # §6.4 feature flag: ENABLE_REPLAY_SUB_CHECKPOINTING gates the
+            # sub-checkpoint bookkeeping; processing always runs.
+            if os.environ.get("ENABLE_REPLAY_SUB_CHECKPOINTING", "true").lower() in ("1", "true", "yes", "on"):
+                _eng = worker.engines.get(pid)
+                _wm = _eng.local_watermark if _eng is not None else float("-inf")
+                _delta = float(os.environ.get("DELTA_BASE_S", "10.0"))
+                if replay_mgr.detect_replay_mode(le, watermark=_wm, delta_base_s=_delta):
+                    replay_mgr.record_event(pid)
             worker.process(le, pid)
             count += 1
         return count
@@ -779,6 +1210,8 @@ def _run_strict_worker(node_id, parts, args):
         "role": "worker",
         "ready": True,
         "component": worker,
+        "worker_id": node_id,
+        "tiered_storage": tiered_storage,
         "ingest_handler": ingest_handler,
         "punctuation_handler": punctuation_handler,
         "backpressure_handler": backpressure_handler,
@@ -798,20 +1231,23 @@ def _run_strict_worker(node_id, parts, args):
 
     def drain_loop():
         while not stop.is_set():
-            time.sleep(0.5)
+            time.sleep(0.1)
             for pid, buf in worker.buffers.items():
-                # Report buffer size for backpressure
                 bp.report_buffer(node_id, pid, len(buf))
-                ready = buf.pop_ready()
-                if ready:
-                    worker._process_event(ready, pid)
+                batch = buf.pop_all_ready(batch_size=200)
+                for ev in batch:
+                    worker._process_event(ev, pid)
     threading.Thread(target=drain_loop, daemon=True).start()
+
+    worker_kafka_offsets = {}
 
     # Kafka consumer poll loop — consumer.poll() simulation
     if kafka_consumer is not None:
         def kafka_poll_loop():
             committed_offsets: dict[int, int] = {}
             last_lag_report = 0.0
+            last_progress_log = 0.0
+            poll_total = [0]
             while not stop.is_set():
                 try:
                     # Poll from Kafka broker
@@ -819,15 +1255,45 @@ def _run_strict_worker(node_id, parts, args):
                     for pid, msgs in polled.items():
                         for msg in msgs:
                             value = json.loads(msg["value"]) if isinstance(msg["value"], str) else msg["value"]
-                            ev = value if isinstance(value, dict) else {"payload": str(value)}
+                            if isinstance(value, dict) and value.get("is_punctuation"):
+                                token = PunctuationToken(
+                                    T_commit=float(value["T_commit"]),
+                                    partition_id=int(value["partition_id"]),
+                                    ingestor_id=value["ingestor_id"],
+                                )
+                                worker.on_punctuation(token)
+                                committed_offsets[pid] = msg["offset"] + 1
+                                worker_kafka_offsets[pid] = msg["offset"] + 1
+                                poll_total[0] += 1
+                                continue
+                            ev_raw = value if isinstance(value, dict) else {"payload": str(value)}
+                            ev = parse_and_deduplicate_event(ev_raw, seen_event_ids)
+                            if ev is None:
+                                continue
                             le = LogEvent(
                                 event_id=str(ev.get("event_id", f"kafka-{msg['offset']}")),
                                 event_time=float(ev.get("event_time", time.time())),
                                 status=int(ev.get("status", 200)),
                                 arrival_time=time.time(),
+                                poll_received_at=time.time(),
+                                offset=msg["offset"],
+                                schema_version=int(ev.get("schema_version", 1)),
                             )
-                            worker.process(le, pid)
+                            eng = worker.engines.get(pid)
+                            wm_before = eng.watermark if eng else float("-inf")
+                            result = worker.process(le, pid)
+                            if _worker_trace:
+                                latency_us = (result / 1000.0) if result else 0.0
+                                wm_after = eng.watermark if eng else float("-inf")
+                                verdict = "ON_TIME" if wm_before < (le.event_time + float(os.environ.get("WINDOW_SIZE_S", "5.0"))) else "LATE"
+                                print(f"[worker-strict:{node_id}] p{pid} eid={le.event_id} "
+                                      f"et={le.event_time:.3f} ws={le.event_time - (le.event_time % 5.0):.1f} "
+                                      f"wm={wm_after:.1f} verdict={verdict} "
+                                      f"lat={latency_us:.0f}us buf={len(worker.buffers.get(pid, []))}",
+                                      file=sys.stderr)
                             committed_offsets[pid] = msg["offset"] + 1
+                            worker_kafka_offsets[pid] = msg["offset"] + 1
+                            poll_total[0] += 1
                         # Kafka backpressure: consumer.pause() when buffer full
                         buf_len = len(worker.buffers.get(pid, []))
                         if buf_len >= BACKPRESSURE_MAX_QUEUE:
@@ -838,8 +1304,27 @@ def _run_strict_worker(node_id, parts, args):
                     if committed_offsets:
                         kafka_consumer.commit(committed_offsets)
                         committed_offsets.clear()
-                    # Report Kafka partition lag every 5s
                     now_t = time.time()
+                    # Progress log every 5s
+                    if now_t - last_progress_log >= 5.0 and poll_total[0] > 0:
+                        s = worker.summary()
+                        buf_info = " ".join(f"p{p}={len(b)}q" for p, b in worker.buffers.items())
+                        wm_info = " ".join(f"p{p}:W={eng.watermark:.1f}" for p, eng in worker.engines.items())
+                        print(f"[worker-strict:{node_id}] "
+                              f"received={s['total_received']} "
+                              f"on_time={s['on_time']} "
+                              f"late={s['late_dropped']} "
+                              f"dupes={s['duplicates']} "
+                              f"bp_drops={s['backpressure_drops']} "
+                              f"completeness={s['data_completeness_pct']:.1f}% "
+                              f"late_rate={s['late_arrival_rate_pct']:.1f}% "
+                              f"open_windows={sum(p.get('open_windows',0) for p in s['partitions'].values() if isinstance(p,dict))} "
+                              f"closed_windows={sum(p.get('closed_windows',0) for p in s['partitions'].values() if isinstance(p,dict))} "
+                              f"buf=[{buf_info}] "
+                              f"watermarks=[{wm_info}]",
+                              file=sys.stderr)
+                        last_progress_log = now_t
+                    # Report Kafka partition lag every 5s
                     if now_t - last_lag_report >= 5.0 and mon_mgr is not None:
                         for pid in kafka_consumer.assigned_partitions():
                             lag = kafka_consumer.lag("events", pid)
@@ -847,6 +1332,8 @@ def _run_strict_worker(node_id, parts, args):
                                                      f"strict-{node_id}", pid, lag)
                         last_lag_report = now_t
                 except Exception:
+                    import traceback
+                    traceback.print_exc()
                     time.sleep(0.1)
         threading.Thread(target=kafka_poll_loop, daemon=True).start()
 
@@ -883,6 +1370,138 @@ def _run_strict_worker(node_id, parts, args):
             _update_monitoring_from_component(mon_mgr, state)
     threading.Thread(target=monitoring_loop, daemon=True).start()
 
+    # ── Fix 1: Heartbeat loop — send LW to coordinator every 200ms ──
+    def heartbeat_loop():
+        import dataclasses
+        import urllib.request
+        while not stop.is_set():
+            time.sleep(0.2)
+            hb = None
+            try:
+                hb = worker.heartbeat()
+            except Exception:
+                pass
+            if hb is not None:
+                sent = False
+                if grpc is not None:
+                    try:
+                        stub = get_grpc_stub(coord_state["url"])
+                        if stub is not None:
+                            msg = csdlpt_pb2.WorkerHeartbeatMsg(
+                                worker_id=hb.worker_id,
+                                partitions=hb.partitions,
+                                max_event_time=hb.max_event_time,
+                                timestamp=hb.timestamp,
+                                fencing_token=hb.fencing_token,
+                                idle_partitions=hb.idle_partitions,
+                                backpressure_partitions=hb.backpressure_partitions,
+                                kafka_offsets=worker_kafka_offsets,
+                            )
+                            stub.WorkerHeartbeat(msg, timeout=2)
+                            sent = True
+                    except Exception:
+                        pass
+                    if not sent and coordinator_peers:
+                        for peer in coordinator_peers:
+                            try:
+                                stub = get_grpc_stub(peer)
+                                if stub is not None:
+                                    msg = csdlpt_pb2.WorkerHeartbeatMsg(
+                                        worker_id=hb.worker_id,
+                                        partitions=hb.partitions,
+                                        max_event_time=hb.max_event_time,
+                                        timestamp=hb.timestamp,
+                                        fencing_token=hb.fencing_token,
+                                        idle_partitions=hb.idle_partitions,
+                                        backpressure_partitions=hb.backpressure_partitions,
+                                        kafka_offsets=worker_kafka_offsets,
+                                    )
+                                    stub.WorkerHeartbeat(msg, timeout=1)
+                                    sent = True
+                                    break
+                            except Exception:
+                                continue
+                if not sent:
+                    hb_dict = dataclasses.asdict(hb)
+                    if worker_kafka_offsets:
+                        hb_dict["kafka_offsets"] = worker_kafka_offsets
+                    data_bytes = json.dumps(hb_dict).encode()
+                    try:
+                        req = urllib.request.Request(
+                            coord_state["url"] + "/punctuation",
+                            data=data_bytes,
+                            headers={"Content-Type": "application/json"},
+                        )
+                        urllib.request.urlopen(req, timeout=2)
+                        sent = True
+                    except Exception:
+                        pass
+                    if not sent and coordinator_peers:
+                        for peer in coordinator_peers:
+                            try:
+                                peer_url = f"http://{peer}"
+                                req = urllib.request.Request(
+                                    peer_url + "/punctuation",
+                                    data=data_bytes,
+                                    headers={"Content-Type": "application/json"},
+                                )
+                                urllib.request.urlopen(req, timeout=1)
+                                break
+                            except Exception:
+                                continue
+            for pid in worker.buffers:
+                try:
+                    bp.report_buffer(node_id, pid, len(worker.buffers[pid]))
+                except Exception:
+                    pass
+    threading.Thread(target=heartbeat_loop, daemon=True).start()
+
+    # ── Fix 2: W_global fetch loop — pull global watermark + partition types every 500ms ──
+    def wglobal_fetch_loop():
+        import urllib.request
+        from refactor.common.differentiated_eviction import PartitionEvictionType
+        while not stop.is_set():
+            time.sleep(0.5)
+            state_data = None
+            if grpc is not None:
+                try:
+                    stub = get_grpc_stub(coord_state["url"])
+                    if stub is not None:
+                        reply = stub.GetGlobalState(csdlpt_pb2.StateRequest(worker_id=node_id), timeout=2)
+                        state_data = {
+                            "W_global": reply.W_global,
+                            "term": reply.term,
+                            "partition_types": {str(k): v for k, v in reply.partition_types.items()},
+                        }
+                except Exception:
+                    pass
+            if state_data is None:
+                try:
+                    req = urllib.request.Request(coord_state["url"] + "/state")
+                    with urllib.request.urlopen(req, timeout=2) as resp:
+                        state_data = json.loads(resp.read())
+                except Exception:
+                    pass
+            if state_data is not None:
+                try:
+                    W_global = float(state_data.get("W_global", float("-inf")))
+                    term = int(state_data.get("term", 0))
+                    worker.update_global_watermark(W_global, term)
+                    # ── Fix 3: Propagate partition_type changes to DifferentiatedEvictionManager ──
+                    if diff_eviction is not None:
+                        partition_types = state_data.get("partition_types", {})
+                        for pid_str, ptype_str in partition_types.items():
+                            pid = int(pid_str)
+                            ptype = (
+                                PartitionEvictionType.RECOVERY
+                                if ptype_str == "recovery"
+                                else PartitionEvictionType.NORMAL
+                            )
+                            diff_eviction.set_partition_type(pid, ptype)
+                except Exception:
+                    pass
+    threading.Thread(target=wglobal_fetch_loop, daemon=True).start()
+
     print(f"[worker-strict:{node_id}] listening on :{port}, partitions={parts}")
     _wait_shutdown(stop, srv, state)
 
@@ -901,6 +1520,7 @@ def _run_heuristic_worker(node_id, parts, args):
             partition_id=pid, worker_id=node_id,
             db_path=f"{ckpt_dir}/rocksdb-heuristic-{node_id}-p{pid}",
             tiered_storage=tiered_storage,
+            checkpoint_dir=ckpt_dir,
         )
         for pid in parts
     }
@@ -930,8 +1550,13 @@ def _run_heuristic_worker(node_id, parts, args):
     kafka_producer = None
     kafka_results_topic = "heuristic_results"
     kafka_broker_url = args.kafka_broker_url or os.environ.get("KAFKA_BROKER_URL", "")
-    if args.enable_kafka and kafka_broker_url:
-        from refactor.common.kafka_sim import KafkaConsumer, KafkaProducer
+    enable_kafka = args.enable_kafka or os.environ.get("KAFKA_ENABLE", "false").lower() in ("1", "true", "yes", "on")
+    if enable_kafka and kafka_broker_url:
+        if os.environ.get("KAFKA_ENABLE_REAL", "false").lower() in ("1", "true", "yes", "on"):
+            from refactor.common.kafka_real import KafkaConsumer, KafkaProducer, ensure_topics
+            ensure_topics(kafka_broker_url, ["events", "heuristic_results"], num_partitions=12)
+        else:
+            from refactor.common.kafka_sim import KafkaConsumer, KafkaProducer
         kafka_consumer = KafkaConsumer(broker_url=kafka_broker_url,
                                        group_id="heuristic-workers",
                                        client_id=f"heuristic-{node_id}")
@@ -941,9 +1566,14 @@ def _run_heuristic_worker(node_id, parts, args):
                                        client_id=f"heuristic-producer-{node_id}")
         print(f"[worker-heuristic:{node_id}] Kafka results producer created, topic={kafka_results_topic}", file=sys.stderr)
 
+    seen_event_ids = set()
+
     def ingest_handler(events):
         count = 0
-        for ev in events:
+        for ev_raw in events:
+            ev = parse_and_deduplicate_event(ev_raw, seen_event_ids)
+            if ev is None:
+                continue
             pid = ev.get("partition_id", parts[0])
             if pid not in engines:
                 continue
@@ -952,6 +1582,8 @@ def _run_heuristic_worker(node_id, parts, args):
                 event_time=float(ev.get("event_time", time.time())),
                 status=int(ev.get("status", 200)),
                 arrival_time=time.time(),
+                poll_received_at=time.time(),
+                schema_version=int(ev.get("schema_version", 1)),
             )
             engines[pid].process(le)
             count += 1
@@ -968,8 +1600,36 @@ def _run_heuristic_worker(node_id, parts, args):
 
         def summary(self):
             result = {"node_id": self.node_id, "partitions": {}}
+            total_recv = 0
+            total_on = 0
+            total_late = 0
+            total_dupes = 0
+            total_bp = 0
+            total_non_mono = 0
+            total_dlq = 0
+            total_sketch = 0
             for pid, eng in self.engines.items():
-                result["partitions"][pid] = eng.summary()
+                es = eng.summary()
+                result["partitions"][pid] = es
+                total_recv += es.get("total_received", 0)
+                total_on += es.get("on_time", 0)
+                total_late += es.get("late_dropped", 0)
+                total_dupes += es.get("duplicates", 0)
+                total_bp += es.get("backpressure_drops", 0)
+                total_non_mono += es.get("non_monotonic_punctuation", 0)
+                total_dlq += es.get("dlq_backlog", 0)
+                total_sketch += es.get("sketch_total_count", 0)
+            uniq = max(total_recv - total_dupes, 1)
+            result["total_received"] = total_recv
+            result["on_time"] = total_on
+            result["late_dropped"] = total_late
+            result["duplicates"] = total_dupes
+            result["backpressure_drops"] = total_bp
+            result["non_monotonic_punctuation"] = total_non_mono
+            result["data_completeness_pct"] = round(100.0 * total_on / uniq, 3)
+            result["late_arrival_rate_pct"] = round(100.0 * total_late / max(total_recv, 1), 3)
+            result["dlq_backlog"] = total_dlq
+            result["sketch_total_count"] = total_sketch
             return result
 
         def broadcast(self):
@@ -1008,6 +1668,9 @@ def _run_heuristic_worker(node_id, parts, args):
         "role": "worker",
         "ready": True,
         "component": proxy,
+        "worker_id": node_id,
+        "tiered_storage": tiered_storage,
+        "backpressure_controller": bp,
         "ingest_handler": ingest_handler,
         "monitoring_manager": mon_mgr,
         "tls_cert": args.tls_cert,
@@ -1031,6 +1694,8 @@ def _run_heuristic_worker(node_id, parts, args):
         def kafka_heuristic_poll_loop():
             committed_offsets: dict[int, int] = {}
             last_lag_report = 0.0
+            last_progress_log = 0.0
+            poll_total = [0]
             while not stop.is_set():
                 try:
                     # Backpressure: skip poll if all partitions are paused (spec §11.1)
@@ -1044,15 +1709,26 @@ def _run_heuristic_worker(node_id, parts, args):
                         eng = engines[pid]
                         for msg in msgs:
                             value = json.loads(msg["value"]) if isinstance(msg["value"], str) else msg["value"]
-                            ev = value if isinstance(value, dict) else {"payload": str(value)}
+                            if isinstance(value, dict) and value.get("is_punctuation"):
+                                committed_offsets[pid] = msg["offset"] + 1
+                                poll_total[0] += 1
+                                continue
+                            ev_raw = value if isinstance(value, dict) else {"payload": str(value)}
+                            ev = parse_and_deduplicate_event(ev_raw, seen_event_ids)
+                            if ev is None:
+                                continue
                             le = LogEvent(
                                 event_id=str(ev.get("event_id", f"kafka-{msg['offset']}")),
                                 event_time=float(ev.get("event_time", time.time())),
                                 status=int(ev.get("status", 200)),
                                 arrival_time=time.time(),
+                                poll_received_at=time.time(),
+                                offset=msg["offset"],
+                                schema_version=int(ev.get("schema_version", 1)),
                             )
                             eng.process(le)
                             committed_offsets[pid] = msg["offset"] + 1
+                            poll_total[0] += 1
                         # Gap 1: Drain closed window results and produce to heuristic_results topic
                         if kafka_producer is not None:
                             results = eng.drain_results()
@@ -1075,8 +1751,23 @@ def _run_heuristic_worker(node_id, parts, args):
                     if committed_offsets:
                         kafka_consumer.commit(committed_offsets)
                         committed_offsets.clear()
-                    # Report Kafka partition lag every 5s
                     now_t = time.time()
+                    # Progress log every 5s
+                    if now_t - last_progress_log >= 5.0 and poll_total[0] > 0:
+                        total_recv = sum(e.metrics.total_received for e in engines.values())
+                        total_on = sum(e.metrics.on_time for e in engines.values())
+                        total_late = sum(e.metrics.late_dropped for e in engines.values())
+                        total_dlq = sum(len(e.late_events) for e in engines.values())
+                        uniq = max(total_recv, 1)
+                        comp = 100.0 * total_on / uniq
+                        part_info = " ".join(f"p{p}:W_h={e.W_h:.1f}" for p, e in engines.items())
+                        print(f"[worker-heuristic:{node_id}] processed={total_recv} "
+                              f"on_time={total_on} late={total_late} "
+                              f"completeness={comp:.1f}% "
+                              f"dlq_backlog={total_dlq} "
+                              f"[{part_info}]", file=sys.stderr)
+                        last_progress_log = now_t
+                    # Report Kafka partition lag every 5s
                     if now_t - last_lag_report >= 5.0 and mon_mgr is not None:
                         for pid in kafka_consumer.assigned_partitions():
                             lag = kafka_consumer.lag("events", pid)
@@ -1084,6 +1775,8 @@ def _run_heuristic_worker(node_id, parts, args):
                                                      f"heuristic-{node_id}", pid, lag)
                         last_lag_report = now_t
                 except Exception:
+                    import traceback
+                    traceback.print_exc()
                     time.sleep(0.1)
         threading.Thread(target=kafka_heuristic_poll_loop, daemon=True).start()
 
@@ -1092,32 +1785,64 @@ def _run_heuristic_worker(node_id, parts, args):
         while not stop.is_set():
             time.sleep(0.2)
             for pid, eng in engines.items():
-                payload = json.dumps({
-                    "worker_id": node_id,
-                    "partition_id": pid,
-                    "W_h": eng.W_h,
-                }).encode()
-                headers = {"Content-Type": "application/json"}
-                # Push to active aggregator
-                try:
-                    req = urllib.request.Request(
-                        aggregator_url + "/punctuation",
-                        data=payload, headers=headers,
-                    )
-                    urllib.request.urlopen(req, timeout=1)
-                except Exception:
-                    pass
-                # Push to standby aggregator (best-effort, fire-and-forget)
-                if aggregator_standby_url != aggregator_url:
+                sent = False
+                if grpc is not None:
+                    try:
+                        stub = get_grpc_aggregator_stub(aggregator_url)
+                        if stub is not None:
+                            stub.SendWorkerWatermark(
+                                csdlpt_pb2.WorkerWatermarkMsg(
+                                    worker_id=node_id,
+                                    partition_id=pid,
+                                    W_h=eng.W_h,
+                                ),
+                                timeout=1
+                            )
+                            sent = True
+                    except Exception:
+                        pass
+                    if aggregator_standby_url != aggregator_url:
+                        try:
+                            stub = get_grpc_aggregator_stub(aggregator_standby_url)
+                            if stub is not None:
+                                stub.SendWorkerWatermark(
+                                    csdlpt_pb2.WorkerWatermarkMsg(
+                                        worker_id=node_id,
+                                        partition_id=pid,
+                                        W_h=eng.W_h,
+                                    ),
+                                    timeout=1
+                                )
+                        except Exception:
+                            pass
+                if not sent:
+                    payload = json.dumps({
+                        "worker_id": node_id,
+                        "partition_id": pid,
+                        "W_h": eng.W_h,
+                    }).encode()
+                    headers = {"Content-Type": "application/json"}
+                    # Push to active aggregator
                     try:
                         req = urllib.request.Request(
-                            aggregator_standby_url + "/punctuation",
+                            aggregator_url + "/punctuation",
                             data=payload, headers=headers,
                         )
                         urllib.request.urlopen(req, timeout=1)
                     except Exception:
                         pass
+                    # Push to standby aggregator (best-effort, fire-and-forget)
+                    if aggregator_standby_url != aggregator_url:
+                        try:
+                            req = urllib.request.Request(
+                                aggregator_standby_url + "/punctuation",
+                                data=payload, headers=headers,
+                            )
+                            urllib.request.urlopen(req, timeout=1)
+                        except Exception:
+                            pass
     threading.Thread(target=report_loop, daemon=True).start()
+
 
     # Monitoring push loop
     def monitoring_loop():
@@ -1138,6 +1863,10 @@ def _run_heuristic_worker(node_id, parts, args):
                         dlq.enqueue(ev)
             if mon_mgr is not None:
                 mon_mgr.dlq_backlog.labels(worker_id=node_id).set(dlq.backlog)
+                # §12 oldest-entry age — surfaces stalled DLQ consumers before
+                # the hourly correction loop next fires.
+                mon_mgr.dlq_oldest_entry_age_s.labels(worker_id=node_id).set(
+                    dlq.oldest_entry_age_s())
     threading.Thread(target=dlq_drain_loop, daemon=True).start()
 
     # §12.5 DLQ hourly correction scheduler — drain DLQ, compute corrections, emit
@@ -1150,8 +1879,22 @@ def _run_heuristic_worker(node_id, parts, args):
                 batch = dlq.drain(batch_size=500)
                 if batch:
                     corrections = dlq.compute_corrections(batch)
+                    # §12.6 SLA: a window emitted while the owning engine was
+                    # in adaptive/burst mode gets a tighter 15-min correction
+                    # deadline. Look up the partition's current burst state and
+                    # classify per-correction so DownstreamEmitter.check_sla
+                    # can apply the right threshold.
                     for corr in corrections:
-                        downstream_emitter.enqueue(corr)
+                        burst = False
+                        try:
+                            pid = int(corr.window_id.split("_", 1)[0])
+                            eng = engines.get(pid)
+                            if eng is not None and getattr(eng, "in_burst", False):
+                                burst = True
+                        except (ValueError, IndexError):
+                            pass
+                        downstream_emitter.enqueue(
+                            corr, window_type=("burst" if burst else "normal"))
                     # Drain emitted corrections
                     drained = downstream_emitter.drain(batch_size=500)
                     # Gap 4: SLA check after correction drain
@@ -1178,6 +1921,37 @@ def _run_heuristic_worker(node_id, parts, args):
                 print(f"[worker-heuristic:{node_id}] dlq correction error: {exc}", file=sys.stderr)
     threading.Thread(target=dlq_correction_loop, daemon=True).start()
 
+    # Periodic checkpoint thread — persist engine metadata every 10s
+    def checkpoint_loop():
+        while not stop.is_set():
+            time.sleep(10.0)
+            try:
+                for eng in engines.values():
+                    eng.checkpoint()
+            except Exception:
+                pass
+    threading.Thread(target=checkpoint_loop, daemon=True).start()
+
+    # Progress log loop (HTTP-only / non-Kafka path)
+    def progress_log_loop():
+        while not stop.is_set():
+            time.sleep(5.0)
+            total_recv = sum(e.metrics.total_received for e in engines.values())
+            if total_recv == 0:
+                continue
+            total_on = sum(e.metrics.on_time for e in engines.values())
+            total_late = sum(e.metrics.late_dropped for e in engines.values())
+            total_dlq = sum(len(e.late_events) for e in engines.values())
+            uniq = max(total_recv, 1)
+            comp = 100.0 * total_on / uniq
+            part_info = " ".join(f"p{p}:W_h={e.W_h:.1f}" for p, e in sorted(engines.items()))
+            print(f"[worker-heuristic:{node_id}] processed={total_recv} "
+                  f"on_time={total_on} late={total_late} "
+                  f"completeness={comp:.1f}% "
+                  f"dlq_backlog={total_dlq} "
+                  f"[{part_info}]", file=sys.stderr)
+    threading.Thread(target=progress_log_loop, daemon=True).start()
+
     print(f"[worker-heuristic:{node_id}] listening on :{port}, partitions={parts}")
     _wait_shutdown(stop, srv, state)
 
@@ -1187,6 +1961,12 @@ def _run_hybrid_worker(node_id, parts, args):
 
     Uses HybridRouter per partition for unified window results and loss accounting.
     """
+    from refactor.common.config import Config
+    cfg = Config()
+    if not cfg.enable_hybrid_routing:
+        print("[worker-hybrid] ENABLE_HYBRID_ROUTING is disabled. Set ENABLE_HYBRID_ROUTING=true to enable hybrid mode.")
+        return
+
     from refactor.hybrid.router import HybridRouter, EventPriority
     from refactor.common.types import LogEvent, PunctuationToken
     from refactor.strict.backpressure import BackpressureController
@@ -1208,9 +1988,14 @@ def _run_hybrid_worker(node_id, parts, args):
         for pid in parts
     }
 
+    seen_event_ids = set()
+
     def ingest_handler(events):
         count = 0
-        for ev in events:
+        for ev_raw in events:
+            ev = parse_and_deduplicate_event(ev_raw, seen_event_ids)
+            if ev is None:
+                continue
             pid = ev.get("partition_id", parts[0])
             if pid not in routers:
                 continue
@@ -1224,6 +2009,8 @@ def _run_hybrid_worker(node_id, parts, args):
                 event_time=float(ev.get("event_time", time.time())),
                 status=int(ev.get("status", 200)),
                 arrival_time=time.time(),
+                poll_received_at=time.time(),
+                schema_version=int(ev.get("schema_version", 1)),
             )
             le.payload = {"priority": priority_val}
             router.process(le)
@@ -1338,14 +2125,23 @@ def run_ingestor(args):
 
     import urllib.request
 
+    csv_reader = None
+    csv_file = None
+    csv_first_time = None
+    csv_wall_base = time.time()
     events = []
     if source and os.path.exists(source):
-        with open(source) as f:
-            for line in f:
-                line = line.strip()
-                if line:
-                    events.append(json.loads(line))
-    else:
+        if source.endswith('.csv'):
+            import csv as _csv
+            csv_file = open(source)
+            csv_reader = _csv.DictReader(csv_file)
+        else:
+            with open(source) as f:
+                for line in f:
+                    line = line.strip()
+                    if line:
+                        events.append(json.loads(line))
+    if not csv_reader and not events:
         base = time.time()
         for i in range(1000):
             events.append({
@@ -1355,34 +2151,110 @@ def run_ingestor(args):
                 "partition_id": i % 12,
             })
 
+    def _next_csv_event():
+        """Read next row from CSV, normalize timestamp, return event dict or None on EOF."""
+        nonlocal csv_first_time
+        try:
+            row = next(csv_reader)
+        except StopIteration:
+            return None
+        host = row.get('host', '')
+        csv_time = float(row.get('time', '0'))
+        if csv_first_time is None:
+            csv_first_time = csv_time
+        offset = csv_time - csv_first_time
+        event_time = csv_wall_base + offset
+        return {
+            "event_id": f"csv-{row.get('', '0')}",
+            "event_time": event_time,
+            "status": int(row.get('response', '200')),
+            "partition_id": hash(host) % 12,
+            "payload": {
+                "host": host,
+                "method": row.get('method', ''),
+                "url": row.get('url', ''),
+                "bytes": int(row.get('bytes', '0')),
+            },
+        }
+
     # Kafka producer mode
     kafka_producer = None
     kafka_broker_url = args.kafka_broker_url or os.environ.get("KAFKA_BROKER_URL", "")
-    if args.enable_kafka and kafka_broker_url:
-        from refactor.common.kafka_sim import KafkaProducer
+    enable_kafka = args.enable_kafka or os.environ.get("KAFKA_ENABLE", "false").lower() in ("1", "true", "yes", "on")
+    if enable_kafka and kafka_broker_url:
+        if os.environ.get("KAFKA_ENABLE_REAL", "false").lower() in ("1", "true", "yes", "on"):
+            from refactor.common.kafka_real import KafkaProducer, ensure_topics
+            ensure_topics(kafka_broker_url, ["events", "strict_results", "heuristic_results", "audit_results"], num_partitions=12)
+        else:
+            from refactor.common.kafka_sim import KafkaProducer
         kafka_producer = KafkaProducer(broker_url=kafka_broker_url)
         print(f"[ingestor] using Kafka producer -> {kafka_broker_url}", file=sys.stderr)
 
+    total_parts = int(os.environ.get("TOTAL_PARTITIONS", "12"))
     node_for_partition = {}
+    parts_per_host = max(1, total_parts // max(1, len(node_hosts)))
     for i, host in enumerate(node_hosts):
-        for p in range(i * 3, min((i + 1) * 3, 12)):
+        start = i * parts_per_host
+        end = min((i + 1) * parts_per_host, total_parts)
+        for p in range(start, end):
             node_for_partition[p] = host
 
     ingested = [0]
+    ingested_total = [0]
     last_punctuation = [time.time()]
     punctuation_interval = 1.0
     events_sent_since_punctuation = [0]
     last_log_offsets: dict[int, int] = {}
+    eof_reached = [False]  # shared with send_punctuation for EOF flush
+
+    # Data-driven punctuation: track max event_time sent globally and per-partition.
+    # In simulation/CSV mode, T_commit must be driven by the actual data timestamps,
+    # not wall clock, otherwise the watermark advances faster than event_time and
+    # events are incorrectly marked as late (Completeness < 100%).
+    #
+    # Key insight: T_commit = max_event_time_sent causes the watermark to sit at
+    # max_et - delta_base. If the CSV spans > delta_base + window_size (25s with
+    # defaults), older events get window_end <= watermark → LATE.
+    #
+    # Fix: track min_event_time_sent and set T_commit = min_et, so the watermark
+    # stays behind ALL events in the CSV. In simulation, all events are "historical"
+    # from the system's perspective, so none should be late.
+    max_event_time_sent: float = 0.0
+    min_event_time_sent: float = float("inf")
+    max_event_time_per_part: dict[int, float] = {}
+    punctuation_mode = os.environ.get("PUNCTUATION_MODE", "data-driven")
+    # Log level for tracing event flow through the pipeline
+    log_level = os.environ.get("LOG_LEVEL", "info").lower()
+    _log_trace = log_level in ("debug", "trace")
+
+    def _update_max_event_time(ev):
+        nonlocal max_event_time_sent, min_event_time_sent
+        et = float(ev.get("event_time", 0.0))
+        if et > max_event_time_sent:
+            max_event_time_sent = et
+        if et < min_event_time_sent:
+            min_event_time_sent = et
+        pid = ev.get("partition_id", 0)
+        if et > max_event_time_per_part.get(pid, 0.0):
+            max_event_time_per_part[pid] = et
 
     def send_event_kafka(ev):
         """Send event via KafkaProducer (acks=all)."""
+        _update_max_event_time(ev)
         result = kafka_producer.send("events", ev, key=ev.get("event_id", ""),
                                      partition=ev.get("partition_id", 0) % 12)
         if "error" not in result:
             ingested[0] += 1
+            ingested_total[0] += 1
             events_sent_since_punctuation[0] += 1
+            if _log_trace:
+                print(f"[ingestor→kafka] eid={ev.get('event_id','?')} "
+                      f"et={ev.get('event_time',0):.3f} pid={ev.get('partition_id',0)} "
+                      f"status={ev.get('status',0)} offset={result.get('offset','?')}",
+                      file=sys.stderr)
 
     def send_event(ev, host):
+        _update_max_event_time(ev)
         try:
             data = json.dumps([ev]).encode()
             req = urllib.request.Request(
@@ -1392,42 +2264,144 @@ def run_ingestor(args):
             )
             urllib.request.urlopen(req, timeout=1)
             ingested[0] += 1
+            ingested_total[0] += 1
             events_sent_since_punctuation[0] += 1
+            if _log_trace:
+                print(f"[ingestor→{host}] eid={ev.get('event_id','?')} "
+                      f"et={ev.get('event_time',0):.3f} pid={ev.get('partition_id',0)} "
+                      f"status={ev.get('status',200)}",
+                      file=sys.stderr)
         except Exception:
             pass
 
     def send_punctuation():
+        """Emit per-partition punctuation tokens.
+
+        In data-driven mode (default for CSV/simulation):
+          - While ingesting: T_commit = min_event_time_sent keeps the watermark
+            behind ALL events, guaranteeing 100% completeness regardless of
+            CSV time span. Windows accumulate but don't close prematurely.
+          - After EOF: T_commit = max_event_time_sent + delta_base_s flushes
+            all accumulated windows at once, simulating a clean shutdown.
+
+        In wall-clock mode: T_commit = now - 10s (real-time streaming).
+        """
         is_empty = events_sent_since_punctuation[0] == 0
         events_sent_since_punctuation[0] = 0
-        for host in node_hosts:
+
+        if punctuation_mode == "wall-clock":
+            T_commit = time.time() - 10.0
+        else:
+            # Data-driven: anchor watermark at the oldest event so nothing is
+            # ever late. After EOF, jump to max_et + delta_base to close all
+            # windows in one shot.
+            if not eof_reached[0] and min_event_time_sent != float("inf"):
+                # Ingesting phase: hold watermark behind all events
+                T_commit = min_event_time_sent
+            elif eof_reached[0] and max_event_time_sent > 0:
+                # EOF phase: flush all windows
+                T_commit = max_event_time_sent + float(os.environ.get("DELTA_BASE_S", "10.0"))
+            else:
+                T_commit = time.time()
+
+        if _log_trace:
+            print(f"[ingestor] punctuation T_commit={T_commit:.3f} "
+                  f"min_et={min_event_time_sent:.3f} max_et={max_event_time_sent:.3f} "
+                  f"eof={eof_reached[0]} mode={punctuation_mode} is_empty={is_empty}",
+                  file=sys.stderr)
+
+        for pid, host in node_for_partition.items():
             try:
-                data = json.dumps({
-                    "T_commit": time.time() - 10.0,
-                    "partition_id": 0,
-                    "ingestor_id": "ingestor-main",
-                    "is_empty": is_empty,
-                }).encode()
-                req = urllib.request.Request(
-                    f"http://{host}/punctuation",
-                    data=data,
-                    headers={"Content-Type": "application/json"},
-                )
-                urllib.request.urlopen(req, timeout=1)
+                pid_T_commit = T_commit
+                if kafka_producer is not None:
+                    kafka_producer.send("events", {
+                        "is_punctuation": True,
+                        "T_commit": pid_T_commit,
+                        "partition_id": pid,
+                        "ingestor_id": "ingestor-main",
+                        "is_empty": is_empty,
+                    }, key=f"punct-{pid}-{pid_T_commit}", partition=pid % 12)
+                else:
+                    data = json.dumps({
+                        "T_commit": pid_T_commit,
+                        "partition_id": pid,
+                        "ingestor_id": "ingestor-main",
+                        "is_empty": is_empty,
+                    }).encode()
+                    req = urllib.request.Request(
+                        f"http://{host}/punctuation",
+                        data=data,
+                        headers={"Content-Type": "application/json"},
+                    )
+                    urllib.request.urlopen(req, timeout=1)
             except Exception:
                 pass
+
+    from refactor.common.schema_registry import validate_json_schema, LOG_EVENT_V1_SCHEMA, LOG_EVENT_V2_SCHEMA
+
+    migration_step = os.environ.get("SCHEMA_MIGRATION_STEP", "v1_only").lower()
+
+    def create_v1_event(ev):
+        ev_v1 = dict(ev)
+        ev_v1["schema_version"] = 1
+        if "status" not in ev_v1:
+            ev_v1["status"] = 200
+        return ev_v1
+
+    def create_v2_event(ev):
+        ev_v2 = dict(ev)
+        ev_v2["schema_version"] = 2
+        status = ev_v2.pop("status", 200)
+        ev_v2["http_status"] = status
+        host = ev.get("payload", {}).get("host", "") if isinstance(ev.get("payload"), dict) else ""
+        ev_v2["service_name"] = host or "synthetic-service"
+        return ev_v2
 
     stop = threading.Event()
 
     def loop():
         idx = 0
+        eof = False
+        last_report = time.time()
         while not stop.is_set():
-            ev = events[idx % len(events)]
-            pid = ev.get("partition_id", 0)
-            if kafka_producer is not None:
-                send_event_kafka(ev)
+            if csv_reader is not None:
+                if not eof:
+                    ev = _next_csv_event()
+                    if ev is None:
+                        eof = True
+                        eof_reached[0] = True
+                        print(f"[ingestor] CSV EOF at event {idx}, switching to idle loop", file=sys.stderr)
+                        continue
+                else:
+                    # EOF reached, just send punctuations on idle loop
+                    time.sleep(0.1)
+                    if mode == "strict" and (time.time() - last_punctuation[0]) > punctuation_interval:
+                        send_punctuation()
+                        last_punctuation[0] = time.time()
+                    continue
             else:
-                host = node_for_partition.get(pid, node_hosts[0])
-                send_event(ev, host)
+                ev = events[idx % len(events)]
+            pid = ev.get("partition_id", 0)
+
+            to_send = []
+            if migration_step == "drop_legacy":
+                to_send.append(create_v2_event(ev))
+            elif migration_step in ("dual_emit", "dual_consume", "switch_primary"):
+                to_send.append(create_v1_event(ev))
+                to_send.append(create_v2_event(ev))
+            else:
+                to_send.append(create_v1_event(ev))
+
+            for msg_ev in to_send:
+                sch = LOG_EVENT_V2_SCHEMA if msg_ev.get("schema_version") == 2 else LOG_EVENT_V1_SCHEMA
+                validate_json_schema(msg_ev, sch)
+
+                if kafka_producer is not None:
+                    send_event_kafka(msg_ev)
+                else:
+                    host = node_for_partition.get(pid, node_hosts[0])
+                    send_event(msg_ev, host)
+
             last_log_offsets[pid] = idx
             idx += 1
             time.sleep(0.01)
@@ -1435,6 +2409,21 @@ def run_ingestor(args):
             if mode == "strict" and (time.time() - last_punctuation[0]) > punctuation_interval:
                 send_punctuation()
                 last_punctuation[0] = time.time()
+
+            # Progress report every 5s
+            now = time.time()
+            if now - last_report >= 5.0:
+                rate = ingested[0] / max(now - last_report, 0.1)
+                print(f"[ingestor] progress: {idx} CSV rows read, "
+                      f"{ingested_total[0]} total sent to Kafka, "
+                      f"rate={rate:.0f} ev/s, "
+                      f"et_range=[{min_event_time_sent:.3f}..{max_event_time_sent:.3f}] "
+                      f"span={max_event_time_sent - min_event_time_sent:.1f}s "
+                      f"partitions_active={len(last_log_offsets)} "
+                      f"eof={eof_reached[0]}",
+                      file=sys.stderr)
+                ingested[0] = 0
+                last_report = now
 
     threading.Thread(target=loop, daemon=True).start()
 
@@ -1446,22 +2435,50 @@ def run_ingestor(args):
             time.sleep(5.0)
             if not coordinator_url:
                 continue
-            try:
-                payload = json.dumps({
-                    "ingestor_id": "ingestor-main",
-                    "T_commit": time.time() - 10.0,
-                    "timestamp": time.time(),
-                    "partitions_assigned": list(last_log_offsets.keys()),
-                    "last_log_offset": max(last_log_offsets.values()) if last_log_offsets else 0,
-                    "ingestor_clock": time.time(),
-                    "offsets": dict(last_log_offsets),
-                }).encode()
-                r = _req.Request(coordinator_url + "/ingestor-heartbeat",
-                                 data=payload, headers={"Content-Type": "application/json"})
-                _req.urlopen(r, timeout=1)
-            except Exception:
-                pass
+            partitions_assigned = list(last_log_offsets.keys())
+            T_commit = time.time() - 10.0
+            timestamp = time.time()
+            last_log_offset = max(last_log_offsets.values()) if last_log_offsets else 0
+            ingestor_clock = time.time()
+            offsets = dict(last_log_offsets)
+            
+            sent = False
+            if grpc is not None:
+                try:
+                    stub = get_grpc_stub(coordinator_url)
+                    if stub is not None:
+                        msg = csdlpt_pb2.IngestorHeartbeatMsg(
+                            ingestor_id="ingestor-main",
+                            T_commit=T_commit,
+                            timestamp=timestamp,
+                            partitions_assigned=partitions_assigned,
+                            last_log_offset=last_log_offset,
+                            ingestor_clock=ingestor_clock,
+                            offsets=offsets,
+                        )
+                        stub.IngestorHeartbeat(msg, timeout=2)
+                        sent = True
+                except Exception:
+                    pass
+            
+            if not sent:
+                try:
+                    payload = json.dumps({
+                        "ingestor_id": "ingestor-main",
+                        "T_commit": T_commit,
+                        "timestamp": timestamp,
+                        "partitions_assigned": partitions_assigned,
+                        "last_log_offset": last_log_offset,
+                        "ingestor_clock": ingestor_clock,
+                        "offsets": offsets,
+                    }).encode()
+                    r = _req.Request(coordinator_url + "/ingestor-heartbeat",
+                                     data=payload, headers={"Content-Type": "application/json"})
+                    _req.urlopen(r, timeout=1)
+                except Exception:
+                    pass
     threading.Thread(target=heartbeat_loop, daemon=True).start()
+
 
     mon_mgr = _create_monitoring()
 
@@ -1504,6 +2521,13 @@ def _cleanup_components(state: dict) -> None:
     """Call checkpoint/flush/close on all components during graceful shutdown."""
     if state is None:
         return
+    grpc_srv = state.get("grpc_server")
+    if grpc_srv is not None:
+        try:
+            print("[shutdown] stopping gRPC server...", file=sys.stderr)
+            grpc_srv.stop(0)
+        except Exception as exc:
+            print(f"[shutdown] stopping gRPC server failed: {exc}", file=sys.stderr)
     comp = state.get("component")
     if comp is not None:
         for attr_name in ("checkpoint", "flush", "close"):

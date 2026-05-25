@@ -25,7 +25,7 @@ class ReplayCheckpoint:
     def progress_pct(self) -> float:
         if self.total_to_replay <= 0:
             return 0.0
-        return self.current_offset / self.total_to_replay * 100.0
+        return self.current_offset / self.total_to_replay
 
     @property
     def is_complete(self) -> bool:
@@ -57,9 +57,34 @@ class ReplayCheckpointManager:
 
     CHECKPOINT_INTERVAL_EVENTS = 1000
 
-    def __init__(self, store=None):
+    def __init__(self, store=None, db_path: str = None, checkpoint_interval: int = None):
+        # db_path: if provided, open a RocksStore for durable checkpoint persistence
+        if store is None and db_path is not None:
+            try:
+                from refactor.common.rocks_store import RocksStore
+                store = RocksStore(db_path)
+            except Exception:
+                pass
         self._store = store
+        # checkpoint_interval overrides the class default when provided
+        if checkpoint_interval is not None:
+            self._checkpoint_interval = checkpoint_interval
+        else:
+            self._checkpoint_interval = self.CHECKPOINT_INTERVAL_EVENTS
         self._checkpoints: dict[int, ReplayCheckpoint] = {}
+
+    def detect_replay_mode(self, event, watermark: float = float("-inf"),
+                           delta_base_s: float = 10.0) -> bool:
+        """Return True if the event appears to be a replay (catch-up) event.
+
+        Accepts either a LogEvent (uses event.event_time) or a raw float timestamp.
+        Delegates to the module-level detect_replay_mode() function.
+        """
+        if hasattr(event, "event_time"):
+            event_time = event.event_time
+        else:
+            event_time = float(event)
+        return detect_replay_mode(event_time, watermark, delta_base_s)
 
     def start_replay(self, partition_id: int, start_offset: int, total_to_replay: int):
         ckpt = ReplayCheckpoint(partition_id=partition_id, start_offset=start_offset,
@@ -75,7 +100,7 @@ class ReplayCheckpointManager:
             return None
         ckpt.current_offset += 1
         ckpt.events_since_checkpoint += 1
-        if ckpt.events_since_checkpoint >= self.CHECKPOINT_INTERVAL_EVENTS:
+        if ckpt.events_since_checkpoint >= self._checkpoint_interval:
             ckpt.last_checkpoint_time = time.time()
             ckpt.events_since_checkpoint = 0
             if self._store is not None:

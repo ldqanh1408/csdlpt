@@ -95,6 +95,81 @@ class TestChaosCoordinatorHA:
         rc._start_election()
         assert rc.role.value in ("leader", "follower")
 
+    def test_split_brain_higher_term_wins(self):
+        """Trien_Khai §9.3 — Coordinator Cluster Partition.
+
+        After a network partition, the majority side elects a new leader with a
+        higher term. When the partition heals, the old leader sees the higher
+        term in a vote request and steps down — no split-brain.
+        """
+        from refactor.strict.raft_coordinator import RaftCoordinator
+        rc_old = RaftCoordinator("c1", [])
+        rc_old._start_election()      # becomes leader at term=1
+        old_term = rc_old.current_term
+        # New leader on majority side already advanced to term=5
+        result = rc_old.handle_vote_request(
+            term=old_term + 4, candidate_id="c2", W_global=500.0,
+        )
+        assert result["granted"] is True
+        assert rc_old.role.value == "follower"
+        assert rc_old.current_term == old_term + 4
+
+    def test_ingestor_stuck_alert(self):
+        """Trien_Khai §9.3 — Ingestor Stuck.
+
+        Health monitor must raise a SILENT alert when an ingestor stops
+        heartbeating for longer than silent_timeout_s.
+        """
+        from refactor.strict.ingestor_health import IngestorHealthMonitor, IngestorStatus
+        hm = IngestorHealthMonitor(silent_timeout_s=0.1, stuck_timeout_s=0.05)
+        hm.receive_heartbeat("ing-1", partitions=[0, 1], last_T_commit=1000.0)
+        time.sleep(0.15)
+        result = hm.evaluate(W_global=1000.0)
+        alerts = [a for a in result["alerts"] if a["condition"] == "silent"]
+        assert len(alerts) == 1
+        assert hm.ingestors["ing-1"].status == IngestorStatus.SILENT
+
+
+class TestChaosAggregatorHA:
+    def test_aggregator_leader_takeover(self, tmp_path):
+        """Trien_Khai §9.3 — Aggregator Leader Kill.
+
+        When the active aggregator releases its lock, a standby can acquire it
+        and become active. Verifies the FileLockLeader handoff path used by
+        AggregatorHA.
+        """
+        from refactor.heuristic.aggregator_ha import FileLockLeader
+        lock_path = str(tmp_path / "agg.lock")
+        leader = FileLockLeader(lock_path)
+        assert leader.try_acquire() is True
+        assert leader.is_active is True
+        leader.release()
+        assert leader.is_active is False
+        # Standby simulates takeover by re-acquiring the same lock.
+        standby = FileLockLeader(lock_path)
+        assert standby.try_acquire() is True
+        standby.release()
+
+
+class TestChaosMinIOOutage:
+    def test_tiered_storage_disabled_when_minio_unreachable(self):
+        """Trien_Khai §9.3 — MinIO Outage.
+
+        When MinIO cannot be reached the manager should disable itself rather
+        than crash workers; engines run in tier-1-only mode until MinIO
+        returns.
+        """
+        from refactor.common.tiered_storage import TieredStorageManager
+        mgr = TieredStorageManager(
+            endpoint="127.0.0.1:1",       # closed port → unreachable
+            access_key="x", secret_key="x",
+            bucket_name="never",
+        )
+        assert mgr.client is None
+        # purge / upload calls must remain side-effect-free when disabled
+        assert mgr.upload_window("w1", {"count": 1}, partition_id=0) is True
+        assert mgr.purge_window("w1", partition_id=0) is True
+
 
 if __name__ == "__main__":
     pytest.main([__file__, "-v"])

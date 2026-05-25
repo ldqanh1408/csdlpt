@@ -33,6 +33,23 @@ class TestHeuristicWatermarkEngine:
         eng.process(e, arrival_time=base)
         assert eng.metrics.duplicates == 1
 
+    def test_dedup_set_has_ttl(self):
+        # §6.5 idempotent filter TTL: in-memory seen_ids must drop entries
+        # older than _dedup_ttl_s, otherwise the set grows without bound and
+        # leaks memory on a long-running worker.
+        eng = HeuristicWatermarkEngine()
+        eng._dedup_ttl_s = 0.05      # speed up the sweep
+        base = time.time()
+        eng.process(LogEvent(event_id="old", event_time=base - 1.0, status=200),
+                    arrival_time=base)
+        assert "old" in eng.seen_ids
+        time.sleep(0.1)
+        # process any event to trigger _purge_seen_ids
+        eng.process(LogEvent(event_id="new", event_time=base + 0.1, status=200),
+                    arrival_time=base + 0.1)
+        assert "old" not in eng.seen_ids       # expired and reaped
+        assert "new" in eng.seen_ids           # still inside TTL window
+
     def test_lag_estimation_converges(self):
         eng = HeuristicWatermarkEngine(L_max=10.0)
         base = time.time()

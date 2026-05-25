@@ -17,6 +17,15 @@ class TestHybridRouter:
         assert router.route_counts[EventPriority.CRITICAL] == 1
         assert router.route_counts[EventPriority.STANDARD] == 0
 
+    def test_routes_status_500_to_critical(self):
+        router = HybridRouter(partition_id=0)
+        ev = LogEvent(
+            event_id="crit-500", event_time=time.time(), status=500,
+        )
+        router.process(ev)
+        assert router.route_counts[EventPriority.CRITICAL] == 1
+        assert router.route_counts[EventPriority.STANDARD] == 0
+
     def test_routes_standard_to_heuristic(self):
         router = HybridRouter(partition_id=0)
         ev = LogEvent(

@@ -53,7 +53,7 @@ class DownstreamEmitter:
                 if corr.correction_id not in self._emitted:
                     self._emitted[corr.correction_id] = corr
                     self._emission_count += 1
-                    latency = time.time() - corr.timestamp
+                    latency = time.time() - corr.correction_timestamp
                     self._latencies_s.append(latency)
                     # Track latency per window type for SLA checks
                     wtype = self._correction_window_types.get(corr.correction_id, "normal")
@@ -64,7 +64,8 @@ class DownstreamEmitter:
                     emitted.append(corr)
         return emitted
 
-    def emit_final_reconciliation(self, window_id: str, final_count: int) -> CorrectionMessage | None:
+    def emit_final_reconciliation(self, window_id: str, final_count: int,
+                                   previous_emit_timestamp: float = 0.0) -> CorrectionMessage | None:
         with self._lock:
             # Skip if this window already received its FINAL
             if window_id in self._final_sent:
@@ -72,7 +73,8 @@ class DownstreamEmitter:
             corr = CorrectionMessage(
                 message_type="FINAL_RECONCILIATION", window_id=window_id,
                 correction_id=f"final-{window_id}", corrected_count=final_count,
-                delta_count=0, timestamp=time.time())
+                delta_count=0, previous_emit_timestamp=previous_emit_timestamp,
+                correction_timestamp=time.time())
             if corr.correction_id not in self._emitted:
                 self._emitted[corr.correction_id] = corr
                 self._emission_count += 1
@@ -151,17 +153,18 @@ class DownstreamEmitter:
             When set, the loop exits cleanly.
         window_store : object
             A store with a ``get_expired_windows(age_s)`` method that returns
-            an iterable of (window_id, current_count) tuples for windows whose
-            end time is older than ``age_s`` seconds.  Typical ``age_s`` is
-            86400 (24 hours).
+            an iterable of (window_id, current_count, emitted_at) tuples for
+            windows whose end time is older than ``age_s`` seconds.  Typical
+            ``age_s`` is 86400 (24 hours).
         """
         def _loop():
             logger.info("24h FINAL reconciliation scheduler started")
             while not stop_event.is_set():
                 try:
                     expired = window_store.get_expired_windows(86400)
-                    for window_id, count in expired:
-                        corr = self.emit_final_reconciliation(window_id, count)
+                    for window_id, count, emitted_at in expired:
+                        corr = self.emit_final_reconciliation(
+                            window_id, count, previous_emit_timestamp=emitted_at)
                         if corr is not None:
                             logger.info(
                                 "FINAL_RECONCILIATION emitted for window=%s count=%d",

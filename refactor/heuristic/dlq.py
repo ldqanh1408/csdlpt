@@ -14,7 +14,7 @@ import time
 import uuid
 from collections import defaultdict
 from dataclasses import dataclass, field
-from typing import Optional
+from typing import Callable, Optional
 
 from refactor.common.types import WindowResult, CorrectionMessage
 from refactor.common.rocks_store import RocksStore
@@ -129,6 +129,23 @@ class DLQPipeline:
             return 0.0
         return time.time() - min(e.arrival_time for e in self._entries)
 
+    def purge_expired(self) -> int:
+        """Remove entries older than retention_days. Returns count of purged entries."""
+        if not self._entries or self.retention_days <= 0:
+            return 0
+        cutoff = time.time() - (self.retention_days * 86400)
+        expired = [e for e in self._entries if e.arrival_time < cutoff]
+        for e in expired:
+            self._delete_entry(e.event_id)
+            try:
+                self._entries.remove(e)
+            except ValueError:
+                pass
+        if expired:
+            logger.info("DLQ TTL purge: removed %d entries older than %d days",
+                        len(expired), self.retention_days)
+        return len(expired)
+
     def drain(self, batch_size: int = 100) -> list[DLQEntry]:
         """Pop up to batch_size oldest entries from DLQ."""
         if not self._entries:
@@ -145,14 +162,19 @@ class DLQPipeline:
     def compute_corrections(
         self, entries: list[DLQEntry], window_size_s: float = 5.0,
         is_final: bool = False,
+        results_lookup: Callable[[str], dict | None] | None = None,
     ) -> list[CorrectionMessage]:
-        """Group DLQ entries by window, compute corrections.
+        """Group DLQ entries by window, compute corrections with proper deltas.
 
         Parameters
         ----------
         is_final : bool
             If True, sets message_type to "FINAL_RECONCILIATION"; otherwise
             uses "WINDOW_CORRECTION".
+        results_lookup : callable | None
+            Optional callable(window_id) -> dict | None that returns the
+            previously emitted result. When provided, previous_count/sum and
+            corrected_count/sum are computed from the actual prior result.
         """
         import math
         msg_type = "FINAL_RECONCILIATION" if is_final else "WINDOW_CORRECTION"
@@ -165,15 +187,37 @@ class DLQPipeline:
         corrections = []
         for window_id, evts in groups.items():
             delta_count = len(evts)
+            delta_sum = sum(
+                e.payload.get("response", 0) if isinstance(e.payload, dict) else 0
+                for e in evts
+            )
+
+            previous_count = 0
+            previous_sum = 0.0
+            previous_emit_ts = 0.0
+            if results_lookup is not None:
+                try:
+                    prev = results_lookup(window_id)
+                    if prev is not None and isinstance(prev, dict):
+                        previous_count = prev.get("count", 0)
+                        previous_sum = prev.get("sum", 0.0)
+                        previous_emit_ts = prev.get("emitted_at", 0.0)
+                except Exception:
+                    pass
+
             correction = CorrectionMessage(
                 message_type=msg_type,
                 window_id=window_id,
                 correction_id=str(uuid.uuid4()),
-                previous_count=0,
-                corrected_count=delta_count,
+                previous_count=previous_count,
+                previous_sum=previous_sum,
+                corrected_count=previous_count + delta_count,
+                corrected_sum=previous_sum + delta_sum,
                 delta_count=delta_count,
+                delta_sum=delta_sum,
                 late_log_ids=[e.event_id for e in evts],
-                timestamp=time.time(),
+                previous_emit_timestamp=previous_emit_ts,
+                correction_timestamp=time.time(),
             )
             corrections.append(correction)
             self._corrections_sent[window_id] = correction
@@ -207,6 +251,7 @@ class DLQPipeline:
             logger.info("Hourly DLQ correction consumer started")
             while not stop_event.is_set():
                 try:
+                    self.purge_expired()
                     entries = self.drain(batch_size=1000)
                     if entries:
                         corrections = self.compute_corrections(entries, is_final=False)
@@ -248,7 +293,7 @@ class DLQPipeline:
             } for e in self._entries],
             "corrections_sent": {
                 k: {"window_id": v.window_id, "correction_id": v.correction_id,
-                    "delta_count": v.delta_count, "timestamp": v.timestamp}
+                    "delta_count": v.delta_count, "correction_timestamp": v.correction_timestamp}
                 for k, v in self._corrections_sent.items()
             },
             "backlog": self.backlog,
@@ -268,14 +313,31 @@ class CorrectionProtocol:
     3. Append + Versioning - event log with increasing version
     """
 
-    def __init__(self, pattern: str = "incremental"):
+    def __init__(self, pattern: str = "incremental",
+                 store: Optional[RocksStore] = None):
         self.pattern = pattern
+        self._store = store
         self._processed_corrections: set[str] = set()
+        # Load existing corrections from RocksDB on init
+        if self._store is not None:
+            for key, _val in self._store.items(prefix="correction:"):
+                cid = key[len("correction:"):]
+                if cid:
+                    self._processed_corrections.add(cid)
 
     def is_duplicate(self, correction_id: str) -> bool:
         if correction_id in self._processed_corrections:
             return True
+        # Also check RocksDB for persisted dedup
+        if self._store is not None:
+            if self._store.get(f"correction:{correction_id}") is not None:
+                self._processed_corrections.add(correction_id)
+                return True
         self._processed_corrections.add(correction_id)
+        # Persist to RocksDB for durability
+        if self._store is not None:
+            self._store.put(f"correction:{correction_id}",
+                          {"processed_at": time.time()})
         return False
 
     def apply_correction(
@@ -305,7 +367,7 @@ class CorrectionProtocol:
                     {
                         "correction_id": correction.correction_id,
                         "delta_count": correction.delta_count,
-                        "timestamp": correction.timestamp,
+                        "correction_timestamp": correction.correction_timestamp,
                     }
                 ],
             }

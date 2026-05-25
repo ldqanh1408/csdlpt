@@ -11,12 +11,14 @@ Default alert rules:
   5. combined_status_critical -- combined_status == 3     -> critical
   6. fencing_violation        -- fencing violations increase -> high
   7. ingestor_silent          -- ingestor silent > 15s    -> high
-  8. negative_lag_critical    -- negative_lag_rate > 0.05 -> critical
-  9. all_workers_idle         -- all workers idle         -> high
- 10. replay_mode_extended     -- replay_mode > 2 for > 5m -> warning
- 11. correction_latency_high  -- avg correction lat > 1h  -> warning
- 12. dlq_backlog_critical     -- dlq_backlog > 50000      -> critical
- 13. sketch_drift_high        -- estimator_drift > 0.5    -> warning
+  8. negative_lag_warning     -- negative_lag_rate 1-5%   -> warning
+  9. negative_lag_critical    -- negative_lag_rate > 5%   -> critical
+ 10. all_workers_idle         -- all workers idle         -> high
+ 11. replay_mode_extended     -- replay_mode > 2 for > 5m -> warning
+ 12. correction_latency_high  -- avg correction lat > 1h  -> warning
+ 13. dlq_backlog_critical     -- dlq_backlog > 50000      -> critical
+ 14. sketch_drift_high        -- estimator_drift > 0.5    -> warning
+ 15. extreme_lag_detected     -- extreme_lag_count > 0    -> warning
 """
 
 from __future__ import annotations
@@ -97,6 +99,8 @@ class AlertManager:
     """
 
     def __init__(self, pagerduty_routing_key: str | None = None):
+        if pagerduty_routing_key is None:
+            pagerduty_routing_key = os.environ.get("PAGERDUTY_ROUTING_KEY", "").strip() or None
         self.routing_key = pagerduty_routing_key
         self.rules: list[AlertRule] = []
         self._fired: dict[str, float] = {}  # rule_name -> last_fired_ts
@@ -187,7 +191,18 @@ class AlertManager:
             )
         )
 
-        # 8. negative_lag_critical: negative_lag_rate > 0.05 -> critical (spec §7.2 Tier 4)
+        # 8. negative_lag_warning: 0.01 < negative_lag_rate <= 0.05 -> warning (Tier 3)
+        self.rules.append(
+            AlertRule(
+                name="negative_lag_warning",
+                description="Negative lag rate between 1% and 5% threshold (Tier 3)",
+                severity="warning",
+                condition="0.01 < negative_lag_rate <= 0.05",
+                evaluate=lambda m: 0.01 < m.get("negative_lag_rate", 0.0) <= 0.05,
+            )
+        )
+
+        # 9. negative_lag_critical: negative_lag_rate > 0.05 -> critical (spec §7.2 Tier 4)
         self.rules.append(
             AlertRule(
                 name="negative_lag_critical",
@@ -198,7 +213,7 @@ class AlertManager:
             )
         )
 
-        # 9. all_workers_idle: all workers idle -> high
+        # 10. all_workers_idle: all workers idle -> high
         self.rules.append(
             AlertRule(
                 name="all_workers_idle",
@@ -209,7 +224,7 @@ class AlertManager:
             )
         )
 
-        # 10. replay_mode_extended: replay_mode > 2 workers for > 5min -> warning
+        # 11. replay_mode_extended: replay_mode > 2 workers for > 5min -> warning
         self.rules.append(
             AlertRule(
                 name="replay_mode_extended",
@@ -220,7 +235,7 @@ class AlertManager:
             )
         )
 
-        # 11. correction_latency_high: avg correction latency > 1h -> warning
+        # 12. correction_latency_high: avg correction latency > 1h -> warning
         self.rules.append(
             AlertRule(
                 name="correction_latency_high",
@@ -231,7 +246,7 @@ class AlertManager:
             )
         )
 
-        # 12. dlq_backlog_critical: dlq_backlog > 50000 -> critical
+        # 13. dlq_backlog_critical: dlq_backlog > 50000 -> critical
         self.rules.append(
             AlertRule(
                 name="dlq_backlog_critical",
@@ -242,7 +257,7 @@ class AlertManager:
             )
         )
 
-        # 13. sketch_drift_high: estimator_drift > 0.5 -> warning
+        # 14. sketch_drift_high: estimator_drift > 0.5 -> warning
         self.rules.append(
             AlertRule(
                 name="sketch_drift_high",
@@ -250,6 +265,17 @@ class AlertManager:
                 severity="warning",
                 condition="estimator_drift > 0.5",
                 evaluate=lambda m: m.get("estimator_drift", 0.0) > 0.5,
+            )
+        )
+
+        # 15. extreme_lag_detected: extreme_lag_count > 0 -> warning (spec §5.5)
+        self.rules.append(
+            AlertRule(
+                name="extreme_lag_detected",
+                description="Extreme lag events detected (lag > max_lag_accepted)",
+                severity="warning",
+                condition="extreme_lag_count > 0",
+                evaluate=lambda m: m.get("extreme_lag_count", 0) > 0,
             )
         )
 
@@ -292,6 +318,8 @@ class AlertManager:
                                     "ingestor_stuck",
                                     "dlq_backlog",
                                     "estimator_drift",
+                                    "negative_lag_rate",
+                                    "extreme_lag_count",
                                 )
                             },
                         }

@@ -3,23 +3,39 @@
 # No real Kafka/ZK/MinIO needed - uses in-memory/file-based alternatives.
 
 services:
-  coordinator:
+  # ── HA Coordinator cluster (3 instances) ──────────────────────────
+
+  coordinator-1: &coordinator-base
     build:
       context: ../..
       dockerfile: refactor/deploy/Dockerfile
     image: csdlpt/refactor:latest
-    container_name: refactor-coordinator
+    container_name: refactor-coordinator-1
     command: ["python3", "-m", "refactor.run", "--role", "coordinator", "--mode", "strict"]
+    profiles: ["strict", "hybrid"]
     environment:
+      PYTHONUNBUFFERED: "1"
       ROLE: coordinator
       MODE: strict
       DELTA_BASE_S: "10.0"
       WINDOW_SIZE_S: "5.0"
       CHECKPOINT_DIR: /data/checkpoint
+      PAGERDUTY_ROUTING_KEY: ""
+      LOG_LEVEL: "${LOG_LEVEL:-info}"
+      RAFT_PEERS: "coordinator-1:8000,coordinator-2:8000,coordinator-3:8000"
+      KAFKA_ENABLE: "true"
+      KAFKA_ENABLE_REAL: "true"
+      KAFKA_BROKER_URL: "kafka:9092"
+      ZK_ENSEMBLE: "true"
+      ZK_HOSTS: "zookeeper:2181"
     ports:
       - "9000:8000"
     volumes:
       - refactor_data:/data
+    restart: unless-stopped
+    depends_on:
+      - zookeeper
+      - kafka
     healthcheck:
       test: ["CMD", "curl", "-sf", "http://localhost:8000/health"]
       interval: 3s
@@ -34,49 +50,178 @@ services:
           cpus: '0.5'
           memory: 512M
 
+  coordinator-2:
+    <<: *coordinator-base
+    container_name: refactor-coordinator-2
+    ports:
+      - "9003:8000"
+    environment:
+      PYTHONUNBUFFERED: "1"
+      ROLE: coordinator
+      MODE: strict
+      DELTA_BASE_S: "10.0"
+      WINDOW_SIZE_S: "5.0"
+      CHECKPOINT_DIR: /data/checkpoint-2
+      PAGERDUTY_ROUTING_KEY: ""
+      LOG_LEVEL: "${LOG_LEVEL:-info}"
+      RAFT_PEERS: "coordinator-1:8000,coordinator-2:8000,coordinator-3:8000"
+      KAFKA_ENABLE: "true"
+      KAFKA_ENABLE_REAL: "true"
+      KAFKA_BROKER_URL: "kafka:9092"
+      ZK_ENSEMBLE: "true"
+      ZK_HOSTS: "zookeeper:2181"
+
+  coordinator-3:
+    <<: *coordinator-base
+    container_name: refactor-coordinator-3
+    ports:
+      - "9004:8000"
+    environment:
+      PYTHONUNBUFFERED: "1"
+      ROLE: coordinator
+      MODE: strict
+      DELTA_BASE_S: "10.0"
+      WINDOW_SIZE_S: "5.0"
+      CHECKPOINT_DIR: /data/checkpoint-3
+      PAGERDUTY_ROUTING_KEY: ""
+      LOG_LEVEL: "${LOG_LEVEL:-info}"
+      RAFT_PEERS: "coordinator-1:8000,coordinator-2:8000,coordinator-3:8000"
+      KAFKA_ENABLE: "true"
+      KAFKA_ENABLE_REAL: "true"
+      KAFKA_BROKER_URL: "kafka:9092"
+      ZK_ENSEMBLE: "true"
+      ZK_HOSTS: "zookeeper:2181"
+
+  # ── HA Aggregator pair ────────────────────────────────────────────
+
   aggregator:
+    build:
+      context: ../..
+      dockerfile: refactor/deploy/Dockerfile
     image: csdlpt/refactor:latest
     container_name: refactor-aggregator
     command: ["python3", "-m", "refactor.run", "--role", "aggregator", "--mode", "heuristic"]
     environment:
+      PYTHONUNBUFFERED: "1"
+      CHECKPOINT_DIR: /data/checkpoint-aggregator
       ROLE: aggregator
       MODE: heuristic
       WINDOW_SIZE_S: "5.0"
       ALPHA: "0.01"
       P_NORMAL: "0.99"
+      PAGERDUTY_ROUTING_KEY: ""
+      KAFKA_ENABLE: "true"
+      KAFKA_ENABLE_REAL: "true"
+      KAFKA_BROKER_URL: "kafka:9092"
+      ZK_HOSTS: "zookeeper:2181"
     ports:
-      - "9001:8000"
+      - "9007:8000"
     volumes:
       - refactor_data:/data
     profiles: ["heuristic", "hybrid"]
+    restart: unless-stopped
+    depends_on:
+      - zookeeper
+      - kafka
+    healthcheck:
+      test: ["CMD", "curl", "-sf", "http://localhost:8000/health"]
+      interval: 10s
+      timeout: 3s
+      retries: 3
     deploy:
       resources:
         limits:
-          cpus: '2.0'
+          cpus: '1.0'
           memory: 2G
         reservations:
           cpus: '0.5'
           memory: 512M
 
+  aggregator-standby:
+    build:
+      context: ../..
+      dockerfile: refactor/deploy/Dockerfile
+    image: csdlpt/refactor:latest
+    container_name: refactor-aggregator-standby
+    command: ["python3", "-m", "refactor.run", "--role", "aggregator", "--mode", "heuristic"]
+    environment:
+      PYTHONUNBUFFERED: "1"
+      CHECKPOINT_DIR: /data/checkpoint-aggregator-standby
+      ROLE: aggregator
+      MODE: heuristic
+      WINDOW_SIZE_S: "5.0"
+      ALPHA: "0.01"
+      P_NORMAL: "0.99"
+      PAGERDUTY_ROUTING_KEY: ""
+      AGGREGATOR_HA_ENABLED: "true"
+      KAFKA_ENABLE: "true"
+      KAFKA_ENABLE_REAL: "true"
+      KAFKA_BROKER_URL: "kafka:9092"
+      ZK_HOSTS: "zookeeper:2181"
+    ports:
+      - "9005:8000"
+    volumes:
+      - refactor_data:/data
+      - aggregator_lock:/lock
+    profiles: ["heuristic", "hybrid"]
+    restart: unless-stopped
+    depends_on:
+      - zookeeper
+      - kafka
+    healthcheck:
+      test: ["CMD", "curl", "-sf", "http://localhost:8000/health"]
+      interval: 10s
+      timeout: 3s
+      retries: 3
+    deploy:
+      resources:
+        limits:
+          cpus: '1.0'
+          memory: 2G
+        reservations:
+          cpus: '0.5'
+          memory: 512M
+
+  # ── Worker nodes (4 instances, 12 partitions total) ───────────────
+
   node0: &node-base
+    build:
+      context: ../..
+      dockerfile: refactor/deploy/Dockerfile
     image: csdlpt/refactor:latest
     container_name: refactor-node0
     command: ["python3", "-m", "refactor.run", "--role", "worker", "--mode", "${MODE:-strict}"]
     environment:
+      PYTHONUNBUFFERED: "1"
       NODE_ID: "0"
       ROLE: worker
       MODE: "${MODE:-strict}"
-      COORDINATOR_URL: http://coordinator:8000
+      COORDINATOR_URL: http://coordinator-1:8000
       AGGREGATOR_URL: http://aggregator:8000
+      AGGREGATOR_STANDBY_URL: http://aggregator-standby:8000
       PARTITIONS: "0,1,2"
       WINDOW_SIZE_S: "5.0"
+      LOG_LEVEL: "${LOG_LEVEL:-info}"
+      PUNCTUATION_MODE: "${PUNCTUATION_MODE:-data-driven}"
+      HEURISTIC_ALPHA: "${HEURISTIC_ALPHA:-0.01}"
+      HEURISTIC_P_NORMAL: "${HEURISTIC_P_NORMAL:-0.99}"
+      HEURISTIC_P_SAFE: "${HEURISTIC_P_SAFE:-0.999}"
+      HEURISTIC_L_MAX: "${HEURISTIC_L_MAX:-60.0}"
+      HEURISTIC_WARMUP_S: "${HEURISTIC_WARMUP_S:-10.0}"
+      HEURISTIC_WARMUP_SAMPLES: "${HEURISTIC_WARMUP_SAMPLES:-1000}"
+      BP_PAUSE_THRESHOLD: "${BP_PAUSE_THRESHOLD:-500}"
+      BP_RESUME_THRESHOLD: "${BP_RESUME_THRESHOLD:-100}"
+      KAFKA_ENABLE: "true"
+      KAFKA_ENABLE_REAL: "true"
+      KAFKA_BROKER_URL: "kafka:9092"
     ports:
       - "9101:8000"
     volumes:
       - refactor_data_node0:/data
+    restart: unless-stopped
     depends_on:
-      coordinator:
-        condition: service_healthy
+      kafka:
+        condition: service_started
     deploy:
       resources:
         limits:
@@ -90,13 +235,28 @@ services:
     <<: *node-base
     container_name: refactor-node1
     environment:
+      PYTHONUNBUFFERED: "1"
       NODE_ID: "1"
       ROLE: worker
       MODE: "${MODE:-strict}"
-      COORDINATOR_URL: http://coordinator:8000
+      COORDINATOR_URL: http://coordinator-1:8000
       AGGREGATOR_URL: http://aggregator:8000
+      AGGREGATOR_STANDBY_URL: http://aggregator-standby:8000
       PARTITIONS: "3,4,5"
       WINDOW_SIZE_S: "5.0"
+      LOG_LEVEL: "${LOG_LEVEL:-info}"
+      PUNCTUATION_MODE: "${PUNCTUATION_MODE:-data-driven}"
+      HEURISTIC_ALPHA: "${HEURISTIC_ALPHA:-0.01}"
+      HEURISTIC_P_NORMAL: "${HEURISTIC_P_NORMAL:-0.99}"
+      HEURISTIC_P_SAFE: "${HEURISTIC_P_SAFE:-0.999}"
+      HEURISTIC_L_MAX: "${HEURISTIC_L_MAX:-60.0}"
+      HEURISTIC_WARMUP_S: "${HEURISTIC_WARMUP_S:-10.0}"
+      HEURISTIC_WARMUP_SAMPLES: "${HEURISTIC_WARMUP_SAMPLES:-1000}"
+      BP_PAUSE_THRESHOLD: "${BP_PAUSE_THRESHOLD:-500}"
+      BP_RESUME_THRESHOLD: "${BP_RESUME_THRESHOLD:-100}"
+      KAFKA_ENABLE: "true"
+      KAFKA_ENABLE_REAL: "true"
+      KAFKA_BROKER_URL: "kafka:9092"
     ports:
       - "9102:8000"
     volumes:
@@ -106,13 +266,28 @@ services:
     <<: *node-base
     container_name: refactor-node2
     environment:
+      PYTHONUNBUFFERED: "1"
       NODE_ID: "2"
       ROLE: worker
       MODE: "${MODE:-strict}"
-      COORDINATOR_URL: http://coordinator:8000
+      COORDINATOR_URL: http://coordinator-1:8000
       AGGREGATOR_URL: http://aggregator:8000
+      AGGREGATOR_STANDBY_URL: http://aggregator-standby:8000
       PARTITIONS: "6,7,8"
       WINDOW_SIZE_S: "5.0"
+      LOG_LEVEL: "${LOG_LEVEL:-info}"
+      PUNCTUATION_MODE: "${PUNCTUATION_MODE:-data-driven}"
+      HEURISTIC_ALPHA: "${HEURISTIC_ALPHA:-0.01}"
+      HEURISTIC_P_NORMAL: "${HEURISTIC_P_NORMAL:-0.99}"
+      HEURISTIC_P_SAFE: "${HEURISTIC_P_SAFE:-0.999}"
+      HEURISTIC_L_MAX: "${HEURISTIC_L_MAX:-60.0}"
+      HEURISTIC_WARMUP_S: "${HEURISTIC_WARMUP_S:-10.0}"
+      HEURISTIC_WARMUP_SAMPLES: "${HEURISTIC_WARMUP_SAMPLES:-1000}"
+      BP_PAUSE_THRESHOLD: "${BP_PAUSE_THRESHOLD:-500}"
+      BP_RESUME_THRESHOLD: "${BP_RESUME_THRESHOLD:-100}"
+      KAFKA_ENABLE: "true"
+      KAFKA_ENABLE_REAL: "true"
+      KAFKA_BROKER_URL: "kafka:9092"
     ports:
       - "9103:8000"
     volumes:
@@ -122,35 +297,72 @@ services:
     <<: *node-base
     container_name: refactor-node3
     environment:
+      PYTHONUNBUFFERED: "1"
       NODE_ID: "3"
       ROLE: worker
       MODE: "${MODE:-strict}"
-      COORDINATOR_URL: http://coordinator:8000
+      COORDINATOR_URL: http://coordinator-1:8000
       AGGREGATOR_URL: http://aggregator:8000
+      AGGREGATOR_STANDBY_URL: http://aggregator-standby:8000
       PARTITIONS: "9,10,11"
       WINDOW_SIZE_S: "5.0"
+      LOG_LEVEL: "${LOG_LEVEL:-info}"
+      PUNCTUATION_MODE: "${PUNCTUATION_MODE:-data-driven}"
+      HEURISTIC_ALPHA: "${HEURISTIC_ALPHA:-0.01}"
+      HEURISTIC_P_NORMAL: "${HEURISTIC_P_NORMAL:-0.99}"
+      HEURISTIC_P_SAFE: "${HEURISTIC_P_SAFE:-0.999}"
+      HEURISTIC_L_MAX: "${HEURISTIC_L_MAX:-60.0}"
+      HEURISTIC_WARMUP_S: "${HEURISTIC_WARMUP_S:-10.0}"
+      HEURISTIC_WARMUP_SAMPLES: "${HEURISTIC_WARMUP_SAMPLES:-1000}"
+      BP_PAUSE_THRESHOLD: "${BP_PAUSE_THRESHOLD:-500}"
+      BP_RESUME_THRESHOLD: "${BP_RESUME_THRESHOLD:-100}"
+      KAFKA_ENABLE: "true"
+      KAFKA_ENABLE_REAL: "true"
+      KAFKA_BROKER_URL: "kafka:9092"
     ports:
       - "9104:8000"
     volumes:
       - refactor_data_node3:/data
 
+  # ── Ingestor ──────────────────────────────────────────────────────
+
   ingestor:
+    build:
+      context: ../..
+      dockerfile: refactor/deploy/Dockerfile
     image: csdlpt/refactor:latest
     container_name: refactor-ingestor
     command: ["python3", "-m", "refactor.run", "--role", "ingestor"]
+    profiles: ["strict", "heuristic", "hybrid"]
     environment:
+      PYTHONUNBUFFERED: "1"
       ROLE: ingestor
       NODE_HOSTS: "node0:8000,node1:8000,node2:8000,node3:8000"
-      COORDINATOR_URL: http://coordinator:8000
+      COORDINATOR_URL: http://coordinator-1:8000
+      AGGREGATOR_URL: http://aggregator:8000
       MODE: "${MODE:-strict}"
+      LOG_LEVEL: "${LOG_LEVEL:-info}"
+      PUNCTUATION_MODE: "${PUNCTUATION_MODE:-data-driven}"
+      KAFKA_ENABLE: "true"
+      KAFKA_ENABLE_REAL: "true"
+      KAFKA_BROKER_URL: "kafka:9092"
+      SOURCE: "/data/${DATASET_FILE:-data.csv}"
+      TOTAL_PARTITIONS: "12"
     volumes:
       - ../../dataset:/data:ro
-    profiles: ["manual"]
+    restart: unless-stopped
     depends_on:
       - node0
       - node1
       - node2
       - node3
+      - kafka
+    healthcheck:
+      test: ["CMD", "curl", "-sf", "http://localhost:8100/health"]
+      interval: 3s
+      timeout: 2s
+      retries: 5
+
     deploy:
       resources:
         limits:
@@ -160,9 +372,108 @@ services:
           cpus: '0.5'
           memory: 512M
 
+  # ── ZooKeeper ─────────────────────────────────────────────────────
+
+  zookeeper:
+    image: confluentinc/cp-zookeeper:7.5.0
+    container_name: refactor-zookeeper
+    ports:
+      - "2181:2181"
+    environment:
+      PYTHONUNBUFFERED: "1"
+      ZOOKEEPER_CLIENT_PORT: 2181
+      ZOOKEEPER_TICK_TIME: 2000
+    restart: unless-stopped
+
+  # ── Kafka ─────────────────────────────────────────────────────────
+
+  kafka:
+    image: confluentinc/cp-kafka:7.5.0
+    container_name: refactor-kafka
+    depends_on:
+      - zookeeper
+    ports:
+      - "9092:9092"
+    environment:
+      PYTHONUNBUFFERED: "1"
+      KAFKA_BROKER_ID: 1
+      KAFKA_ZOOKEEPER_CONNECT: zookeeper:2181
+      KAFKA_ADVERTISED_LISTENERS: PLAINTEXT://kafka:9092,PLAINTEXT_HOST://localhost:29092
+      KAFKA_LISTENER_SECURITY_PROTOCOL_MAP: PLAINTEXT:PLAINTEXT,PLAINTEXT_HOST:PLAINTEXT
+      KAFKA_INTER_BROKER_LISTENER_NAME: PLAINTEXT
+      KAFKA_NUM_PARTITIONS: 12
+      KAFKA_OFFSETS_TOPIC_REPLICATION_FACTOR: 1
+    restart: unless-stopped
+
+  # ── Prometheus ────────────────────────────────────────────────────
+
+  prometheus:
+    image: prom/prometheus:v2.50.0
+    container_name: refactor-prometheus
+    command:
+      - '--config.file=/etc/prometheus/prometheus.yml'
+      - '--storage.tsdb.path=/prometheus'
+      - '--web.console.libraries=/usr/share/prometheus/console_libraries'
+      - '--web.console.templates=/usr/share/prometheus/consoles'
+    ports:
+      - "9090:9090"
+    volumes:
+      - ./prometheus.yml:/etc/prometheus/prometheus.yml:ro
+      - ./prometheus-rules.yml:/etc/prometheus/prometheus-rules.yml:ro
+      - prometheus_data:/prometheus
+    restart: unless-stopped
+    depends_on:
+      - kafka
+
+  # ── Grafana ───────────────────────────────────────────────────────
+
+  grafana:
+    image: grafana/grafana:10.3.0
+    container_name: refactor-grafana
+    environment:
+      - PYTHONUNBUFFERED=1
+      - GF_SECURITY_ADMIN_PASSWORD=admin
+      - GF_INSTALL_PLUGINS=grafana-piechart-panel
+    ports:
+      - "3000:3000"
+    volumes:
+      - grafana_data:/var/lib/grafana
+      - ./grafana-dashboard.json:/etc/grafana/provisioning/dashboards/csdlpt.json:ro
+    restart: unless-stopped
+    depends_on:
+      - prometheus
+
+  # ── MinIO ─────────────────────────────────────────────────────────
+
+  minio:
+    image: minio/minio:RELEASE.2024-01-16T16-07-38Z
+    container_name: refactor-minio
+    command: server /data --console-address ":9001"
+    environment:
+      - PYTHONUNBUFFERED=1
+      - MINIO_ROOT_USER=minioadmin
+      - MINIO_ROOT_PASSWORD=minioadmin
+    ports:
+      - "9002:9000"
+      - "9001:9001"
+    volumes:
+      - minio_data:/data
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:9000/minio/health/live"]
+      interval: 5s
+      timeout: 3s
+      retries: 5
+
+# ── Volumes ─────────────────────────────────────────────────────────
+
 volumes:
   refactor_data:
   refactor_data_node0:
   refactor_data_node1:
   refactor_data_node2:
   refactor_data_node3:
+  prometheus_data:
+  grafana_data:
+  minio_data:
+  aggregator_lock:

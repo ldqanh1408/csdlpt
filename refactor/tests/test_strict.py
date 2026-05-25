@@ -37,13 +37,33 @@ class TestStrictWatermarkEngine:
         assert eng.last_T_commit == 100.0
 
     def test_dedup(self):
+        # §8.4 + §6.5: dedup is the inner filter — the outer Watermark Filter
+        # runs first and drops events whose window has already closed. Use an
+        # event whose window is still open under the current watermark so the
+        # inner hash filter is the one that catches the duplicate.
         eng = StrictWatermarkEngine()
-        eng.on_punctuation(PunctuationToken(T_commit=200.0, partition_id=0, ingestor_id="t"))
-        e = LogEvent(event_id="dup-1", event_time=100.0, status=200)
+        eng.on_punctuation(PunctuationToken(T_commit=110.0, partition_id=0, ingestor_id="t"))
+        e = LogEvent(event_id="dup-1", event_time=200.0, status=200)
         eng.process(e)
         eng.process(e)  # duplicate
         assert eng.metrics.duplicates == 1
         assert eng.metrics.on_time == 1
+
+    def test_watermark_filter_runs_before_hash_filter(self):
+        # §6.5 invariant: any event with window_end <= W must be dropped by
+        # the outer Watermark Filter BEFORE reaching the hash filter, so the
+        # dedup TTL only needs to cover ~δ_base seconds of recent IDs.
+        eng = StrictWatermarkEngine()
+        eng.on_punctuation(PunctuationToken(T_commit=300.0, partition_id=0, ingestor_id="t"))
+        # event_time=100 → window=[100,105], which is far behind W=290.
+        late = LogEvent(event_id="late-1", event_time=100.0, status=200)
+        eng.process(LogEvent(event_id="trigger", event_time=200.0, status=200))
+        before_late = eng.metrics.late_dropped
+        before_dup = eng.metrics.duplicates
+        eng.process(late)
+        assert eng.metrics.late_dropped == before_late + 1
+        assert eng.metrics.duplicates == before_dup  # never reached the hash filter
+        assert "late-1" not in eng._seen_ids_ttl
 
     def test_window_closing(self):
         eng = StrictWatermarkEngine(window_size_s=5.0, delta_base_s=10.0)

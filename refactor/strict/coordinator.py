@@ -48,6 +48,7 @@ class StrictCoordinator:
         self._skew_status: str = "OK"
         self._lag_status: str = "OK"
         self._combined_status: str = "Initializing"
+        self._combined_diagnosis: str = "Initializing"
 
         # Optional failover manager reference (injected after construction)
         self._failover_manager: object | None = None
@@ -94,6 +95,11 @@ class StrictCoordinator:
         """Inject a FailoverManager so broadcast() can include partition_types
         and recovery_info for workers."""
         self._failover_manager = fm
+
+    def set_ingestor_health(self, health_monitor: object) -> None:
+        """Inject an IngestorHealthMonitor so broadcast() can include
+        W_meta_global and ingestor health state for Raft replication."""
+        self._ingestor_health = health_monitor
 
     def receive_heartbeat(self, hb: WorkerHeartbeat) -> None:
         now = time.time()
@@ -202,6 +208,18 @@ class StrictCoordinator:
         else:
             self._combined_status = "Warning"
 
+        # §7.3 Vietnamese diagnosis strings from 2x2 skew/lag matrix
+        _high_skew = self._node_skew_max_ms > 1000
+        _high_lag = self._watermark_lag_s > 30
+        if not _high_skew and not _high_lag:
+            self._combined_diagnosis = "Healthy"
+        elif _high_skew and not _high_lag:
+            self._combined_diagnosis = "Mot Node bottleneck cu the"
+        elif not _high_skew and _high_lag:
+            self._combined_diagnosis = "Cum cham deu"
+        else:
+            self._combined_diagnosis = "Cum cham + co Node yeu hon"
+
     def broadcast(self) -> dict:
         result = {
             "W_global": self.W_global,
@@ -215,6 +233,7 @@ class StrictCoordinator:
             "skew_status": self._skew_status,
             "lag_status": self._lag_status,
             "combined_status": self._combined_status,
+            "combined_diagnosis": self._combined_diagnosis,
         }
         if self._failover_manager is not None:
             fm = self._failover_manager
@@ -226,6 +245,12 @@ class StrictCoordinator:
                 if owner != orig:
                     recovery_info[pid] = fm.get_partition_recovery_info(pid)
             result["recovery_info"] = recovery_info
+        ingestor = getattr(self, "_ingestor_health", None)
+        if ingestor is not None:
+            result["ingestor_health"] = {
+                "W_meta_global": getattr(ingestor, "W_meta_global", 0.0),
+                "summary": ingestor.summary() if hasattr(ingestor, "summary") else {},
+            }
         return result
 
     def save_state(self) -> None:
@@ -246,6 +271,22 @@ class StrictCoordinator:
         with open(tmp, "w") as f:
             json.dump(state, f)
         os.replace(tmp, self.state_path)
+
+    def checkpoint(self) -> None:
+        self.save_state()
+        if self._store is not None:
+            self._store.flush()
+
+    def flush(self) -> None:
+        self.save_state()
+        if self._store is not None:
+            self._store.flush()
+
+    def close(self) -> None:
+        self.save_state()
+        if self._store is not None:
+            self._store.close()
+            self._store = None
 
         # RocksDB state persistence
         if self._store is not None:

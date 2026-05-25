@@ -85,6 +85,8 @@ class Config:
     alert_interval_s: float = _env_float("ALERT_INTERVAL_S", 10.0)
     source_path: str = os.environ.get("SOURCE", "")
     punctuation_interval_s: float = _env_float("PUNCTUATION_INTERVAL_S", 1.0)
+    wm_emit_interval_s: float = _env_float("WM_EMIT_INTERVAL_S", 0.2)
+    agg_emit_interval_s: float = _env_float("AGG_EMIT_INTERVAL_S", 0.5)
     # Feature flags (§6.4)
     enable_adaptive_percentile: bool = _env_bool("ENABLE_ADAPTIVE_PERCENTILE", True)
     enable_replay_sub_checkpointing: bool = _env_bool("ENABLE_REPLAY_SUB_CHECKPOINTING", True)
