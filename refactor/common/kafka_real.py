@@ -205,7 +205,7 @@ class KafkaProducer:
 
         self.producer = PyKafkaProducer(**kafka_kwargs)
 
-    def send(self, topic: str, value, key: str = None, partition: int = None) -> dict:
+    def send(self, topic: str, value, key: str = None, partition: int = None, sync: bool = True) -> dict:
         if isinstance(value, dict):
             val_bytes = json.dumps(value).encode('utf-8')
         elif isinstance(value, str):
@@ -219,6 +219,12 @@ class KafkaProducer:
 
         try:
             future = self.producer.send(topic, value=val_bytes, key=key_bytes, partition=partition)
+            if not sync:
+                return {
+                    "topic": topic,
+                    "partition": partition if partition is not None else -1,
+                    "offset": -1,
+                }
             metadata = future.get(timeout=5.0)
             return {
                 "topic": metadata.topic,

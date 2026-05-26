@@ -47,12 +47,12 @@ DEFAULT_PARAMS = {
     "p_normal": 0.99,
     "p_safe": 0.999,
     "max_buckets": 1024,
-    "max_lag_accepted": 3600.0,
+    "max_lag_accepted": 10000000.0,
     "window_seconds": 60,
     "sub_sketch_granularity": 1,
     "warmup_min_seconds": 10,
-    "warmup_min_samples": 1000,
-    "L_max": 60.0,
+    "warmup_min_samples": 50000,
+    "L_max": 10000000.0,
     "wm_max_advance_rate": 1.5,
     "l_eff_update_threshold": 0.10,
     "baseline_multiplier": 10,
@@ -76,6 +76,11 @@ class HeuristicWatermarkEngine:
 
     def __init__(self, partition_id: int = 0, worker_id: str = "", **kwargs):
         cfg = {**DEFAULT_PARAMS, **kwargs}
+        cfg["L_max"] = float(os.environ.get("HEURISTIC_L_MAX", cfg["L_max"]))
+        cfg["max_lag_accepted"] = float(os.environ.get("HEURISTIC_MAX_LAG_ACCEPTED", os.environ.get("HEURISTIC_L_MAX", cfg["max_lag_accepted"])))
+        cfg["warmup_min_samples"] = int(os.environ.get("HEURISTIC_WARMUP_SAMPLES", cfg["warmup_min_samples"]))
+        cfg["warmup_min_seconds"] = float(os.environ.get("HEURISTIC_WARMUP_S", cfg["warmup_min_seconds"]))
+        cfg["wm_max_advance_rate"] = float(os.environ.get("HEURISTIC_WM_ADVANCE_RATE", cfg["wm_max_advance_rate"]))
         self.partition_id = partition_id
         self.worker_id = worker_id
 
@@ -101,6 +106,7 @@ class HeuristicWatermarkEngine:
         # Watermark state
         self.W_h: float = float("-inf")
         self.W_h_prev: float = float("-inf")
+        self.W_global_h: float = float("-inf")
         self.max_event_time: float = float("-inf")
         self.L_eff: float = cfg["L_max"]
         self.L_eff_prev: float = cfg["L_max"]
@@ -272,6 +278,7 @@ class HeuristicWatermarkEngine:
         meta = self._store.get(f"{_PFX_META}checkpoint")
         if meta is not None:
             self.W_h = meta.get("W_h", float("-inf"))
+            self.W_global_h = meta.get("W_global_h", float("-inf"))
             self.max_event_time = meta.get("max_event_time", float("-inf"))
             self.L_eff = meta.get("L_eff", self.L_max)
             self.in_replay_mode = meta.get("in_replay_mode", False)
@@ -322,6 +329,7 @@ class HeuristicWatermarkEngine:
         if self._store is not None:
             meta = {
                 "W_h": self.W_h,
+                "W_global_h": self.W_global_h,
                 "max_event_time": self.max_event_time,
                 "L_eff": self.L_eff,
                 "in_replay_mode": self.in_replay_mode,
@@ -343,6 +351,7 @@ class HeuristicWatermarkEngine:
         with open(sketch_tmp, "w") as f:
             json.dump({
                 "W_h": self.W_h,
+                "W_global_h": self.W_global_h,
                 "L_eff": self.L_eff,
                 "max_event_time": self.max_event_time,
                 "sketch": self.sketch.to_dict(),
@@ -366,6 +375,7 @@ class HeuristicWatermarkEngine:
             with open(sketch_path, "r") as f:
                 data = json.load(f)
             self.W_h = data.get("W_h", float("-inf"))
+            self.W_global_h = data.get("W_global_h", float("-inf"))
             self.L_eff = data.get("L_eff", self.L_max)
             self.max_event_time = data.get("max_event_time", float("-inf"))
             sketch_data = data.get("sketch")
@@ -393,17 +403,23 @@ class HeuristicWatermarkEngine:
 
         candidate = self.max_event_time - self.L_eff
 
+        # On the first real W_h computation (W_h_prev == -inf), initialize
+        # W_h_prev to candidate so that rate-limiting applies from the very
+        # first call and the watermark cannot jump unconstrained.
+        if self.W_h_prev == float("-inf"):
+            self.W_h_prev = candidate
+
         # Monotonic enforcement
         self.W_h = max(self.W_h_prev, candidate)
 
         # Rate limiting (hysteresis — bound advance by elapsed wall-clock time)
-        if self.W_h_prev > float("-inf"):
-            if self._last_wm_update_time > 0:
-                elapsed = time.time() - self._last_wm_update_time
-            else:
-                elapsed = time.time() - self.start_time
-            max_advance = elapsed * self.wm_max_advance_rate
-            self.W_h = min(self.W_h, self.W_h_prev + max_advance + self.tumbling.size)
+        if self._last_wm_update_time > 0:
+            elapsed = time.time() - self._last_wm_update_time
+        else:
+            elapsed = time.time() - self.start_time
+        max_advance = elapsed * self.wm_max_advance_rate
+        added_size = self.tumbling.size if elapsed > 0.1 else 0.0
+        self.W_h = min(self.W_h, self.W_h_prev + max_advance + added_size)
         self._last_wm_update_time = time.time()
 
         return self.W_h
@@ -501,15 +517,21 @@ class HeuristicWatermarkEngine:
             self.sketch.alpha = 0.01
             self._current_alpha = 0.01
 
+    def update_global_watermark(self, W_global_h: float) -> None:
+        """Update global watermark copy and proactively close windows."""
+        self.W_global_h = max(self.W_global_h, W_global_h)
+        self._close_windows()
+
     def _close_windows(self) -> None:
-        """Close windows where W_h >= window_end."""
+        """Close windows where W_h (or W_global_h) >= window_end."""
         # Skip window closing during cold start Phase 0
         if self.cold_start.phase.name == "PHASE_0":
             return
 
+        w_limit = self.W_global_h if self.W_global_h > float("-inf") else self.W_h
         to_close = [
             w for w in self.open_windows
-            if w + self.tumbling.size <= self.W_h
+            if w + self.tumbling.size <= w_limit
         ]
         for w in sorted(to_close):
             agg = self.open_windows.pop(w)
@@ -621,7 +643,7 @@ class HeuristicWatermarkEngine:
         self.metrics.total_received += 1
 
         if arrival_time is None:
-            arrival_time = time.time()
+            arrival_time = getattr(event, "arrival_time", None) or time.time()
 
         # Dedup (TTL-bounded — §6.5)
         if event.event_id in self.seen_ids:

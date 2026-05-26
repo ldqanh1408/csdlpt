@@ -75,11 +75,20 @@ class ColdStartManager:
         return self.phase in (ColdStartPhase.PHASE_1, ColdStartPhase.NORMAL)
 
     def get_L_eff(self, sketch_quantile: float = None) -> float:
-        """Get effective lag based on current phase."""
+        """Get effective lag based on current phase.
+
+        Phase 2 (NORMAL): use sketch P99, capped at L_max.
+        Phase 1 (warm-up): use sketch P99 as a floor ≥ conservative prior
+          (L_max).  This prevents the watermark from advancing aggressively
+          while the sketch is still collecting samples.
+        Phase 0 or no sketch: use conservative prior (= L_max).
+        """
         if self.phase == ColdStartPhase.NORMAL and sketch_quantile is not None:
             return min(sketch_quantile, self.L_max)
         if self.phase == ColdStartPhase.PHASE_1 and sketch_quantile is not None:
-            return min(sketch_quantile, self.conservative_prior())
+            # Conservative: take the LARGER of sketch estimate vs prior so
+            # L_eff is at least L_max during warm-up.
+            return max(sketch_quantile, self.conservative_prior())
         return self.conservative_prior()
 
     # ---- MinIO baseline persistence (Spec §6.5) ----

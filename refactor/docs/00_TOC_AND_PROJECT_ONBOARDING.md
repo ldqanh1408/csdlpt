@@ -24,6 +24,8 @@ This documentation suite is structured into 8 distinct sections to reflect the t
    * Local setup, file mapping, testing strategy, and CLI command execution.
 8. **[Document 07: Gap Analysis and Limitations](file:///D:/dev/csdlpt/refactor/docs/07_GAP_ANALYSIS_AND_LIMITATIONS.md)**
    * Summary of completed gaps, security out-of-scope details (TLS, SASL/SCRAM, mTLS), and compose configurations.
+9. **[Document 08: Strict Watermark Completeness Fix Report](file:///D:/dev/csdlpt/refactor/docs/08_STRICT_WATERMARK_COMPLETENESS_FIX.md)**
+   * Technical report on solving the 100% completeness issue, analyzing dataset out-of-order bounds, and optimization techniques (async producer, backpressure recovery).
 
 ---
 

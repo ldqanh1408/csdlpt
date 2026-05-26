@@ -1174,7 +1174,7 @@ def _run_strict_worker(node_id, parts, args):
                 event_id=str(ev.get("event_id", f"ev-{time.time_ns()}")),
                 event_time=float(ev.get("event_time", time.time())),
                 status=int(ev.get("status", 200)),
-                arrival_time=time.time(),
+                arrival_time=float(ev.get("arrival_time", time.time())),
                 poll_received_at=time.time(),
                 schema_version=int(ev.get("schema_version", 1)),
             )
@@ -1274,7 +1274,7 @@ def _run_strict_worker(node_id, parts, args):
                                 event_id=str(ev.get("event_id", f"kafka-{msg['offset']}")),
                                 event_time=float(ev.get("event_time", time.time())),
                                 status=int(ev.get("status", 200)),
-                                arrival_time=time.time(),
+                                arrival_time=float(ev.get("arrival_time", time.time())),
                                 poll_received_at=time.time(),
                                 offset=msg["offset"],
                                 schema_version=int(ev.get("schema_version", 1)),
@@ -1294,7 +1294,8 @@ def _run_strict_worker(node_id, parts, args):
                             committed_offsets[pid] = msg["offset"] + 1
                             worker_kafka_offsets[pid] = msg["offset"] + 1
                             poll_total[0] += 1
-                        # Kafka backpressure: consumer.pause() when buffer full
+                    # Kafka backpressure: check all assigned partitions
+                    for pid in kafka_consumer.assigned_partitions():
                         buf_len = len(worker.buffers.get(pid, []))
                         if buf_len >= BACKPRESSURE_MAX_QUEUE:
                             kafka_consumer.pause([pid])
@@ -1581,7 +1582,7 @@ def _run_heuristic_worker(node_id, parts, args):
                 event_id=str(ev.get("event_id", f"ev-{time.time_ns()}")),
                 event_time=float(ev.get("event_time", time.time())),
                 status=int(ev.get("status", 200)),
-                arrival_time=time.time(),
+                arrival_time=float(ev.get("arrival_time", time.time())),
                 poll_received_at=time.time(),
                 schema_version=int(ev.get("schema_version", 1)),
             )
@@ -1721,7 +1722,7 @@ def _run_heuristic_worker(node_id, parts, args):
                                 event_id=str(ev.get("event_id", f"kafka-{msg['offset']}")),
                                 event_time=float(ev.get("event_time", time.time())),
                                 status=int(ev.get("status", 200)),
-                                arrival_time=time.time(),
+                                arrival_time=float(ev.get("arrival_time", time.time())),
                                 poll_received_at=time.time(),
                                 offset=msg["offset"],
                                 schema_version=int(ev.get("schema_version", 1)),
@@ -1746,8 +1747,13 @@ def _run_heuristic_worker(node_id, parts, args):
                                     })
                                 except Exception:
                                     pass
-                        # Report buffer depth for backpressure tracking
-                        bp.report_buffer(node_id, pid, len(eng.open_windows) + len(eng.late_events))
+                        # Report buffer depth for backpressure tracking.
+                        # In heuristic mode open_windows accumulates across
+                        # the entire event-time range (can be millions of
+                        # 5-second windows). Using that as the buffer metric
+                        # causes an immediate, permanent backpressure deadlock.
+                        # Instead, report the actual inbound queue depth.
+                        bp.report_buffer(node_id, pid, eng.queue_size)
                     if committed_offsets:
                         kafka_consumer.commit(committed_offsets)
                         committed_offsets.clear()
@@ -1952,6 +1958,36 @@ def _run_heuristic_worker(node_id, parts, args):
                   f"[{part_info}]", file=sys.stderr)
     threading.Thread(target=progress_log_loop, daemon=True).start()
 
+    # W_global_h fetch loop — pull global watermark from aggregator every 500ms
+    def wglobal_fetch_loop():
+        import urllib.request
+        while not stop.is_set():
+            time.sleep(0.5)
+            W_global_h = None
+            try:
+                req = urllib.request.Request(aggregator_url + "/state")
+                with urllib.request.urlopen(req, timeout=2) as resp:
+                    data = json.loads(resp.read().decode())
+                    if data.get("ha_active", True) or aggregator_url == aggregator_standby_url:
+                        W_global_h = float(data["W_global_h"])
+            except Exception:
+                pass
+
+            if W_global_h is None and aggregator_standby_url != aggregator_url:
+                try:
+                    req = urllib.request.Request(aggregator_standby_url + "/state")
+                    with urllib.request.urlopen(req, timeout=2) as resp:
+                        data = json.loads(resp.read().decode())
+                        if data.get("ha_active", True):
+                            W_global_h = float(data["W_global_h"])
+                except Exception:
+                    pass
+
+            if W_global_h is not None and W_global_h > float("-inf"):
+                for eng in engines.values():
+                    eng.update_global_watermark(W_global_h)
+    threading.Thread(target=wglobal_fetch_loop, daemon=True).start()
+
     print(f"[worker-heuristic:{node_id}] listening on :{port}, partitions={parts}")
     _wait_shutdown(stop, srv, state)
 
@@ -2008,7 +2044,7 @@ def _run_hybrid_worker(node_id, parts, args):
                 event_id=str(ev.get("event_id", f"ev-{time.time_ns()}")),
                 event_time=float(ev.get("event_time", time.time())),
                 status=int(ev.get("status", 200)),
-                arrival_time=time.time(),
+                arrival_time=float(ev.get("arrival_time", time.time())),
                 poll_received_at=time.time(),
                 schema_version=int(ev.get("schema_version", 1)),
             )
@@ -2129,11 +2165,20 @@ def run_ingestor(args):
     csv_file = None
     csv_first_time = None
     csv_wall_base = time.time()
+    last_simulated_arrival_time = [csv_wall_base]
     events = []
     if source and os.path.exists(source):
         if source.endswith('.csv'):
             import csv as _csv
-            csv_file = open(source)
+            csv_file = open(source, encoding='utf-8')
+            csv_reader = _csv.DictReader(csv_file)
+            try:
+                first_row = next(csv_reader)
+                csv_first_time = float(first_row.get('time', '0'))
+            except StopIteration:
+                pass
+            
+            csv_file.seek(0)
             csv_reader = _csv.DictReader(csv_file)
         else:
             with open(source) as f:
@@ -2164,9 +2209,13 @@ def run_ingestor(args):
             csv_first_time = csv_time
         offset = csv_time - csv_first_time
         event_time = csv_wall_base + offset
+        sim_lag = float(os.environ.get("SIMULATED_LAG_S", "2.0"))
+        next_arr = max(last_simulated_arrival_time[0] + 0.001, event_time + sim_lag)
+        last_simulated_arrival_time[0] = next_arr
         return {
             "event_id": f"csv-{row.get('', '0')}",
             "event_time": event_time,
+            "arrival_time": next_arr,
             "status": int(row.get('response', '200')),
             "partition_id": hash(host) % 12,
             "payload": {
@@ -2220,7 +2269,7 @@ def run_ingestor(args):
     # stays behind ALL events in the CSV. In simulation, all events are "historical"
     # from the system's perspective, so none should be late.
     max_event_time_sent: float = 0.0
-    min_event_time_sent: float = float("inf")
+    min_event_time_sent: float = 0.0
     max_event_time_per_part: dict[int, float] = {}
     punctuation_mode = os.environ.get("PUNCTUATION_MODE", "data-driven")
     # Log level for tracing event flow through the pipeline
@@ -2242,7 +2291,8 @@ def run_ingestor(args):
         """Send event via KafkaProducer (acks=all)."""
         _update_max_event_time(ev)
         result = kafka_producer.send("events", ev, key=ev.get("event_id", ""),
-                                     partition=ev.get("partition_id", 0) % 12)
+                                     partition=ev.get("partition_id", 0) % 12,
+                                     sync=False)
         if "error" not in result:
             ingested[0] += 1
             ingested_total[0] += 1
@@ -2291,10 +2341,17 @@ def run_ingestor(args):
 
         if punctuation_mode == "wall-clock":
             T_commit = time.time() - 10.0
+        elif punctuation_mode == "max-event-time":
+            # Driven by max_event_time_sent for sorted datasets to progress watermark dynamically
+            if not eof_reached[0] and max_event_time_sent > 0:
+                T_commit = max_event_time_sent
+            elif eof_reached[0] and max_event_time_sent > 0:
+                T_commit = max_event_time_sent + float(os.environ.get("DELTA_BASE_S", "10.0"))
+            else:
+                T_commit = time.time()
         else:
-            # Data-driven: anchor watermark at the oldest event so nothing is
-            # ever late. After EOF, jump to max_et + delta_base to close all
-            # windows in one shot.
+            # Data-driven (default/min-event-time): anchor watermark at the oldest event so nothing is
+            # ever late. After EOF, jump to max_et + delta_base to close all windows in one shot.
             if not eof_reached[0] and min_event_time_sent != float("inf"):
                 # Ingesting phase: hold watermark behind all events
                 T_commit = min_event_time_sent
@@ -2304,11 +2361,10 @@ def run_ingestor(args):
             else:
                 T_commit = time.time()
 
-        if _log_trace:
-            print(f"[ingestor] punctuation T_commit={T_commit:.3f} "
-                  f"min_et={min_event_time_sent:.3f} max_et={max_event_time_sent:.3f} "
-                  f"eof={eof_reached[0]} mode={punctuation_mode} is_empty={is_empty}",
-                  file=sys.stderr)
+        print(f"[ingestor] punctuation T_commit={T_commit:.3f} "
+              f"min_et={min_event_time_sent:.3f} max_et={max_event_time_sent:.3f} "
+              f"eof={eof_reached[0]} mode={punctuation_mode} is_empty={is_empty}",
+              file=sys.stderr)
 
         for pid, host in node_for_partition.items():
             try:
@@ -2371,6 +2427,8 @@ def run_ingestor(args):
                         eof = True
                         eof_reached[0] = True
                         print(f"[ingestor] CSV EOF at event {idx}, switching to idle loop", file=sys.stderr)
+                        if kafka_producer is not None:
+                            kafka_producer.flush()
                         continue
                 else:
                     # EOF reached, just send punctuations on idle loop
@@ -2381,6 +2439,8 @@ def run_ingestor(args):
                     continue
             else:
                 ev = events[idx % len(events)]
+            if "arrival_time" not in ev:
+                ev["arrival_time"] = ev.get("event_time", time.time()) + 2.0
             pid = ev.get("partition_id", 0)
 
             to_send = []
@@ -2404,7 +2464,10 @@ def run_ingestor(args):
 
             last_log_offsets[pid] = idx
             idx += 1
-            time.sleep(0.01)
+            
+            sleep_s = float(os.environ.get("INGESTOR_SLEEP_S", "0.01"))
+            if sleep_s > 0:
+                time.sleep(sleep_s)
 
             if mode == "strict" and (time.time() - last_punctuation[0]) > punctuation_interval:
                 send_punctuation()

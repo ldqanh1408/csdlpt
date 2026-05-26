@@ -372,7 +372,7 @@ def _collect_partition_data(metrics: dict):
     """Extract per-partition engine summaries from all workers."""
     rows = []
     for wname, wdata in metrics.get("workers", {}).items():
-        m = wdata.get("metrics", {})
+        m = wdata.get("metrics") or {}
         partitions = m.get("partitions", {})
         for pid, pdata in partitions.items():
             if not isinstance(pdata, dict):
@@ -404,7 +404,7 @@ def _collect_per_window_loss(metrics: dict):
     """Collect per_window_loss from all partitions."""
     entries = []
     for wname, wdata in metrics.get("workers", {}).items():
-        m = wdata.get("metrics", {})
+        m = wdata.get("metrics") or {}
         partitions = m.get("partitions", {})
         for pid, pdata in partitions.items():
             if not isinstance(pdata, dict):
