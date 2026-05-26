@@ -35,7 +35,13 @@
       "Bash(MODE=strict DATASET_FILE=data.csv docker compose -f refactor/deploy/docker-compose.yml --profile strict up -d --build)",
       "Bash(curl -s http://localhost:9000/state)",
       "Bash(curl -s http://localhost:9101/api/metrics)",
-      "Bash(curl -s http://localhost:9101/state)"
+      "Bash(curl -s http://localhost:9101/state)",
+      "Bash(docker info *)",
+      "Bash(docker build *)",
+      "Bash(curl -s http://localhost:8000/api/metrics)",
+      "Bash(docker run *)",
+      "Bash(pip show *)",
+      "Bash(MODE=heuristic docker compose *)"
     ]
   }
 }
