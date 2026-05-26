@@ -791,9 +791,10 @@ class HeuristicWatermarkEngine:
         self.metrics.replay_mode_active = self.in_replay_mode
 
         # Per-window loss samples
+        wl_snapshot = list(self._window_loss.items())
         self.metrics.per_window_loss_samples = [
             {"window_id": wid, "late": wl["late"], "total": wl["total"]}
-            for wid, wl in self._window_loss.items()
+            for wid, wl in wl_snapshot
         ]
 
         return lat_ns
@@ -891,6 +892,7 @@ class HeuristicWatermarkEngine:
             else len(self.closed_windows)
         )
         # Per-window loss accounting (top 20 by loss rate)
+        wl_items = list(self._window_loss.items())
         per_window_loss = sorted(
             [
                 {
@@ -899,14 +901,15 @@ class HeuristicWatermarkEngine:
                     "total": wl["total"],
                     "loss_rate": round(wl["late"] / max(wl["total"], 1), 4),
                 }
-                for wid, wl in self._window_loss.items()
+                for wid, wl in wl_items
             ],
             key=lambda x: x["loss_rate"],
             reverse=True,
         )[:20]
 
-        total_late = sum(wl["late"] for wl in self._window_loss.values())
-        total_events = sum(wl["total"] for wl in self._window_loss.values())
+        wl_values = list(self._window_loss.values())
+        total_late = sum(wl["late"] for wl in wl_values)
+        total_events = sum(wl["total"] for wl in wl_values)
         overall_loss_rate = round(total_late / max(total_events, 1), 4)
 
         base = self.metrics.summary()
