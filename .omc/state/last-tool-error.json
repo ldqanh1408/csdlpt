@@ -1,7 +1,0 @@
-{
-  "tool_name": "PowerShell",
-  "tool_input_preview": "{\"command\":\"docker logs refactor-node0 --tail 20 --no-color 2>&1\",\"description\":\"Check worker node0 logs\"}",
-  "error": "Exit code 125\ndocker : unknown flag: --no-color\r\nAt line:1 char:1\r\n+ docker logs refactor-node0 --tail 20 --no-color 2>&1\r\n+ ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~\r\n    + CategoryInfo          : NotSpecified: (unknown flag: --no-color:String) [], RemoteException\r\n    + FullyQualifiedErrorId : NativeCommandError\r\n \r\nUsage:  docker logs [OPTIONS] CONTAINER\r\nRun 'docker logs --help' for more information",
-  "timestamp": "2026-05-25T14:37:11.709Z",
-  "retry_count": 2
-}

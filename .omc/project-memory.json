@@ -19,7 +19,7 @@
   },
   "build": {
     "buildCommand": "make build",
-    "testCommand": "make test",
+    "testCommand": "python -m pytest refactor/tests/ -q 2>&1 | tail -10",
     "lintCommand": null,
     "devCommand": null,
     "scripts": {}
@@ -185,14 +185,14 @@
   "hotPaths": [
     {
       "path": "refactor\\run.py",
-      "accessCount": 102,
-      "lastAccessed": 1779720263986,
+      "accessCount": 116,
+      "lastAccessed": 1779772536294,
       "type": "file"
     },
     {
       "path": "refactor",
-      "accessCount": 79,
-      "lastAccessed": 1779719535923,
+      "accessCount": 81,
+      "lastAccessed": 1779768556878,
       "type": "directory"
     },
     {
@@ -203,8 +203,8 @@
     },
     {
       "path": "refactor\\heuristic\\engine.py",
-      "accessCount": 32,
-      "lastAccessed": 1779717691970,
+      "accessCount": 36,
+      "lastAccessed": 1779768910019,
       "type": "file"
     },
     {
@@ -220,6 +220,12 @@
       "type": "file"
     },
     {
+      "path": "refactor\\strict\\engine.py",
+      "accessCount": 20,
+      "lastAccessed": 1779772472842,
+      "type": "file"
+    },
+    {
       "path": "refactor\\docs\\Thiet_Ke_Heuristic_Watermark.md",
       "accessCount": 18,
       "lastAccessed": 1779684445385,
@@ -232,21 +238,15 @@
       "type": "file"
     },
     {
-      "path": "refactor\\strict\\engine.py",
-      "accessCount": 17,
-      "lastAccessed": 1779717691886,
+      "path": "refactor\\strict\\worker.py",
+      "accessCount": 16,
+      "lastAccessed": 1779772473458,
       "type": "file"
     },
     {
       "path": "refactor\\docs\\out_of_scope.md",
       "accessCount": 14,
       "lastAccessed": 1779685035708,
-      "type": "file"
-    },
-    {
-      "path": "refactor\\strict\\worker.py",
-      "accessCount": 13,
-      "lastAccessed": 1779718545303,
       "type": "file"
     },
     {
@@ -298,6 +298,12 @@
       "type": "file"
     },
     {
+      "path": "refactor\\deploy\\docker-compose.yml",
+      "accessCount": 8,
+      "lastAccessed": 1779768545438,
+      "type": "file"
+    },
+    {
       "path": "refactor\\strict\\raft_coordinator.py",
       "accessCount": 7,
       "lastAccessed": 1779683439435,
@@ -328,10 +334,10 @@
       "type": "file"
     },
     {
-      "path": "refactor\\deploy\\docker-compose.yml",
+      "path": "refactor\\heuristic",
       "accessCount": 7,
-      "lastAccessed": 1779719576310,
-      "type": "file"
+      "lastAccessed": 1779768896746,
+      "type": "directory"
     },
     {
       "path": "refactor\\docs",
@@ -344,12 +350,6 @@
       "accessCount": 6,
       "lastAccessed": 1779683492277,
       "type": "file"
-    },
-    {
-      "path": "refactor\\heuristic",
-      "accessCount": 6,
-      "lastAccessed": 1779683761609,
-      "type": "directory"
     },
     {
       "path": "refactor\\heuristic\\negative_lag.py",
@@ -367,6 +367,12 @@
       "path": "refactor\\strict\\ingestor_health.py",
       "accessCount": 5,
       "lastAccessed": 1779683453182,
+      "type": "file"
+    },
+    {
+      "path": "refactor\\common\\metrics.py",
+      "accessCount": 5,
+      "lastAccessed": 1779770297679,
       "type": "file"
     },
     {
@@ -395,8 +401,8 @@
     },
     {
       "path": "refactor\\strict\\coordinator.py",
-      "accessCount": 3,
-      "lastAccessed": 1779683432698,
+      "accessCount": 4,
+      "lastAccessed": 1779770297643,
       "type": "file"
     },
     {
@@ -410,12 +416,6 @@
       "accessCount": 3,
       "lastAccessed": 1779684572652,
       "type": "directory"
-    },
-    {
-      "path": "refactor\\common\\metrics.py",
-      "accessCount": 3,
-      "lastAccessed": 1779717705238,
-      "type": "file"
     },
     {
       "path": "refactor\\heuristic\\downstream_emitter.py",
