@@ -1,0 +1,40 @@
+refactor-node3  | [worker-strict:3] Kafka consumer assigned=[9, 10, 11]
+refactor-node3  | [alerting] PagerDuty not configured, alerts logged to stderr
+refactor-node3  | [worker-strict:3] listening on :8000, partitions=[9, 10, 11]
+refactor-node3  | [worker-strict:3] received=0 on_time=0 late=0 dupes=0 bp_drops=0 completeness=0.0% late_rate=0.0% open_windows=0 closed_windows=0 buf=[p9=35q p10=5q p11=28q] watermarks=[p9:W=-inf p10:W=-inf p11:W=-inf]
+refactor-node3  | [worker-strict:3] received=5052 on_time=5042 late=10 dupes=0 bp_drops=0 completeness=99.8% late_rate=0.2% open_windows=3053 closed_windows=0 buf=[p9=6q p10=18q p11=0q] watermarks=[p9:W=1779143911.3 p10:W=1779143911.3 p11:W=1779143911.3]
+refactor-node3  | Backpressure: PAUSE partition 11 on 3 (buffer=500)
+refactor-node3  | Backpressure: PAUSE partition 10 on 3 (buffer=500)
+refactor-node3  | Backpressure: PAUSE partition 9 on 3 (buffer=500)
+refactor-node3  | Backpressure: PAUSE partition 11 on 3 (buffer=500)
+refactor-node3  | Backpressure: PAUSE partition 11 on 3 (buffer=500)
+refactor-node3  | Backpressure: PAUSE partition 9 on 3 (buffer=500)
+refactor-node3  | Backpressure: PAUSE partition 10 on 3 (buffer=500)
+refactor-node3  | [worker-strict:3] received=13747 on_time=13736 late=10 dupes=0 bp_drops=0 completeness=99.9% late_rate=0.1% open_windows=6324 closed_windows=0 buf=[p9=100q p10=300q p11=0q] watermarks=[p9:W=1779143911.3 p10:W=1779143911.3 p11:W=1779143911.3]
+refactor-node3  | Backpressure: PAUSE partition 9 on 3 (buffer=500)
+refactor-node3  | Backpressure: PAUSE partition 10 on 3 (buffer=500)
+refactor-node3  | Backpressure: PAUSE partition 9 on 3 (buffer=500)
+refactor-node3  | Backpressure: PAUSE partition 10 on 3 (buffer=500)
+refactor-node3  | Backpressure: PAUSE partition 10 on 3 (buffer=500)
+refactor-node3  | [worker-strict:3] received=22409 on_time=22328 late=81 dupes=0 bp_drops=0 completeness=99.6% late_rate=0.4% open_windows=10155 closed_windows=0 buf=[p9=370q p10=230q p11=0q] watermarks=[p9:W=1779143911.3 p10:W=1779143911.3 p11:W=1779143911.3]
+refactor-node3  | Backpressure: PAUSE partition 9 on 3 (buffer=500)
+refactor-node3  | Backpressure: PAUSE partition 11 on 3 (buffer=500)
+refactor-node3  | Backpressure: PAUSE partition 10 on 3 (buffer=500)
+refactor-node3  | Backpressure: PAUSE partition 9 on 3 (buffer=500)
+refactor-node3  | Backpressure: PAUSE partition 9 on 3 (buffer=500)
+refactor-node3  | Backpressure: PAUSE partition 10 on 3 (buffer=500)
+refactor-node3  | Backpressure: PAUSE partition 11 on 3 (buffer=500)
+refactor-node3  | [worker-strict:3] received=26808 on_time=26727 late=81 dupes=0 bp_drops=0 completeness=99.7% late_rate=0.3% open_windows=12176 closed_windows=0 buf=[p9=100q p10=300q p11=500q] watermarks=[p9:W=1779143911.3 p10:W=1779143911.3 p11:W=1779143911.3]
+refactor-node3  | Backpressure: PAUSE partition 9 on 3 (buffer=500)
+refactor-node3  | Backpressure: PAUSE partition 10 on 3 (buffer=500)
+refactor-node3  | Backpressure: PAUSE partition 11 on 3 (buffer=500)
+refactor-node3  | Backpressure: PAUSE partition 9 on 3 (buffer=500)
+refactor-node3  | Backpressure: PAUSE partition 10 on 3 (buffer=500)
+refactor-node3  | [worker-strict:3] received=30831 on_time=30721 late=108 dupes=0 bp_drops=0 completeness=99.6% late_rate=0.3% open_windows=14279 closed_windows=0 buf=[p9=0q p10=300q p11=97q] watermarks=[p9:W=1779143911.3 p10:W=1779143911.3 p11:W=1779143911.3]
+refactor-node3  | Backpressure: PAUSE partition 11 on 3 (buffer=500)
+refactor-node3  | Backpressure: PAUSE partition 9 on 3 (buffer=500)
+refactor-node3  | Backpressure: PAUSE partition 10 on 3 (buffer=500)
+refactor-node3  | Backpressure: PAUSE partition 11 on 3 (buffer=500)
+refactor-node3  | Backpressure: PAUSE partition 9 on 3 (buffer=500)
+refactor-node3  | [worker-strict:3] received=33578 on_time=33458 late=120 dupes=0 bp_drops=0 completeness=99.6% late_rate=0.4% open_windows=16004 closed_windows=0 buf=[p9=300q p10=0q p11=399q] watermarks=[p9:W=1779143911.3 p10:W=1779143911.3 p11:W=1779143911.3]
+refactor-node3  | Backpressure: PAUSE partition 11 on 3 (buffer=500)

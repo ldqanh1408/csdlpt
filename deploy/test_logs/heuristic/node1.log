@@ -1,0 +1,31 @@
+refactor-node1  | [worker-strict:1] Kafka consumer assigned=[3, 4, 5]
+refactor-node1  | [alerting] PagerDuty not configured, alerts logged to stderr
+refactor-node1  | [worker-strict:1] listening on :8000, partitions=[3, 4, 5]
+refactor-node1  | [worker-strict:1] received=0 on_time=0 late=0 dupes=0 bp_drops=0 completeness=0.0% late_rate=0.0% open_windows=0 closed_windows=0 buf=[p3=24q p4=19q p5=37q] watermarks=[p3:W=-inf p4:W=-inf p5:W=-inf]
+refactor-node1  | [worker-strict:1] received=5222 on_time=5221 late=0 dupes=0 bp_drops=0 completeness=100.0% late_rate=0.0% open_windows=3205 closed_windows=0 buf=[p3=54q p4=0q p5=31q] watermarks=[p3:W=1779143911.3 p4:W=1779143911.3 p5:W=1779143911.3]
+refactor-node1  | Backpressure: PAUSE partition 4 on 1 (buffer=500)
+refactor-node1  | Backpressure: PAUSE partition 5 on 1 (buffer=500)
+refactor-node1  | Backpressure: PAUSE partition 4 on 1 (buffer=500)
+refactor-node1  | Backpressure: PAUSE partition 5 on 1 (buffer=500)
+refactor-node1  | Backpressure: PAUSE partition 3 on 1 (buffer=500)
+refactor-node1  | [worker-strict:1] received=12826 on_time=12814 late=10 dupes=0 bp_drops=0 completeness=99.9% late_rate=0.1% open_windows=6031 closed_windows=0 buf=[p3=0q p4=300q p5=298q] watermarks=[p3:W=1779143911.3 p4:W=1779143911.3 p5:W=1779143911.3]
+refactor-node1  | Backpressure: PAUSE partition 5 on 1 (buffer=500)
+refactor-node1  | Backpressure: PAUSE partition 4 on 1 (buffer=500)
+refactor-node1  | Backpressure: PAUSE partition 3 on 1 (buffer=500)
+refactor-node1  | Backpressure: PAUSE partition 4 on 1 (buffer=500)
+refactor-node1  | Backpressure: PAUSE partition 3 on 1 (buffer=500)
+refactor-node1  | Backpressure: PAUSE partition 4 on 1 (buffer=500)
+refactor-node1  | [worker-strict:1] received=22002 on_time=21992 late=10 dupes=0 bp_drops=0 completeness=100.0% late_rate=0.0% open_windows=9565 closed_windows=0 buf=[p3=0q p4=0q p5=3q] watermarks=[p3:W=1779143911.3 p4:W=1779143911.3 p5:W=1779143911.3]
+refactor-node1  | Backpressure: PAUSE partition 4 on 1 (buffer=500)
+refactor-node1  | Backpressure: PAUSE partition 5 on 1 (buffer=500)
+refactor-node1  | [worker-strict:1] received=26736 on_time=26726 late=10 dupes=0 bp_drops=0 completeness=100.0% late_rate=0.0% open_windows=11640 closed_windows=0 buf=[p3=59q p4=4q p5=133q] watermarks=[p3:W=1779143911.3 p4:W=1779143911.3 p5:W=1779143911.3]
+refactor-node1  | Backpressure: PAUSE partition 4 on 1 (buffer=500)
+refactor-node1  | Backpressure: PAUSE partition 3 on 1 (buffer=500)
+refactor-node1  | Backpressure: PAUSE partition 5 on 1 (buffer=500)
+refactor-node1  | Backpressure: PAUSE partition 4 on 1 (buffer=500)
+refactor-node1  | Backpressure: PAUSE partition 3 on 1 (buffer=500)
+refactor-node1  | Backpressure: PAUSE partition 5 on 1 (buffer=500)
+refactor-node1  | [worker-strict:1] received=31281 on_time=31259 late=22 dupes=0 bp_drops=0 completeness=99.9% late_rate=0.1% open_windows=14427 closed_windows=0 buf=[p3=0q p4=0q p5=0q] watermarks=[p3:W=1779143911.3 p4:W=1779143911.3 p5:W=1779143911.3]
+refactor-node1  | Backpressure: PAUSE partition 4 on 1 (buffer=500)
+refactor-node1  | Backpressure: PAUSE partition 3 on 1 (buffer=500)
+refactor-node1  | Backpressure: PAUSE partition 5 on 1 (buffer=500)

@@ -301,7 +301,18 @@ class DLQPipeline:
         tmp = self.dlq_path + ".tmp"
         with open(tmp, "w") as f:
             json.dump(data, f)
-        os.replace(tmp, self.dlq_path)
+        
+        # Robust replace to handle transient WSL2/Docker filesystem sync delays
+        for attempt in range(5):
+            try:
+                os.replace(tmp, self.dlq_path)
+                break
+            except FileNotFoundError:
+                if attempt == 4:
+                    raise
+                os.makedirs(os.path.dirname(self.dlq_path), exist_ok=True)
+                time.sleep(0.05)
+
 
 
 class CorrectionProtocol:

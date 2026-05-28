@@ -1,0 +1,11 @@
+refactor-node3  | [worker-strict:3] Kafka consumer assigned=[9, 10, 11]
+refactor-node3  | [alerting] PagerDuty not configured, alerts logged to stderr
+refactor-node3  | [worker-strict:3] listening on :8000, partitions=[9, 10, 11]
+refactor-node3  | [worker-strict:3] received=3 on_time=3 late=0 dupes=0 bp_drops=0 completeness=100.0% late_rate=0.0% open_windows=3 closed_windows=0 buf=[p9=18q p10=19q p11=17q] watermarks=[p9:W=-inf p10:W=-inf p11:W=-inf]
+refactor-node3  | [worker-strict:3] received=57 on_time=57 late=0 dupes=0 bp_drops=0 completeness=100.0% late_rate=0.0% open_windows=15 closed_windows=0 buf=[p9=0q p10=0q p11=0q] watermarks=[p9:W=1779983449.0 p10:W=1779983449.0 p11:W=1779983449.0]
+refactor-node3  | [worker-strict:3] received=57 on_time=57 late=0 dupes=0 bp_drops=0 completeness=100.0% late_rate=0.0% open_windows=15 closed_windows=0 buf=[p9=0q p10=0q p11=0q] watermarks=[p9:W=1779983449.0 p10:W=1779983449.0 p11:W=1779983449.0]
+refactor-node3  | [worker-strict:3] received=57 on_time=57 late=0 dupes=0 bp_drops=0 completeness=100.0% late_rate=0.0% open_windows=15 closed_windows=0 buf=[p9=0q p10=0q p11=0q] watermarks=[p9:W=1779983449.0 p10:W=1779983449.0 p11:W=1779983449.0]
+refactor-node3  | [worker-strict:3] received=57 on_time=57 late=0 dupes=0 bp_drops=0 completeness=100.0% late_rate=0.0% open_windows=15 closed_windows=0 buf=[p9=0q p10=0q p11=0q] watermarks=[p9:W=1779983449.0 p10:W=1779983449.0 p11:W=1779983449.0]
+refactor-node3  | [worker-strict:3] received=57 on_time=57 late=0 dupes=0 bp_drops=0 completeness=100.0% late_rate=0.0% open_windows=15 closed_windows=0 buf=[p9=0q p10=0q p11=0q] watermarks=[p9:W=1779983449.0 p10:W=1779983449.0 p11:W=1779983449.0]
+refactor-node3  | [worker-strict:3] received=57 on_time=57 late=0 dupes=0 bp_drops=0 completeness=100.0% late_rate=0.0% open_windows=15 closed_windows=0 buf=[p9=0q p10=0q p11=0q] watermarks=[p9:W=1779983449.0 p10:W=1779983449.0 p11:W=1779983449.0]
+refactor-node3  | [worker-strict:3] received=57 on_time=57 late=0 dupes=0 bp_drops=0 completeness=100.0% late_rate=0.0% open_windows=15 closed_windows=0 buf=[p9=0q p10=0q p11=0q] watermarks=[p9:W=1779983449.0 p10:W=1779983449.0 p11:W=1779983449.0]

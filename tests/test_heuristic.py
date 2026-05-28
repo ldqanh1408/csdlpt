@@ -1,6 +1,11 @@
 """Tests for Heuristic Watermark engine, aggregator, DLQ, cold start, negative lag."""
 
+import os
 import time
+
+os.environ.setdefault("HEURISTIC_WARMUP_S", "0.0")
+os.environ.setdefault("HEURISTIC_WARMUP_SAMPLES", "10")
+
 import pytest
 from common.types import LogEvent
 from heuristic import (

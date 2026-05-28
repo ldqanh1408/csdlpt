@@ -97,77 +97,96 @@ Hệ thống xử lý luồng log từ tầng Web Server hoạt động liên t�
 
 ## 3. Kiến trúc tổng thể
 
-```
-┌──────────────────────────────────────────────────────────────────────────┐
-│            Web Server / Ingestor Layer (multi-instance)                   │
-│   - Gắn Event-Time                                                        │
-│   - Định kỳ phát Punctuation Token (đầy & rỗng)                          │
-│   - Out-of-band Heartbeat lên Coordinator (mỗi 5s)                        │
-└──────────────────────────────┬───────────────────────────────────────────┘
-                               │ Log events + Punctuations
-                               ▼
-┌──────────────────────────────────────────────────────────────────────────┐
-│                Kafka Cluster (12 Partitions, Replication 3)               │
-└──────────────────────────────┬───────────────────────────────────────────┘
-                               │ consumer.poll()
-            ┌──────────────────┼──────────────────┐
-            ▼                  ▼                  ▼              ▼
-   ┌──────────────┐   ┌──────────────┐   ┌──────────────┐   ┌──────────────┐
-   │  Worker 1    │   │  Worker 2    │   │  Worker 3    │   │  Worker 4    │
-   │              │   │              │   │              │   │              │
-   │ [Client-Side │   │ [Client-Side │   │ [Client-Side │   │ [Client-Side │
-   │  Bounded PQ] │   │  Bounded PQ] │   │  Bounded PQ] │   │  Bounded PQ] │
-   │              │   │              │   │              │   │              │
-   │ RocksDB iso  │   │ RocksDB iso  │   │ RocksDB iso  │   │ RocksDB iso  │
-   │ P1, P2, P3   │   │ P4, P5, P6   │   │ P7, P8, P9   │   │ P10, P11, P12│
-   └──────┬───────┘   └──────┬───────┘   └──────┬───────┘   └──────┬───────┘
-          │  LW_i(P_k) reports (200ms) + Worker Heartbeat (1s)
-          └──────────────────┬──────────────────┬──────────────────┘
-                             ▼
-              ┌─────────────────────────────────────┐
-              │   Coordinator Cluster (Raft HA)      │
-              │  ┌──────────┐ ┌──────────┐ ┌────────┴┐
-              │  │ Leader A │ │Follower B│ │Follow.C │
-              │  └──────────┘ └──────────┘ └─────────┘
-              │   - W_global computation             │
-              │   - Failover Manager (State Machine) │
-              │   - Tiered Eviction Controller        │
-              │   - Ingestor Health Monitor          │
-              │   - Fencing Token (term)             │
-              └────────────────┬────────────────────┘
-                               │ Broadcast W_global + commands (with term)
-            ┌──────────────────┴──────────────────┐
-            ▼                                     ▼
-   [Worker Nodes — Chốt sổ]              [Output Stream]
-            │
-            ├──► [Strict Results Topic] (Transactional Sink)
-            └──► [Critical Audit Sink]
+```mermaid
+flowchart TB
+    subgraph ingest["Web Server / Ingestor Layer"]
+        web["Web Servers"]
+        ingestor["Ingestor instances"]
+        event_time["Gắn T_event"]
+        punctuation["Phát Log + Punctuation Token"]
+        empty_punctuation["Phát Empty Punctuation khi partition idle"]
+        heartbeat["Ingestor heartbeat mỗi 5s"]
+        web --> ingestor
+        ingestor --> event_time
+        event_time --> punctuation
+        event_time --> empty_punctuation
+        ingestor --> heartbeat
+    end
 
-   ┌────────────────────────────────────────────────────────────────┐
-   │  Shared Volume (Tier 2 — Warm State)                            │
-   │  /data/checkpoint/                                               │
-   │   ├── partition_k/ {metadata.json, state.db/, sketch.bin}        │
-   └─────────────────────────────┬──────────────────────────────────┘
-                                 │ Async (10s) — Checkpoint flush
-                                 │ Async (5min) — Active State Backup to MinIO
-                                 ▼
-   ┌────────────────────────────────────────────────────────────────┐
-   │  Object Storage (Tier 3 — Cold State / DR Backup)                │
-   │  minio/bucket/strict-watermark/                                    │
-   │   ├── historical_archive/    (Closed Windows)                    │
-   │   ├── active_state_backup/   (DR — mỗi 5 phút)                   │
-   │   └── disaster_recovery/     (Snapshot lịch sử)                  │
-   └────────────────────────────────────────────────────────────────┘
+    kafka["Kafka Cluster<br/>12 partitions, replication 3<br/>Append-only theo offset"]
+    punctuation -->|"Log events + Punctuation Token"| kafka
+    empty_punctuation -->|"Empty Punctuation Token"| kafka
+
+    subgraph workers["Worker Layer"]
+        w1["Worker 1<br/>P1, P2, P3"]
+        w2["Worker 2<br/>P4, P5, P6"]
+        w3["Worker 3<br/>P7, P8, P9"]
+        w4["Worker 4<br/>P10, P11, P12"]
+        bpq["Client-Side Bounded Priority Queue<br/>sort theo event_time"]
+        engine["Strict Watermark Engine<br/>dedupe, window aggregation, close window"]
+        rocksdb["Tier 1 - Hot State<br/>RocksDB isolated per partition"]
+        w1 --> bpq
+        w2 --> bpq
+        w3 --> bpq
+        w4 --> bpq
+        bpq --> engine
+        engine --> rocksdb
+    end
+
+    kafka -->|"consumer.poll()"| w1
+    kafka -->|"consumer.poll()"| w2
+    kafka -->|"consumer.poll()"| w3
+    kafka -->|"consumer.poll()"| w4
+
+    subgraph coord["Coordinator Cluster (Raft HA)"]
+        leader["Leader A"]
+        follower_b["Follower B"]
+        follower_c["Follower C"]
+        leader <--> follower_b
+        leader <--> follower_c
+        control_plane["Coordinator Control Plane<br/>W_global computation<br/>Failover Manager<br/>Tiered Eviction Controller<br/>Ingestor Health Monitor<br/>Fencing Token (term)"]
+        leader --> control_plane
+    end
+
+    heartbeat -->|"gRPC IngestorHeartbeat"| control_plane
+    w1 -->|"gRPC WorkerHeartbeatMsg<br/>local watermark, offset, health"| control_plane
+    w2 -->|"gRPC WorkerHeartbeatMsg<br/>local watermark, offset, health"| control_plane
+    w3 -->|"gRPC WorkerHeartbeatMsg<br/>local watermark, offset, health"| control_plane
+    w4 -->|"gRPC WorkerHeartbeatMsg<br/>local watermark, offset, health"| control_plane
+    control_plane -->|"StateReply: W_global, term, commands"| w1
+    control_plane -->|"StateReply: W_global, term, commands"| w2
+    control_plane -->|"StateReply: W_global, term, commands"| w3
+    control_plane -->|"StateReply: W_global, term, commands"| w4
+
+    output["Output Stream"]
+    engine -->|"WindowResult khi window_end <= W_global"| output
+    output --> strict_topic["Strict Results Topic<br/>Transactional Sink"]
+    output --> audit_sink["Critical Audit Sink"]
+
+    shared["Tier 2 - Warm State<br/>Shared Volume<br/>/data/checkpoint/partition_k/<br/>metadata.json, state.db/, sketch.bin"]
+    object_storage["Tier 3 - Cold State / DR Backup<br/>Object Storage / MinIO<br/>historical_archive/<br/>active_state_backup/<br/>disaster_recovery/"]
+    rocksdb -->|"Checkpoint mỗi 10s"| shared
+    shared -->|"Async 10s checkpoint flush<br/>Async 5min active state backup"| object_storage
+    engine -->|"Closed windows archive"| object_storage
 ```
 
 ### Thành phần chính
 
-- **Ingestor Layer**: Gắn Event-Time, phát Punctuation, gửi heartbeat lên Coordinator.
-- **Kafka Cluster**: 12 partitions standard append-only, replication 3.
-- **Worker Nodes (4)**: Mỗi node quản lý 3 partitions, có Client-Side Bounded Priority Queue.
-- **Coordinator Cluster (3)**: Raft HA, leader broadcast `W_global`, follower replicate state.
-- **Shared Volume**: Tier 2 cho failover < 2 giây.
-- **Object Storage**: Tier 3 cho DR và historical archive.
+- **Web Server / Ingestor Layer**: Nhận log từ Web Server, gắn `T_event`, phát log vào Kafka và phát Punctuation Token để báo tiến độ event-time. Khi partition idle, Ingestor vẫn phát Empty Punctuation để watermark không bị đứng. Ngoài data path, Ingestor gửi heartbeat trực tiếp lên Coordinator để báo health, offset và clock.
+- **Kafka Cluster**: Broker trung gian, 12 partitions, replication factor 3. Kafka giữ thứ tự theo offset trong từng partition nhưng không sort theo event-time; việc xử lý out-of-order được đẩy xuống Worker.
+- **Worker Layer**: Mỗi Worker quản lý một nhóm partition. Worker poll Kafka, đưa event vào Client-Side Bounded Priority Queue, sắp xếp theo `event_time`, lọc duplicate, gom window và ghi state vào RocksDB instance riêng theo partition.
+- **Coordinator Cluster**: Cụm 3 node HA dùng Raft/ZooKeeper-style quorum. Leader tính `W_global`, phát command có fencing token, điều phối failover/failback, theo dõi Ingestor health và điều khiển tiered eviction. Follower replicate state để takeover khi Leader sập.
+- **Output Layer**: Khi window đủ điều kiện chốt theo `W_global`, Worker emit `WindowResult` ra Strict Results Topic hoặc Critical Audit Sink theo cơ chế exactly-once/idempotent.
+- **Tiered State Storage**: Tier 1 là RocksDB local để xử lý nóng; Tier 2 là Shared Volume để failover nhanh; Tier 3 là MinIO/Object Storage để lưu closed windows, active-state backup và disaster recovery.
+
+### Luồng làm việc tổng thể
+
+1. **Ingest data path**: Web Server sinh log, Ingestor gắn `T_event`, rồi gửi log cùng Punctuation Token vào Kafka. Kafka chỉ đảm bảo durability và thứ tự offset, không quyết định watermark.
+2. **Worker processing path**: Worker poll partition được gán, đưa record vào Bounded Priority Queue, drain theo thứ tự event-time, lọc duplicate/late data, cập nhật open window trong RocksDB và tạo local watermark từ Punctuation Token.
+3. **Coordination path**: Worker gửi heartbeat gồm local watermark, Kafka offset, trạng thái backpressure và fencing term lên Coordinator. Coordinator Leader tính `W_global = min(LW_i(P_k))` trên các partition hợp lệ, rồi trả `W_global` và command điều phối cho Worker.
+4. **Window close/output path**: Khi `window_end <= W_global`, Worker chốt window, tạo `WindowResult`, ghi dấu output/checkpoint và emit xuống sink. Sink quan trọng dùng transactional protocol; sink không hỗ trợ transaction dùng deterministic `window_id` để dedupe.
+5. **State durability path**: State nóng nằm ở RocksDB local. Mỗi 10 giây Worker checkpoint partition state sang Shared Volume. Closed windows và active-state backup được đẩy lên MinIO để giảm local disk và phục vụ disaster recovery.
+6. **Failure handling path**: Nếu Worker sập, Coordinator chuyển partition sang Worker khác dựa trên checkpoint Tier 2 và fencing token. Nếu Coordinator Leader sập, follower được bầu làm Leader mới và tiếp tục từ replicated state trong Raft log.
 
 ---
 
@@ -192,55 +211,70 @@ $$window\_end = window\_start + 5$$
 
 Vì Kafka Partition là cấu trúc append-only bất biến, **không thể** sort lại bên trong Broker. Hệ thống đặt **Bounded Priority Queue** tại Worker Node (client-side):
 
-```
-[Kafka Broker Partition] (Append-only, FIFO theo Offset)
-           │
-           ▼ consumer.poll()
-[Worker Node Ingestion Buffer]
-   └── [Bounded Priority Queue] (Min-Heap RAM)
-          │ - Sắp xếp tăng dần theo event_time
-          │ - Maxsize: 10,000 bản ghi
-          │ - Max wait: 1000ms
-          │ - Đầy hoặc hết giờ → pop bản ghi đỉnh cây
-          ▼
-   └── [RocksDB Isolated Instances] (Ghi state đã sorted)
+```mermaid
+flowchart TB
+    kafka["Kafka Broker Partition<br/>Append-only, FIFO theo Offset"]
+    buffer["Worker Node Ingestion Buffer"]
+    bpq["Bounded Priority Queue<br/>Min-Heap RAM<br/>Sắp xếp tăng dần theo event_time<br/>Maxsize: 10,000 bản ghi<br/>Max wait: 1000ms"]
+    rocksdb["RocksDB Isolated Instances<br/>Ghi state đã sorted"]
+
+    kafka -->|"consumer.poll()"| buffer
+    buffer --> bpq
+    bpq -->|"Đầy hoặc hết giờ: pop bản ghi đỉnh cây"| rocksdb
 ```
 
 Lợi ích: dữ liệu vào bộ chia Window đã sorted theo Event-Time, tối ưu RocksDB write path và giảm Skew.
+
+**High-level**: Worker tách luồng nạp dữ liệu và luồng xử lý state. Luồng nạp chỉ poll từ Kafka, kiểm tra backpressure và đưa event vào hàng đợi ưu tiên; luồng xử lý chạy nền rút event theo thứ tự `event_time` rồi ghi vào RocksDB/window state.
+
+**Low-level**:
+- Hàng đợi là min-heap theo tuple `(event_time, sequence, event)` để giữ thứ tự tăng dần theo event-time và vẫn ổn định khi hai event trùng timestamp.
+- Nếu queue vượt `maxsize`, Worker pop phần tử nhỏ nhất ngay để tránh tràn RAM.
+- Nếu queue không đầy nhưng event bị giữ quá `max_wait_ms`, drain loop vẫn pop để tránh kẹt vô hạn khi input chậm.
+- Drain loop xử lý theo batch (`STRICT_DRAIN_BATCH_SIZE`) và sleep theo chu kỳ (`STRICT_DRAIN_SLEEP_S`) để cân bằng throughput với CPU.
 
 ### 4.4. Strict Watermark & Upstream Heartbeat Punctuation
 
 Cơ chế Idleness Bypass tại Coordinator (loại partition idle khỏi `min()`) là **sai sót logic nghiêm trọng** vì gây data loss khi partition idle hoạt động lại. Hệ thống dùng **Heartbeat Punctuation từ Upstream**:
 
-```
-[INGESTOR]
-  ├─ Có dữ liệu  ──► [Phát Log + Punctuation Token chứa T_commit]
-  └─ IDLE        ──► [Phát Empty Punctuation Token với T_commit tăng dần, mỗi 1000ms]
-         │
-         ▼
-[Kafka Partition_k] ──► [Worker_i: LW_i(P_k) = T_commit]
-         │
-         ▼
-[Coordinator]: W_global = min(LW_i(P_k)) ∀ active partitions
+```mermaid
+flowchart TB
+    ingestor["INGESTOR"]
+    has_data{"Có dữ liệu?"}
+    log_token["Phát Log + Punctuation Token chứa T_commit"]
+    empty_token["Phát Empty Punctuation Token<br/>T_commit tăng dần mỗi 1000ms"]
+    kafka["Kafka Partition_k"]
+    worker["Worker_i<br/>LW_i(P_k) = T_commit"]
+    coord["Coordinator<br/>W_global = min(LW_i(P_k))<br/>∀ active partitions"]
+
+    ingestor --> has_data
+    has_data -->|"Có"| log_token
+    has_data -->|"IDLE"| empty_token
+    log_token --> kafka
+    empty_token --> kafka
+    kafka --> worker
+    worker --> coord
 ```
 
 Coordinator **không cần** Idleness Bypass — `W_global` luôn tiến đều nhờ Heartbeat Punctuation.
+
+**High-level**: Punctuation Token là tín hiệu "upstream đã đi qua mốc thời gian này". Kể cả khi partition không có log mới, Ingestor vẫn phát Empty Punctuation để Worker cập nhật local watermark và Coordinator có đủ dữ liệu tính `W_global`.
+
+**Low-level**:
+- Worker chỉ update `LW_i(P_k)` nếu `T_commit` mới lớn hơn `last_T_commit_seen`.
+- Coordinator lấy `min(LW_i(P_k))` trên toàn bộ partition chưa failed để giữ strict correctness.
+- Khi `window_end <= LW_i(P_k)`, partition có thể chốt cửa sổ cục bộ; khi `window_end <= W_global`, kết quả đủ an toàn để emit theo cam kết toàn cục.
 
 ### 4.5. Monotonic Punctuation + Clock Skew Monitor
 
 Khi có nhiều Ingestor, clock có thể lệch → `T_commit` không monotonic → `W_global` có thể lùi. Bảo vệ:
 
-**Worker-side Monotonic Enforcement**:
+**Bảo vệ tính đơn điệu phía Worker (Worker-side Monotonic Enforcement)**:
 
-```
-on_punctuation(token):
-  if token.T_commit > last_T_commit_seen:
-    last_T_commit_seen = token.T_commit
-    LW_i(P_k) = token.T_commit
-  else:
-    metric.increment('non_monotonic_punctuation')
-    # Bỏ qua — không update backwards
-```
+Quy trình xử lý khi nhận gói tin kiểm soát (Punctuation Token):
+1. **Kiểm tra**: So sánh mốc thời gian cam kết của gói tin hiện tại ($T_{commit}$) với mốc thời gian cam kết lớn nhất từng ghi nhận ($last\_T\_commit\_seen$).
+2. **Cập nhật**: Nếu $T_{commit} > last\_T\_commit\_seen$, cập nhật mốc ghi nhận lớn nhất mới và thiết lập Watermark cục bộ của phân vùng $LW_i(P_k) = T_{commit}$.
+3. **Bỏ qua**: Ngược lại (mốc thời gian bị lùi do lệch đồng hồ), tăng chỉ số lỗi không đơn điệu và bỏ qua gói tin (không cập nhật lùi watermark).
 
 **Coordinator-side Clock Skew Monitor**:
 
@@ -270,18 +304,17 @@ Tracking clock skew từ Ingestor heartbeat (xem §10):
 
 ### 5.2. Kiến trúc Coordinator Cluster — 3 instance Raft
 
-```
-┌──────────────────────────────────────┐
-│   Coordinator Cluster (Raft Quorum)  │
-│                                       │
-│  ┌─────────┐  ┌─────────┐  ┌────────┴┐
-│  │ Leader  │  │Follower │  │Follower │
-│  │ term=42 │◄─┤ term=42 │◄─┤ term=42 │
-│  └─────────┘  └─────────┘  └─────────┘
-└──────────────────────────────────────┘
-         │
-         ▼ (chỉ Leader broadcast)
-   [Worker Nodes]
+```mermaid
+flowchart TB
+    subgraph cluster["Coordinator Cluster (Raft Quorum)"]
+        leader["Leader<br/>term=42"]
+        follower_1["Follower<br/>term=42"]
+        follower_2["Follower<br/>term=42"]
+        leader <--> follower_1
+        leader <--> follower_2
+    end
+
+    leader -->|"chỉ Leader broadcast"| workers["Worker Nodes"]
 ```
 
 **Lựa chọn công nghệ**:
@@ -319,21 +352,50 @@ ReplicatedState {
 
 ### 5.5. Fencing Token (chống Split-Brain)
 
-Mỗi command gửi từ Coordinator xuống Worker kèm `(term, command_id)`:
+Mỗi chỉ thị (command) gửi từ Coordinator xuống Worker được đính kèm cặp giá trị `(term, command_id)`:
 
-```
-Worker logic:
-  on_command(cmd):
-    if cmd.term < known_term:
-      reject (stale)
-    elif cmd.command_id in seen_commands:
-      ack (idempotent no-op)
-    else:
-      execute(cmd)
-      seen_commands.add(cmd.command_id)
-```
+**Logic xử lý chỉ thị tại phía Worker**:
+1. **Kiểm tra nhiệm kỳ**: Nếu nhiệm kỳ của chỉ thị (`term`) nhỏ hơn nhiệm kỳ lớn nhất đã biết tại Worker (`known_term`), chỉ thị bị loại bỏ lập tức vì đã lỗi thời.
+2. **Kiểm tra trùng lặp (Idempotency)**: Nếu mã chỉ thị (`command_id`) đã nằm trong danh sách các chỉ thị đã xử lý, Worker gửi xác nhận thành công nhưng không thực hiện lại chỉ thị đó.
+3. **Thực thi**: Đối với chỉ thị hợp lệ mới, Worker ghi nhận mã chỉ thị vào danh sách đã xử lý và tiến hành thực thi.
 
-Đảm bảo: Leader cũ "sống lại" sau network partition và gửi command stale → reject.
+Đảm bảo: Leader cũ "sống lại" sau network partition và gửi chỉ thị lỗi thời sẽ bị từ chối.
+
+### 5.6. Giao thức gRPC và đặc tả mô hình thông tin
+
+Hệ thống loại bỏ hoàn toàn các REST endpoints chậm cho control plane và thay thế bằng kênh gRPC out-of-band. Cổng gRPC được mặc định là `HTTP_PORT + 50` (ví dụ: HTTP `9000` -> gRPC `9050`).
+
+Đặc tả chi tiết các dịch vụ giao tiếp gRPC giữa các thành phần trong hệ thống:
+
+#### Dịch vụ Điều phối (Coordinator Service)
+Định nghĩa các giao thức giao tiếp mức điều phối và đồng thuận:
+1. **WorkerHeartbeat**: Định kỳ gửi thông điệp báo cáo từ Worker để cập nhật tình trạng hoạt động và thông số watermark cục bộ.
+2. **IngestorHeartbeat**: Nhận dữ liệu kiểm soát và báo cáo tiến trình phát từ các nguồn phát dữ liệu (Ingestor).
+3. **GetGlobalState**: Cung cấp trạng thái toàn cục và mốc watermark toàn cục để các Worker đồng bộ.
+4. **Giao thức đồng thuận (Raft/ZooKeeper-based calls)**: Các hàm bầu cử và đồng bộ trạng thái giữa các Coordinator trong cụm độ khả dụng cao (HA).
+
+#### Cấu trúc các thông điệp truyền thông (Message Schema)
+- **Thông điệp nhịp tim Worker (Worker Heartbeat Message)**:
+  - `worker_id` (Kiểu chuỗi): Định danh duy nhất của Worker.
+  - `partitions` (Bản đồ Phân vùng -> Mốc thời gian thực): Mốc watermark cục bộ của từng phân vùng.
+  - `max_event_time` (Kiểu số thực): Event-time lớn nhất nhận được.
+  - `timestamp` (Kiểu số thực): Thời gian vật lý gửi tin.
+  - `fencing_token` (Kiểu số nguyên): Số nhiệm kỳ của Coordinator.
+  - `idle_partitions` (Danh sách phân vùng): Các phân vùng không phát sinh dữ liệu.
+  - `backpressure_partitions` (Bản đồ phân vùng -> Trạng thái logic): Trạng thái nghẽn của từng phân vùng.
+  - `kafka_offsets` (Bản đồ phân vùng -> Vị trí đọc): Vị trí offset đã đọc trên mỗi phân vùng.
+- **Yêu cầu lấy trạng thái toàn cục (State Request)**:
+  - `worker_id` (Kiểu chuỗi): Định danh duy nhất của Worker.
+- **Phản hồi trạng thái toàn cục (State Reply)**:
+  - `W_global` (Kiểu số thực): Mốc watermark toàn cục hiện tại.
+  - `term` (Kiểu số nguyên): Số nhiệm kỳ của Coordinator Leader.
+  - `partition_types` (Bản đồ phân vùng -> Trạng thái gán phân vùng): Phân bổ phân vùng của các Node.
+
+#### 5.6.1. Báo cáo watermark từ Worker
+Định kỳ mỗi 1 giây, tiến trình gửi nhịp tim của Worker đóng gói thông điệp nhịp tim gửi qua kênh gRPC chứa bản đồ mốc watermark cục bộ của các phân vùng do Worker xử lý cùng với vị trí offset Kafka hiện tại.
+
+#### 5.6.2. Đồng bộ watermark toàn cục
+Để chốt cửa sổ, Worker chủ động thực hiện cơ chế kéo (pull) định kỳ mỗi 500ms thông qua yêu cầu lấy trạng thái toàn cục để nhận mốc watermark toàn cục ($W_{global}$) cùng số nhiệm kỳ hoạt động, sau đó cập nhật mốc này cho bộ máy xử lý của từng phân vùng.
 
 ---
 
@@ -347,11 +409,12 @@ RocksDB Embedded có LOCK file độc quyền trên thư mục dữ liệu. Vi�
 
 **Giải pháp**: Mỗi partition có **DB Instance hoàn toàn biệt lập**:
 
-```
-Worker Node /data/rocksdb/
-├── partition_1/  ← DB instance riêng, có LOCK riêng
-├── partition_2/
-└── partition_3/
+```mermaid
+flowchart TB
+    root["Worker Node /data/rocksdb/"]
+    root --> p1["partition_1/<br/>DB instance riêng, có LOCK riêng"]
+    root --> p2["partition_2/"]
+    root --> p3["partition_3/"]
 ```
 
 Khi Node A nhả tải partition `P_7`:
@@ -376,6 +439,14 @@ Khi Node A nhả tải partition `P_7`:
 - Active Window State backup (DR — mỗi 5 phút).
 - Cold checkpoint (compressed, > 10 phút tuổi).
 - Capacity vô hạn (MinIO object storage).
+
+**High-level**: Tier 1 phục vụ đường xử lý nóng, Tier 2 phục vụ failover nhanh, Tier 3 phục vụ lưu dài hạn và disaster recovery. Dữ liệu luôn đi theo hướng nóng → ấm → lạnh; dữ liệu đã chốt sổ không ở lại local SSD lâu hơn cần thiết.
+
+**Low-level**:
+- State đang mở được ghi theo partition trong RocksDB instance riêng để tránh tranh chấp `LOCK`.
+- Các key state cần tách namespace rõ ràng: `ow:{window_start}` cho open window, `cw:{window_start}` cho closed window, `si:{event_id}` cho seen-id dedupe, `meta:state` cho watermark/offset metadata.
+- Checkpoint Tier 2 lưu `metadata.json`, snapshot RocksDB/SST và offset Kafka đã commit để Worker khác có thể `seek(offset + 1)` khi tiếp quản.
+- Tier 3 dùng object key deterministic theo `{partition_id}/{window_id}` để retry upload không tạo duplicate object.
 
 ### 6.3. Partition-Level Checkpointing
 
@@ -410,10 +481,13 @@ Khi Node A nhả tải partition `P_7`:
 
 **Transitions** (mỗi transition fsync metadata trước action):
 
-```
-CLOSED → UPLOADING:  Worker bắt đầu upload MinIO, write state.
-UPLOADING → UPLOADED: MinIO 200, write ETag vào metadata.
-UPLOADED → PURGED:   Worker xóa local data, write final state.
+```mermaid
+stateDiagram-v2
+    [*] --> CLOSED
+    CLOSED --> UPLOADING: Worker bắt đầu upload MinIO, write state
+    UPLOADING --> UPLOADED: MinIO 200, write ETag vào metadata
+    UPLOADED --> PURGED: Worker xóa local data, write final state
+    PURGED --> [*]
 ```
 
 **Recovery Logic** sau crash:
@@ -452,14 +526,20 @@ Shared Volume mất → toàn bộ state dở dang mất. Mitigation:
 
 **Định kỳ mỗi 5 phút, backup Active Window State lên MinIO**:
 
-```
-minio/bucket/strict-watermark/active_state_backup/
-├── partition_1/
-│   ├── 1704067200_active.tar.gz   (5 phút trước)
-│   └── 1704067500_active.tar.gz   (mới nhất)
-└── ...
+```mermaid
+flowchart TB
+    root["minio/bucket/strict-watermark/active_state_backup/"]
+    p1["partition_1/"]
+    b1["1704067200_active.tar.gz<br/>(5 phút trước)"]
+    b2["1704067500_active.tar.gz<br/>(mới nhất)"]
+    more["..."]
+    retention["Retention: 24 backup gần nhất (= 2 giờ)"]
 
-Retention: 24 backup gần nhất (= 2 giờ).
+    root --> p1
+    p1 --> b1
+    p1 --> b2
+    root --> more
+    root -.-> retention
 ```
 
 **DR Procedure**:
@@ -496,7 +576,7 @@ $$\text{Processing Latency (ms)} = \frac{T_{end} - T_{start}}{1{,}000{,}000}$$
 $$\text{Node Skew}_i(t) = W_{max}(t) - LW_i(t)$$
 
 Trong đó:
-- `LW_i(t) = min_{P_k ∈ Node_i}(LW_i(P_k))` — partition chậm nhất của Node i.
+- $LW_i(t) = \min_{P_k \in Node_i}(LW_i(P_k))$ — partition chậm nhất của Node $i$.
 - `W_max(t) = max_{j ∈ All Nodes}(LW_j(t))` — Node đi nhanh nhất toàn cụm.
 
 **Alert thresholds**:
@@ -513,7 +593,7 @@ Skew không phát hiện được khi cả cụm cùng chậm. Bổ sung metric:
 
 $$\text{Watermark Lag}(t) = \text{wall\_clock}(t) - W_{global}(t) - \delta_{base}$$
 
-Bình thường, `W_global` chậm hơn wall-clock đúng `δ_base = 10s`. Lag dương = cụm đang trôi.
+Bình thường, $W_{global}$ chậm hơn wall-clock đúng $\delta_{base} = 10s$. Lag dương = cụm đang trôi.
 
 **Alert thresholds**:
 
@@ -575,40 +655,100 @@ Mỗi Node sống nạp Checkpoint từ Tier 2, seek về Offset+1, kéo từ Bo
 
 Hai vòng lọc khi Replay:
 
-- **Watermark Filter**: `T_event < W_global` → drop (Window đã chốt).
+- **Watermark Filter**: $T_{event} < W_{global}$ → drop (Window đã chốt).
 - **State Hash Filter**: tra bảng băm `log_id` trong RocksDB (kèm TTL §6.5) → drop duplicate.
 
 Đảm bảo Exactly-Once **input** semantics.
 
 ### 8.5. Tầng 5 — Strict Failback Protocol (State Machine)
 
-Khi Node phục hồi, failback **không tự phát** mà qua state machine do Coordinator điều phối (replicated trong Raft log):
+**Failback** là quá trình trả một partition về Node ban đầu sau khi Node đó đã hồi phục. Ví dụ: Node 3 từng xử lý `P7-P9`, sau đó sập; Coordinator tạm chuyển `P7-P9` sang Node 2. Khi Node 3 sống lại, Node 3 **không được tự mở lại** các partition này. Mọi bước chuyển quyền sở hữu phải đi qua Coordinator.
 
-**Partition State Machine**:
+Mục tiêu của tầng này là bảo vệ ba invariant:
 
+| Invariant | Ý nghĩa |
+|---|---|
+| **Single owner** | Tại một thời điểm, mỗi partition chỉ có một Worker được phép consume và ghi state. |
+| **Durable handoff** | Trước khi chuyển owner, Node đang gánh hộ phải pause, flush state và ghi checkpoint thành công. |
+| **Fenced command** | Mọi lệnh điều phối đều kèm `term` và `command_id`; Worker từ chối lệnh cũ từ Leader đã hết nhiệm kỳ. |
+
+Nếu không có protocol này, Node vừa hồi phục có thể xử lý cùng partition với Node đang gánh hộ, gây duplicate output, lệch Kafka offset và phá vỡ exactly-once.
+
+#### Partition State Machine
+
+Coordinator giữ trạng thái của từng partition trong Raft log. Mỗi transition đều durable và replicated trước khi Worker thực hiện hành động tương ứng.
+
+| State | Ý nghĩa | Ai được consume? |
+|---|---|---|
+| `ASSIGNED` | Partition đang được một Node xử lý ổn định. | Owner hiện tại |
+| `REASSIGNING` | Partition đang được chuyển từ Node cũ/gánh hộ sang Node đích. | Chỉ Node đang gánh hộ cho đến khi nhận lệnh pause |
+| `PAUSED` | Partition đã tạm dừng consume để flush checkpoint hoặc giảm backpressure. | Không consume |
+| `ORPHANED` | Chưa có Node hợp lệ sở hữu partition. | Không consume |
+
+```mermaid
+stateDiagram-v2
+    [*] --> ASSIGNED
+    ASSIGNED: Node X đang xử lý
+    REASSIGNING: Đang transfer từ X sang Y
+    ORPHANED: Không có Node nào xử lý
+    PAUSED: Tạm dừng (Backpressure)
+
+    ASSIGNED --> REASSIGNING: reassign requested
+    REASSIGNING --> ASSIGNED: transfer complete
+    ASSIGNED --> PAUSED: backpressure
+    PAUSED --> ASSIGNED: resume
+    REASSIGNING --> ORPHANED: source lost before target ready
+    ORPHANED --> REASSIGNING: coordinator selects owner
+
+    note right of REASSIGNING
+      Mỗi transition write vào Raft log,
+      durable và replicated.
+    end note
 ```
-States:
-  ASSIGNED       — Node X đang xử lý
-  REASSIGNING    — Đang transfer từ X sang Y
-  ORPHANED       — Không có Node nào xử lý
-  PAUSED         — Tạm dừng (Backpressure)
 
-Mỗi transition write vào Raft log → durable, replicated.
+#### Quy trình failback 5 bước
+
+Ví dụ dưới đây mô tả Node 3 hồi phục và xin nhận lại `P7-P9` từ Node đang gánh hộ. Mỗi bước là một command có `term` và `command_id`, đồng thời được ghi nhận trong Raft log để có thể resume nếu Coordinator Leader thay đổi giữa chừng.
+
+```mermaid
+sequenceDiagram
+    participant N3 as Node 3
+    participant C as Coordinator
+    participant S as Node gánh hộ
+    participant K as Kafka Consumer Group
+
+    N3->>C: Request reassign P7-P9 sau phục hồi
+    C->>C: Write REASSIGNING vào Raft log
+    C->>S: PAUSE command with fencing term
+    S->>S: Stop consume, flush state, write checkpoint
+    S-->>C: Ack checkpoint ready
+    C->>C: Write PAUSED/checkpoint metadata vào Raft log
+    C->>K: Reassign partitions về Node 3
+    N3->>N3: Nạp checkpoint và seek(offset + 1)
+    N3-->>C: Resume ack ASSIGNED
+    C->>C: Write ASSIGNED(Node 3) vào Raft log
 ```
 
-**Failback 5 bước** (mỗi bước là một state transition replicated):
+Diễn giải từng bước:
 
-```
-[Bước 1] Node 3 phục hồi → request reassign P7-P9 → Coord write REASSIGNING.
-[Bước 2] Coord → PAUSE command cho Node gánh hộ (with fencing term).
-[Bước 3] Node gánh hộ: stop consume, flush state, write checkpoint, ack.
-[Bước 4] Coord update Kafka consumer group → reassign về Node 3.
-[Bước 5] Node 3 nạp checkpoint, seek(offset+1), resume → ack ASSIGNED.
-```
+1. **Request**: Node 3 chỉ báo "tôi đã hồi phục", không tự nhận partition.
+2. **Mark reassignment**: Coordinator ghi `REASSIGNING` vào Raft log để khóa partition trong quá trình chuyển giao.
+3. **Pause source**: Node đang gánh hộ dừng consume, flush RocksDB/WAL, ghi checkpoint và trả về offset cuối cùng đã xử lý.
+4. **Move ownership**: Coordinator cập nhật Kafka consumer group, rồi chỉ định Node 3 là owner mới bằng command có fencing token.
+5. **Resume target**: Node 3 nạp checkpoint, `seek(offset + 1)`, bắt đầu consume tiếp và ack để Coordinator ghi `ASSIGNED`.
 
-**Recovery khi Coordinator Leader thay đổi giữa failback**:
+#### Recovery khi Coordinator Leader thay đổi giữa failback
 
-New leader đọc state machine từ Raft log → biết đang ở step nào → resume idempotently. Worker reject command stale qua fencing token.
+Leader mới đọc lại state machine từ Raft log và tiếp tục theo trạng thái hiện tại:
+
+| State đọc từ Raft log | Hành động resume |
+|---|---|
+| `ASSIGNED(Node X)` | Giữ nguyên owner, không làm gì thêm. |
+| `REASSIGNING(X -> Y)` | Kiểm tra source đã pause/checkpoint chưa; nếu chưa thì gửi lại PAUSE command cùng `command_id`. |
+| `PAUSED` | Nếu checkpoint đã có metadata hợp lệ, tiếp tục reassign sang target; nếu thiếu checkpoint thì yêu cầu source flush lại. |
+| `ORPHANED` | Chọn owner mới dựa trên partition assignment, checkpoint mới nhất và fencing term hiện tại. |
+
+Nhờ `command_id`, Worker có thể ack lại lệnh đã xử lý mà không thực thi hai lần. Nhờ `term`, Worker từ chối lệnh từ Leader cũ sau network partition.
 
 ### 8.6. Tầng 6 — Tiered Partition-Level Eviction (Sửa lỗi Disk Swelling bằng Tiered Storage)
 
@@ -620,17 +760,28 @@ Nếu kéo giãn thời gian chờ $\delta_{temp} = 20\text{ phút}$ cho toàn c
 
 Hệ thống khắc phục triệt để bằng giải pháp Quy trình xả dữ liệu phân tầng (Tiered Eviction):
 
-```
-[COORDINATOR] ──► Phát hiện Node 3 hồi phục, phân vùng mồ côi: {P7, P8, P9}
-      │
-      └─► Kích hoạt cơ chế xả đĩa phân tầng tại Worker Nodes:
-            ├── Normal Partitions (P1..P6, P10..P12) ──► Chốt khi window_end ≤ LW_i(P_k) 
-            │                                           └──► Đẩy thẳng lên TIER 3 (MinIO Cold Storage)
-            │                                           └──► Purge lập tức khỏi TIER 1 (Local SSD)
-            │
-            └── Recovery Partitions (P7, P8, P9)     ──► Chốt sổ độc lập, Window nào xong là
-                                                        └──► Flush ngay xuống TIER 2 / TIER 3
-                                                        └──► Không cho tích tụ lâu tại TIER 1
+```mermaid
+flowchart TB
+    coord["Coordinator<br/>Phát hiện Node 3 hồi phục<br/>Phân vùng mồ côi: P7, P8, P9"]
+    trigger["Kích hoạt cơ chế xả đĩa phân tầng tại Worker Nodes"]
+    normal["Normal Partitions<br/>P1..P6, P10..P12"]
+    recovery["Recovery Partitions<br/>P7, P8, P9"]
+    normal_close["Chốt khi window_end <= LW_i(P_k)"]
+    tier3["Đẩy thẳng lên Tier 3<br/>MinIO Cold Storage"]
+    purge["Purge lập tức khỏi Tier 1<br/>Local SSD"]
+    recovery_close["Chốt sổ độc lập<br/>Window nào xong là xử lý ngay"]
+    flush["Flush ngay xuống Tier 2 / Tier 3"]
+    no_accumulate["Không cho tích tụ lâu tại Tier 1"]
+
+    coord --> trigger
+    trigger --> normal
+    trigger --> recovery
+    normal --> normal_close
+    normal_close --> tier3
+    normal_close --> purge
+    recovery --> recovery_close
+    recovery_close --> flush
+    recovery_close --> no_accumulate
 ```
 #### 8.6.1. Chốt sổ độc lập & Đẩy phân tầng cấp Phân vùng (Partition-Level Window Eviction & Tiered Offloading)
 
@@ -669,6 +820,14 @@ Trong Replay-Mode, vẫn checkpoint mỗi 10s nhưng đánh dấu:
 ```
 
 Recovery: Node tiếp quản đọc replay checkpoint → resume replay từ offset 4300, không từ đầu.
+
+**High-level**: Replay không được xem là một thao tác khởi động lại nguyên khối. Nó là một tiến trình dài có thể checkpoint giữa chừng, để nếu Worker sập lần nữa thì chỉ replay tiếp phần còn thiếu.
+
+**Low-level**:
+- Replay checkpoint lưu `start_offset`, `current_offset`, `target_offset` và tỷ lệ hoàn thành.
+- Sau mỗi batch đủ lớn hoặc mỗi checkpoint interval, Worker ghi `current_offset` mới xuống RocksDB/metadata.
+- Khi phục hồi, Worker đọc replay checkpoint trước; nếu còn replay dở thì `seek(current_offset)` hoặc `seek(current_offset + 1)` theo offset đã xác nhận xử lý cuối cùng, thay vì quay lại `start_offset`.
+- Khi `current_offset >= target_offset`, Worker xóa cờ replay và chuyển về chế độ realtime.
 
 ---
 
@@ -733,18 +892,18 @@ On receive emit_payload:
 
 ### 10.1. Two-Tier Heartbeat
 
-Ngoài Punctuation Token đi qua Kafka, Ingestor gửi heartbeat **out-of-band** lên Coordinator (HTTP/gRPC) mỗi 5 giây:
+Ngoài Punctuation Token đi qua Kafka, Ingestor gửi heartbeat **out-of-band** trực tiếp qua giao diện gRPC lên Coordinator mỗi 5 giây bằng cách truyền thông điệp nhịp tim của Ingestor.
 
-```
-POST /coordinator/ingestor-heartbeat
-{
-  "ingestor_id": "ingestor-1",
-  "partitions_assigned": [P1, P2, P3],
-  "last_log_offset": {P1: 1500, P2: 1480, P3: 1490},
-  "last_punctuation_T_commit": 1704067200.500,
-  "ingestor_clock": 1704067205.123  ← để Coordinator detect clock skew
-}
-```
+#### Thông điệp nhịp tim Ingestor (Ingestor Heartbeat Message)
+- `ingestor_id` (Kiểu chuỗi): Định danh duy nhất của Ingestor.
+- `T_commit` (Kiểu số thực): Mốc thời gian cam kết hiện tại của Ingestor.
+- `timestamp` (Kiểu số thực): Thời gian gửi gói tin vật lý.
+- `partitions_assigned` (Danh sách phân vùng): Các phân vùng Ingestor chịu trách nhiệm gửi.
+- `last_log_offset` (Kiểu số nguyên): Offset log cuối cùng được sinh ra.
+- `ingestor_clock` (Kiểu số thực): Thời gian đồng hồ vật lý của Ingestor.
+- `offsets` (Bản đồ phân vùng -> Vị trí): Vị trí offset gửi trên mỗi phân vùng.
+
+Khi nhận được báo cáo nhịp tim từ Ingestor, Coordinator sẽ phân tích các thông số mốc thời gian cam kết logic, thời gian đồng hồ vật lý và vị trí offset hiện tại để giám sát sức khỏe của Ingestor.
 
 ### 10.2. Coordinator Validation
 
@@ -799,8 +958,10 @@ Nếu `W_meta_global` lệch `W_global` quá nhiều (> 10s) → cảnh báo Ing
 | Watermark Lag Warning            | 30 giây        | Latency       | Cụm bắt đầu chậm                              |
 | Watermark Lag Critical           | 60 giây        | Latency       | SLA vi phạm                                    |
 | **Robustness**                   |                |               |                                                |
-| Backpressure Queue Maxsize       | 500            | Robustness    | Hard limit per-partition                       |
-| Backpressure Resume Threshold    | 20% (= 100)    | Robustness    | Resume consumer khi vơi                       |
+| Backpressure Queue Maxsize       | BP_PAUSE_THRESHOLD (500) | Robustness  | Ngưỡng dừng consumer per-partition (cấu hình qua env) |
+| Backpressure Resume Threshold    | BP_RESUME_THRESHOLD (100) | Robustness | Ngưỡng tiếp tục consumer (cấu hình qua env) |
+| Strict Drain Sleep               | STRICT_DRAIN_SLEEP_S (0.1) | Robustness | Chu kỳ giải phóng hàng đợi chạy nền (s) |
+| Strict Drain Batch Size          | STRICT_DRAIN_BATCH_SIZE (200) | Robustness | Batch size pop khỏi Priority Queue mỗi chu kỳ |
 | Worker Heartbeat Timeout         | 10 giây        | Robustness    | Detect Worker sập → Failover                  |
 | Kafka Partitions Count           | 12             | Robustness    | Phân mảnh mịn                                  |
 | Number of Workers                | 4              | Robustness    | Mỗi Worker quản lý 3 partitions               |

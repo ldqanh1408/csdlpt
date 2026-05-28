@@ -5,6 +5,7 @@ import logging
 import os
 import json
 import tempfile
+import threading
 import time
 import pickle
 from collections import defaultdict
@@ -80,6 +81,7 @@ class StrictWatermarkEngine:
         # Time-based checkpoint (spec §6.3: every 10s)
         self._last_checkpoint_time: float = time.time()
         self._checkpoint_interval_s: float = 10.0
+        self._checkpoint_lock = threading.RLock()
 
         self.metrics = SystemMetrics()
         self.proc_latencies_ns: list[float] = []
@@ -434,6 +436,8 @@ class StrictWatermarkEngine:
 
         lat_ns = HighResTimer.now_ns() - t0
         self.proc_latencies_ns.append(lat_ns)
+        if len(self.proc_latencies_ns) > 10000:
+            self.proc_latencies_ns.pop(0)
         return lat_ns
 
     def _list_sst_files(self, ckpt_dir: str) -> list[str]:
@@ -447,6 +451,10 @@ class StrictWatermarkEngine:
         return sorted(sst_files)
 
     def checkpoint(self) -> None:
+        with self._checkpoint_lock:
+            return self._checkpoint_impl()
+
+    def _checkpoint_impl(self) -> None:
         # Purge stale dedup entries before checkpoint (spec §6.3 + §6.5)
         self._purge_seen_ids()
 
@@ -474,10 +482,36 @@ class StrictWatermarkEngine:
             "sst_files_manifest": sst_manifest,
             "term_at_checkpoint": self.raft_term,
         }
-        tmp = path + ".tmp"
-        with open(tmp, "w") as f:
-            json.dump(snap, f)
-        os.replace(tmp, path)
+        os.makedirs(self.checkpoint_dir, exist_ok=True)
+        tmp = None
+        for attempt in range(5):
+            try:
+                with tempfile.NamedTemporaryFile(
+                    "w",
+                    dir=self.checkpoint_dir,
+                    prefix="checkpoint.",
+                    suffix=".tmp",
+                    delete=False,
+                ) as f:
+                    tmp = f.name
+                    json.dump(snap, f)
+                    f.flush()
+                    os.fsync(f.fileno())
+                os.replace(tmp, path)
+                tmp = None
+                break
+            except FileNotFoundError:
+                if attempt == 4:
+                    raise
+                os.makedirs(self.checkpoint_dir, exist_ok=True)
+                time.sleep(0.05)
+            finally:
+                if tmp and os.path.exists(tmp):
+                    try:
+                        os.unlink(tmp)
+                    except OSError:
+                        pass
+
 
         # RocksDB checkpoint metadata (durable alongside JSON)
         if self._store is not None:
@@ -639,18 +673,51 @@ class StrictWatermarkEngine:
             if self._store is not None
             else len(self._seen_ids_ttl)
         )
+        latencies = self.proc_latencies_ns
+        p50 = 0.0
+        p95 = 0.0
+        p99 = 0.0
+        if latencies:
+            sorted_l = sorted(latencies)
+            n = len(sorted_l)
+            p50 = sorted_l[int(n * 0.5)] / 1000.0
+            p95 = sorted_l[int(n * 0.95)] / 1000.0
+            p99 = sorted_l[int(n * 0.99)] / 1000.0
+
+        def _lat_us(values: list[float], percentile: float) -> float:
+            values = [v for v in values if v >= 0]
+            if not values:
+                return 0.0
+            sorted_v = sorted(values)
+            idx = min(int(len(sorted_v) * percentile), len(sorted_v) - 1)
+            return round(sorted_v[idx] / 1000.0, 2)
+
         result = {
             "mode": "strict",
             "watermark": self.watermark,
             "delta_base_s": self.delta_base,
             "open_windows": open_count,
             "closed_windows": closed_count,
+            "total_received": self.metrics.total_received,
+            "on_time": self.metrics.on_time,
             "data_completeness_pct": self.metrics.data_completeness(),
             "late_dropped": self.metrics.late_dropped,
             "duplicates_filtered": self.metrics.duplicates,
             "backpressure_drops": self.metrics.backpressure_drops,
             "non_monotonic_punctuation": self.metrics.non_monotonic_punctuation,
             "dedup_ttl_entries": seen_count,
+            "proc_latency_p50_us": round(p50, 2),
+            "proc_latency_p95_us": round(p95, 2),
+            "proc_latency_p99_us": round(p99, 2),
+            "poll_decode_latency_p50_us": _lat_us(self.metrics.T_poll_decode_ns, 0.50),
+            "poll_decode_latency_p95_us": _lat_us(self.metrics.T_poll_decode_ns, 0.95),
+            "poll_decode_latency_p99_us": _lat_us(self.metrics.T_poll_decode_ns, 0.99),
+            "dedup_latency_p50_us": _lat_us(self.metrics.T_deduplication_ns, 0.50),
+            "dedup_latency_p95_us": _lat_us(self.metrics.T_deduplication_ns, 0.95),
+            "dedup_latency_p99_us": _lat_us(self.metrics.T_deduplication_ns, 0.99),
+            "state_write_latency_p50_us": _lat_us(self.metrics.T_state_write_ns, 0.50),
+            "state_write_latency_p95_us": _lat_us(self.metrics.T_state_write_ns, 0.95),
+            "state_write_latency_p99_us": _lat_us(self.metrics.T_state_write_ns, 0.99),
         }
         if self.tiered_storage:
             result["tier_storage"] = self.tiered_storage.get_storage_stats()

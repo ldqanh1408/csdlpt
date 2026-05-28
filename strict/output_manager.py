@@ -7,6 +7,7 @@ Transactional Sink (Two-Phase Commit via MockTransactionalSink).
 import json
 import logging
 import os
+import tempfile
 import threading
 import time
 from enum import Enum
@@ -265,10 +266,28 @@ class OutputManager:
         """Persist _emitted set to a JSON file for crash recovery."""
         with self._lock:
             data = {"emitted": sorted(self._emitted), "count": self._emission_count}
-        tmp = path + ".tmp"
-        with open(tmp, "w") as f:
-            json.dump(data, f)
-        os.replace(tmp, path)
+            os.makedirs(os.path.dirname(path), exist_ok=True)
+            tmp = None
+            try:
+                with tempfile.NamedTemporaryFile(
+                    "w",
+                    dir=os.path.dirname(path),
+                    prefix=os.path.basename(path) + ".",
+                    suffix=".tmp",
+                    delete=False,
+                ) as f:
+                    tmp = f.name
+                    json.dump(data, f)
+                    f.flush()
+                    os.fsync(f.fileno())
+                os.replace(tmp, path)
+                tmp = None
+            finally:
+                if tmp and os.path.exists(tmp):
+                    try:
+                        os.unlink(tmp)
+                    except OSError:
+                        pass
 
     def load_emitted(self, path: str) -> None:
         """Restore _emitted set from a JSON file after restart."""

@@ -15,6 +15,7 @@ import json
 import os
 import glob
 import pandas as pd
+import concurrent.futures
 from pathlib import Path
 from datetime import datetime
 
@@ -45,7 +46,7 @@ WORKERS_SIM = {
 }
 
 INFRA_FULL = {
-    "Kafka":      {"port": 9092, "health": None},
+    "Kafka":      {"port": 29092, "health": None},
     "ZooKeeper":  {"port": 2181, "health": None},
     "Prometheus": {"port": 9090, "health": "http://localhost:9090/-/healthy"},
     "Grafana":    {"port": 3000, "health": "http://localhost:3000/api/health"},
@@ -132,6 +133,7 @@ def get_datasets() -> dict[str, str]:
     return {os.path.relpath(f, DATASET_DIR).replace("\\", "/"): f for f in csvs}
 
 
+@st.cache_data
 def count_csv_rows(path: str) -> int:
     try:
         with open(path) as f:
@@ -222,6 +224,30 @@ def compose_logs(service: str = "", tail: int = 150) -> str:
 
 
 # ---------------------------------------------------------------------------
+# Formatting helpers
+# ---------------------------------------------------------------------------
+
+def format_timestamp(val) -> str:
+    """Format an epoch float to 'YYYY-MM-DD HH:MM:SS' if it looks like a Unix timestamp.
+    Returns a dash for None/inf/-inf, or the raw value as string otherwise.
+    """
+    if val is None:
+        return "—"
+    try:
+        v = float(val)
+    except (TypeError, ValueError):
+        return str(val)
+    if v in (float("inf"), float("-inf")) or v != v:  # nan check
+        return "—"
+    if v > 1e8:  # looks like Unix epoch (after year 1973)
+        try:
+            return datetime.fromtimestamp(v).strftime("%Y-%m-%d %H:%M:%S")
+        except (OSError, ValueError, OverflowError):
+            return f"{v:.1f}"
+    return f"{v:.3f}"
+
+
+# ---------------------------------------------------------------------------
 # Metrics fetching
 # ---------------------------------------------------------------------------
 
@@ -262,20 +288,63 @@ def check_infra_health(name: str) -> bool:
         return False
 
 
+def _infra_key(name: str) -> str | None:
+    """Return the configured infra display key for a docker service name."""
+    lname = name.lower()
+    for key in _infra():
+        if key.lower() == lname:
+            return key
+    return None
+
+
 def fetch_all_metrics(mode: str) -> dict:
     result = {"timestamp": time.time(), "mode": mode, "workers": {}}
 
+    urls_to_fetch = {}
+
+    # 1. Workers
     for name, info in _workers().items():
         port = info["port"] if isinstance(info, dict) else info
-        metrics = _get_json(f"http://localhost:{port}/api/metrics")
-        state = _get_json(f"http://localhost:{port}/state")
+        urls_to_fetch[f"w_m_{name}"] = (f"http://localhost:{port}/api/metrics", 1.5)
+        urls_to_fetch[f"w_s_{name}"] = (f"http://localhost:{port}/state", 1.5)
+
+    # 2. Coordinators
+    for cname, cport in _coordinators().items():
+        urls_to_fetch[f"c_{cname}"] = (f"http://localhost:{cport}/state", 1.5)
+
+    # 3. Aggregator
+    if mode in ("heuristic", "hybrid"):
+        agg_port = _aggregator_port()
+        urls_to_fetch["aggregator"] = (f"http://localhost:{agg_port}/state", 1.5)
+
+    # Fetch in parallel
+    fetched = {}
+    if urls_to_fetch:
+        with concurrent.futures.ThreadPoolExecutor(max_workers=len(urls_to_fetch)) as executor:
+            future_to_key = {
+                executor.submit(_get_json, url, timeout): key
+                for key, (url, timeout) in urls_to_fetch.items()
+            }
+            for future in concurrent.futures.as_completed(future_to_key):
+                key = future_to_key[future]
+                try:
+                    fetched[key] = future.result()
+                except Exception:
+                    fetched[key] = None
+
+    # Assemble workers
+    for name, info in _workers().items():
+        port = info["port"] if isinstance(info, dict) else info
+        metrics = fetched.get(f"w_m_{name}")
+        state = fetched.get(f"w_s_{name}")
         if metrics or state:
             result["workers"][name] = {"metrics": metrics, "state": state, "port": port}
 
-    # Try all coordinators, pick the one with valid W_global (leader)
+    # Assemble coordinator
     best_coord = None
+    best_cname = None
     for cname, cport in _coordinators().items():
-        coord = _get_json(f"http://localhost:{cport}/state", timeout=3.0)
+        coord = fetched.get(f"c_{cname}")
         if coord is None:
             continue
         wg = coord.get("W_global")
@@ -283,22 +352,19 @@ def fetch_all_metrics(mode: str) -> dict:
             result["coordinator"] = coord
             result["coordinator_name"] = cname
             best_coord = coord
+            best_cname = cname
             break
         if best_coord is None:
             best_coord = coord
-            result["coordinator"] = coord
-            result["coordinator_name"] = cname
-    # Fallback to any responding coordinator
-    if best_coord is None:
-        for cname, cport in _coordinators().items():
-            coord = _get_json(f"http://localhost:{cport}/state", timeout=1.5)
-            if coord:
-                result["coordinator"] = coord
-                result["coordinator_name"] = cname
-                break
+            best_cname = cname
 
+    if best_coord:
+        result["coordinator"] = best_coord
+        result["coordinator_name"] = best_cname
+
+    # Assemble aggregator
     if mode in ("heuristic", "hybrid"):
-        agg = _get_json(f"http://localhost:{_aggregator_port()}/state")
+        agg = fetched.get("aggregator")
         if agg:
             result["aggregator"] = agg
 
@@ -306,7 +372,7 @@ def fetch_all_metrics(mode: str) -> dict:
 
 
 def aggregate_worker_metrics(metrics: dict) -> dict:
-    """Aggregate metrics from all workers into a single summary."""
+    """Aggregate metrics from all workers into a single summary including latency percentiles."""
     total_recv = 0
     total_on_time = 0
     total_late = 0
@@ -316,6 +382,43 @@ def aggregate_worker_metrics(metrics: dict) -> dict:
     total_dlq = 0
     total_sketch = 0
     total_extreme_lag = 0
+
+    # Latency collection across all workers/partitions
+    proc_p50_vals, proc_p95_vals, proc_p99_vals = [], [], []
+    sketch_p50_vals, sketch_p95_vals, sketch_p99_vals = [], [], []
+    wm_lag_vals = []
+    poll_decode_p95_vals, dedup_p95_vals, state_write_p95_vals = [], [], []
+    sketch_update_p95_vals, sketch_query_p95_vals = [], []
+
+    def _collect_latency_from(d: dict):
+        """Extract latency fields from a partition or engine metrics dict."""
+        if not isinstance(d, dict):
+            return
+        p50 = d.get("proc_latency_p50_us", 0.0)
+        p95 = d.get("proc_latency_p95_us", 0.0)
+        p99 = d.get("proc_latency_p99_us", 0.0)
+        if p50: proc_p50_vals.append(p50)
+        if p95: proc_p95_vals.append(p95)
+        if p99: proc_p99_vals.append(p99)
+        sp50 = d.get("sketch_quantile_p50_ms", 0.0)
+        sp95 = d.get("sketch_quantile_p95_ms", 0.0)
+        sp99 = d.get("sketch_quantile_p99_ms", 0.0)
+        if sp50: sketch_p50_vals.append(sp50)
+        if sp95: sketch_p95_vals.append(sp95)
+        if sp99: sketch_p99_vals.append(sp99)
+        wl = d.get("watermark_lag_s")
+        if wl and wl > 0:
+            wm_lag_vals.append(wl)
+        for field, target in (
+            ("poll_decode_latency_p95_us", poll_decode_p95_vals),
+            ("dedup_latency_p95_us", dedup_p95_vals),
+            ("state_write_latency_p95_us", state_write_p95_vals),
+            ("sketch_update_latency_p95_us", sketch_update_p95_vals),
+            ("sketch_query_latency_p95_us", sketch_query_p95_vals),
+        ):
+            val = d.get(field, 0.0)
+            if val:
+                target.append(val)
 
     for wname, wdata in metrics.get("workers", {}).items():
         m = wdata.get("metrics")
@@ -331,6 +434,14 @@ def aggregate_worker_metrics(metrics: dict) -> dict:
             total_dlq += m.get("dlq_backlog", 0)
             total_sketch += m.get("sketch_total_count", 0)
             total_extreme_lag += m.get("extreme_lag_count", 0)
+            _collect_latency_from(m)
+            if not any(m.get(f, 0.0) for f in (
+                "proc_latency_p95_us",
+                "sketch_update_latency_p95_us",
+                "dedup_latency_p95_us",
+            )):
+                for pdata in m.get("partitions", {}).values():
+                    _collect_latency_from(pdata)
         elif "partitions" in m:
             for pid, pdata in m.get("partitions", {}).items():
                 if not isinstance(pdata, dict):
@@ -344,10 +455,14 @@ def aggregate_worker_metrics(metrics: dict) -> dict:
                 total_dlq += pdata.get("dlq_backlog", 0)
                 total_sketch += pdata.get("sketch_total_count", 0)
                 total_extreme_lag += pdata.get("extreme_lag_count", 0)
+                _collect_latency_from(pdata)
 
     unique = max(total_recv - total_dupes, 1)
     completeness = 100.0 * total_on_time / unique
     late_rate = 100.0 * total_late / max(total_recv, 1)
+
+    def _avg(lst): return round(sum(lst) / len(lst), 2) if lst else 0.0
+    def _max(lst): return round(max(lst), 2) if lst else 0.0
 
     return {
         "total_received": total_recv,
@@ -361,6 +476,23 @@ def aggregate_worker_metrics(metrics: dict) -> dict:
         "dlq_backlog": total_dlq,
         "sketch_total_count": total_sketch,
         "extreme_lag_count": total_extreme_lag,
+        # Processing latency (microseconds)
+        "proc_lat_p50_us": _avg(proc_p50_vals),
+        "proc_lat_p95_us": _avg(proc_p95_vals),
+        "proc_lat_p99_us": _avg(proc_p99_vals),
+        "proc_lat_p99_max_us": _max(proc_p99_vals),
+        "poll_decode_p95_us": _avg(poll_decode_p95_vals),
+        "dedup_p95_us": _avg(dedup_p95_vals),
+        "state_write_p95_us": _avg(state_write_p95_vals),
+        "sketch_update_p95_us": _avg(sketch_update_p95_vals),
+        "sketch_query_p95_us": _avg(sketch_query_p95_vals),
+        # Event-time lag from DDSketch (milliseconds)
+        "sketch_p50_ms": _avg(sketch_p50_vals),
+        "sketch_p95_ms": _avg(sketch_p95_vals),
+        "sketch_p99_ms": _avg(sketch_p99_vals),
+        # Watermark lag
+        "wm_lag_avg_s": _avg(wm_lag_vals),
+        "wm_lag_max_s": _max(wm_lag_vals),
     }
 
 
@@ -389,12 +521,30 @@ def _collect_partition_data(metrics: dict):
                 "late": pdata.get("late_dropped", 0),
                 "completeness": round(pdata.get("data_completeness_pct", 0), 2),
                 "dlq": pdata.get("dlq_backlog", 0),
-                "dupes": pdata.get("duplicates", 0),
+                "dupes": pdata.get("duplicates_filtered", pdata.get("duplicates", 0)),
                 "bp_drops": pdata.get("backpressure_drops", 0),
                 "cold_start": pdata.get("cold_start", {}),
                 "negative_lag": pdata.get("negative_lag", {}),
                 "extreme_lag": pdata.get("extreme_lag_count", 0),
                 "replay": pdata.get("replay_mode", pdata.get("replay_mode_active", False)),
+                "sketch_p50": pdata.get("sketch_quantile_p50_ms", 0.0),
+                "sketch_p95": pdata.get("sketch_quantile_p95_ms", 0.0),
+                "sketch_p99": pdata.get("sketch_quantile_p99_ms", 0.0),
+                "proc_p50": pdata.get("proc_latency_p50_us", 0.0),
+                "proc_p95": pdata.get("proc_latency_p95_us", 0.0),
+                "proc_p99": pdata.get("proc_latency_p99_us", 0.0),
+                "poll_decode_p95": pdata.get("poll_decode_latency_p95_us", 0.0),
+                "dedup_p95": pdata.get("dedup_latency_p95_us", 0.0),
+                "state_write_p95": pdata.get("state_write_latency_p95_us", 0.0),
+                "sketch_update_p95": pdata.get("sketch_update_latency_p95_us", 0.0),
+                "sketch_query_p95": pdata.get("sketch_query_latency_p95_us", 0.0),
+                "neg_lag_rate": pdata.get("negative_lag_rate", 0.0),
+                "est_drift": pdata.get("estimator_drift", 0.0),
+                "open_windows": pdata.get("open_windows", 0),
+                "closed_windows": pdata.get("closed_windows", 0),
+                "dedup_ttl": pdata.get("dedup_ttl_entries", 0),
+                "fencing_violations": pdata.get("fencing_token_violations", 0),
+                "non_monotonic_punctuation": pdata.get("non_monotonic_punctuation", 0),
             }
             rows.append(row)
     return rows
@@ -451,7 +601,7 @@ def _heuristic_kpi_row(metrics: dict, agg: dict):
     wgh = agg_state.get("W_global_h")
     if wgh is not None and wgh != float("-inf"):
         try:
-            wgh_str = datetime.fromtimestamp(wgh).strftime("%H:%M:%S")
+            wgh_str = datetime.fromtimestamp(wgh).strftime("%Y-%m-%d %H:%M:%S")
         except (OSError, ValueError, OverflowError):
             wgh_str = f"{wgh:.1f}"
         c4.metric("W_global_h", wgh_str)
@@ -459,8 +609,16 @@ def _heuristic_kpi_row(metrics: dict, agg: dict):
         c4.metric("W_global_h", "—")
 
     if wh_vals:
-        c5.metric("Max W_h", f"{max(wh_vals):.1f}")
-        c6.metric("Min W_h", f"{min(wh_vals):.1f}")
+        try:
+            max_wh_str = datetime.fromtimestamp(max(wh_vals)).strftime("%Y-%m-%d %H:%M:%S")
+        except (OSError, ValueError, OverflowError):
+            max_wh_str = f"{max(wh_vals):.1f}"
+        try:
+            min_wh_str = datetime.fromtimestamp(min(wh_vals)).strftime("%Y-%m-%d %H:%M:%S")
+        except (OSError, ValueError, OverflowError):
+            min_wh_str = f"{min(wh_vals):.1f}"
+        c5.metric("Max W_h", max_wh_str)
+        c6.metric("Min W_h", min_wh_str)
         c7.metric("W_h Span (s)", f"{max(wh_vals) - min(wh_vals):.1f}")
     else:
         c5.metric("Max W_h", "—")
@@ -681,6 +839,38 @@ def render_dashboard(mode: str, metrics: dict):
     if mode == "heuristic":
         _heuristic_kpi_row(metrics, agg)
 
+    # Performance Latency KPIs (both strict & heuristic)
+    p50 = agg.get("proc_lat_p50_us", 0.0)
+    p95 = agg.get("proc_lat_p95_us", 0.0)
+    p99 = agg.get("proc_lat_p99_us", 0.0)
+    p99mx = agg.get("proc_lat_p99_max_us", 0.0)
+    sp50 = agg.get("sketch_p50_ms", 0.0)
+    sp95 = agg.get("sketch_p95_ms", 0.0)
+    sp99 = agg.get("sketch_p99_ms", 0.0)
+    wlag_avg = agg.get("wm_lag_avg_s", 0.0)
+    wlag_max = agg.get("wm_lag_max_s", 0.0)
+    if metrics.get("workers"):
+        st.markdown("---")
+        st.markdown("#### Processing Latency & Lag")
+        lc1, lc2, lc3, lc4, lc5, lc6, lc7 = st.columns(7)
+        lc1.metric("Proc p50", f"{p50:.0f} µs" if p50 else "—")
+        lc2.metric("Proc p95", f"{p95:.0f} µs" if p95 else "—")
+        lc3.metric("Proc p99", f"{p99:.0f} µs" if p99 else "—")
+        lc4.metric("Proc p99 (max)", f"{p99mx:.0f} µs" if p99mx else "—")
+        lc5.metric("Event-Lag p50", f"{sp50:.1f} ms" if sp50 else "—")
+        lc6.metric("Event-Lag p99", f"{sp99:.1f} ms" if sp99 else "—")
+        lc7.metric("WM Lag (avg/max)", f"{wlag_avg:.1f}s / {wlag_max:.1f}s" if wlag_avg else "—")
+        if mode == "strict":
+            sl1, sl2, sl3 = st.columns(3)
+            sl1.metric("Poll Decode p95", f"{agg.get('poll_decode_p95_us', 0.0):.0f} us" if agg.get("poll_decode_p95_us", 0.0) else "—")
+            sl2.metric("Dedup p95", f"{agg.get('dedup_p95_us', 0.0):.0f} us" if agg.get("dedup_p95_us", 0.0) else "—")
+            sl3.metric("State Write p95", f"{agg.get('state_write_p95_us', 0.0):.0f} us" if agg.get("state_write_p95_us", 0.0) else "—")
+        else:
+            sl1, sl2, sl3 = st.columns(3)
+            sl1.metric("Event-Lag p95", f"{sp95:.1f} ms" if sp95 else "—")
+            sl2.metric("Sketch Update p95", f"{agg.get('sketch_update_p95_us', 0.0):.0f} us" if agg.get("sketch_update_p95_us", 0.0) else "—")
+            sl3.metric("Sketch Query p95", f"{agg.get('sketch_query_p95_us', 0.0):.0f} us" if agg.get("sketch_query_p95_us", 0.0) else "—")
+
     st.markdown("---")
 
     # Control plane + per-worker breakdown
@@ -693,7 +883,7 @@ def render_dashboard(mode: str, metrics: dict):
             wg = coord.get("W_global")
             if wg is not None and wg != float("-inf"):
                 try:
-                    wm_str = datetime.fromtimestamp(wg).strftime("%H:%M:%S")
+                    wm_str = datetime.fromtimestamp(wg).strftime("%Y-%m-%d %H:%M:%S")
                 except (OSError, ValueError, OverflowError):
                     wm_str = f"{wg:.1f}"
                 st.metric("W_global", wm_str)
@@ -740,6 +930,15 @@ def render_dashboard(mode: str, metrics: dict):
             m = wdata.get("metrics")
             if m is None:
                 continue
+            part_values = [
+                p for p in m.get("partitions", {}).values()
+                if isinstance(p, dict)
+            ]
+
+            def _avg_part(field: str) -> float:
+                vals = [p.get(field, 0.0) for p in part_values if p.get(field, 0.0)]
+                return round(sum(vals) / len(vals), 2) if vals else 0.0
+
             if "total_received" in m:
                 rows.append({
                     "Worker": wname,
@@ -751,6 +950,8 @@ def render_dashboard(mode: str, metrics: dict):
                     "DLQ": m.get("dlq_backlog", 0),
                     "Sketch N": m.get("sketch_total_count", 0),
                     "BP Drops": m.get("backpressure_drops", 0),
+                    "Proc p95 us": m.get("proc_latency_p95_us", _avg_part("proc_latency_p95_us")),
+                    "Proc p99 us": m.get("proc_latency_p99_us", _avg_part("proc_latency_p99_us")),
                 })
             elif "partitions" in m and "node_id" in m:
                 t_recv = sum(p.get("total_received", 0) for p in m["partitions"].values() if isinstance(p, dict))
@@ -767,6 +968,8 @@ def render_dashboard(mode: str, metrics: dict):
                     "DLQ": m.get("dlq_backlog", 0),
                     "Sketch N": m.get("sketch_total_count", 0),
                     "BP Drops": 0,
+                    "Proc p95 us": _avg_part("proc_latency_p95_us"),
+                    "Proc p99 us": _avg_part("proc_latency_p99_us"),
                 })
         if rows:
             st.dataframe(pd.DataFrame(rows), use_container_width=True, hide_index=True)
@@ -797,6 +1000,19 @@ def render_dashboard(mode: str, metrics: dict):
             st.markdown("**Late Arrival Rate %**")
             st.line_chart(df.set_index("time_s")["late_rate"], height=220)
 
+        lat_cols = [c for c in ("proc_p95_us", "proc_p99_us") if c in df.columns and df[c].max() > 0]
+        lag_cols = [c for c in ("wm_lag_max_s", "event_lag_p95_ms") if c in df.columns and df[c].max() > 0]
+        if lat_cols or lag_cols:
+            ch5, ch6 = st.columns(2)
+            if lat_cols:
+                with ch5:
+                    st.markdown("**Processing Latency (us)**")
+                    st.line_chart(df.set_index("time_s")[lat_cols], height=220)
+            if lag_cols:
+                with ch6:
+                    st.markdown("**Watermark / Event Lag**")
+                    st.line_chart(df.set_index("time_s")[lag_cols], height=220)
+
     # Per-partition details (expandable)
     with st.expander("Per-Partition Details", expanded=False):
         part_rows = []
@@ -808,17 +1024,22 @@ def render_dashboard(mode: str, metrics: dict):
                     continue
                 row = {"Worker": wname, "Partition": str(pid)}
                 if mode == "strict":
-                    row["Watermark"] = round(pdata.get("watermark", 0), 2)
-                    row["Local WM"] = round(pdata.get("local_watermark", 0), 2)
+                    row["Watermark"] = format_timestamp(pdata.get("watermark", 0))
+                    row["Local WM"] = format_timestamp(pdata.get("local_watermark", 0))
                     row["Open Win"] = pdata.get("open_windows", 0)
                     row["Closed Win"] = pdata.get("closed_windows", 0)
                     row["Completeness %"] = round(pdata.get("data_completeness_pct", 0), 2)
                     row["Late"] = pdata.get("late_dropped", 0)
                     row["Dupes"] = pdata.get("duplicates_filtered", 0)
                     row["BP Drops"] = pdata.get("backpressure_drops", 0)
+                    row["Poll Decode p95 us"] = pdata.get("poll_decode_latency_p95_us", 0)
+                    row["Dedup p95 us"] = pdata.get("dedup_latency_p95_us", 0)
+                    row["State Write p95 us"] = pdata.get("state_write_latency_p95_us", 0)
+                    row["p50 (µs)"] = pdata.get("proc_latency_p50_us", 0)
+                    row["p99 (µs)"] = pdata.get("proc_latency_p99_us", 0)
                 else:
                     wh = pdata.get("watermark", pdata.get("W_h", float("-inf")))
-                    row["W_h"] = round(wh, 2) if wh != float("-inf") else "—"
+                    row["W_h"] = format_timestamp(wh) if wh != float("-inf") else "—"
                     row["L_eff (s)"] = round(pdata.get("L_eff_s", 0), 3)
                     row["p"] = pdata.get("p_current", 0)
                     row["Sketch N"] = pdata.get("sketch_total_count", 0)
@@ -827,6 +1048,12 @@ def render_dashboard(mode: str, metrics: dict):
                     row["Late"] = pdata.get("late_dropped", 0)
                     row["DLQ"] = pdata.get("dlq_backlog", 0)
                     row["Extreme"] = pdata.get("extreme_lag_count", 0)
+                    row["Lag p50 (ms)"] = round(pdata.get("sketch_quantile_p50_ms", 0), 2)
+                    row["Lag p99 (ms)"] = round(pdata.get("sketch_quantile_p99_ms", 0), 2)
+                    row["Proc p50 (µs)"] = pdata.get("proc_latency_p50_us", 0)
+                    row["Proc p99 (µs)"] = pdata.get("proc_latency_p99_us", 0)
+                    row["Sketch Update p95 us"] = pdata.get("sketch_update_latency_p95_us", 0)
+                    row["Sketch Query p95 us"] = pdata.get("sketch_query_latency_p95_us", 0)
                     cs = pdata.get("cold_start", {})
                     row["Cold Phase"] = cs.get("phase", "?") if cs else "?"
                     nl = pdata.get("negative_lag", {})
@@ -874,7 +1101,7 @@ def render_dashboard(mode: str, metrics: dict):
 
 def render_sim_stats(mode: str, metrics: dict):
     st.markdown("### Simulation Statistics")
-    st.markdown("Dataset replay progress, event rates, and per-partition distribution.")
+    st.markdown("Detailed dataset replay progress, partition metrics, and fault-tolerance status.")
 
     parts = _collect_partition_data(metrics)
     if not parts:
@@ -884,7 +1111,13 @@ def render_sim_stats(mode: str, metrics: dict):
     total_recv = sum(p["received"] for p in parts)
     total_on = sum(p["on_time"] for p in parts)
     total_late = sum(p["late"] for p in parts)
+    total_dupes = sum(p["dupes"] for p in parts)
+    total_bp = sum(p["bp_drops"] for p in parts)
+    total_dlq = sum(p["dlq"] for p in parts)
+    total_non_mono = sum(p["non_monotonic_punctuation"] for p in parts)
+    total_fencing = sum(p["fencing_violations"] for p in parts)
 
+    # Dataset progress & ETA
     dataset_file = st.session_state.get("dataset_file", "data.csv")
     total_rows = 0
     datasets = get_datasets()
@@ -896,74 +1129,174 @@ def render_sim_stats(mode: str, metrics: dict):
     if st.session_state.start_time and total_recv > 0:
         elapsed = time.time() - st.session_state.start_time
         rate = total_recv / max(elapsed, 1)
+        m_elapsed, s_elapsed = divmod(int(elapsed), 60)
+        elapsed_str = f"{m_elapsed}m {s_elapsed}s"
     else:
         rate = 0
+        elapsed_str = "0s"
 
-    c1, c2, c3, c4 = st.columns(4)
-    c1.metric("Event Rate", f"{rate:.1f} ev/s")
-    c2.metric("Total Processed", f"{total_recv:,}")
+    # Row 1: Replay Progress KPIs
+    c1, c2, c3, c4, c5 = st.columns(5)
+    c1.metric("Elapsed Time", elapsed_str)
+    c2.metric("Event Rate", f"{rate:.1f} ev/s")
+    c3.metric("Total Processed", f"{total_recv:,}")
     if total_rows > 0:
         pct = 100.0 * total_recv / total_rows
-        c3.metric("Dataset Progress", f"{pct:.1f}%")
+        c4.metric("Dataset Progress", f"{pct:.1f}%")
         if rate > 0:
             remaining = (total_rows - total_recv) / rate
             m, s_ = divmod(int(remaining), 60)
-            c4.metric("ETA", f"{m}m {s_}s")
+            c5.metric("ETA", f"{m}m {s_}s")
         else:
-            c4.metric("ETA", "—")
+            c5.metric("ETA", "—")
     else:
-        c3.metric("Dataset Progress", "?")
-        c4.metric("ETA", "?")
+        c4.metric("Dataset Progress", "?")
+        c5.metric("ETA", "?")
+
+    # Row 2: Quality & Compliance KPIs
+    st.markdown("#### Quality & Compliance KPIs")
+    q1, q2, q3, q4, q5, q6 = st.columns(6)
+
+    unique_events = max(total_recv - total_dupes, 1)
+    completeness_pct = 100.0 * total_on / unique_events
+    late_rate_pct = 100.0 * total_late / max(total_recv, 1)
+
+    q1.metric("Completeness %", f"{completeness_pct:.2f}%")
+    q2.metric("Late Arrival %", f"{late_rate_pct:.2f}%")
+    q3.metric("Duplicates", f"{total_dupes:,}")
+    q4.metric("Backpressure Drops", f"{total_bp:,}")
+    q5.metric("DLQ Backlog", f"{total_dlq:,}")
+
+    if mode == "strict":
+        q6.metric("Fencing Violations", f"{total_fencing:,}")
+    else:
+        q6.metric("Non-Mono Punctuation", f"{total_non_mono:,}")
 
     st.markdown("---")
 
-    # Per-partition event distribution
-    col_chart, col_table = st.columns([2, 1])
-    with col_chart:
-        st.markdown("**Events per Partition**")
-        if parts:
+    # Interactive tabs inside stats
+    stats_tab1, stats_tab2, stats_tab3 = st.tabs(["Partition Metrics", "DDSketch & Latency (Heuristic)", "Load Balance & Skew"])
+
+    with stats_tab1:
+        st.markdown("#### Per-Partition Detailed Statistics")
+        tbl = []
+        for p in sorted(parts, key=lambda x: int(x["partition"])):
+            w_val = p["W_h"]
+            if isinstance(w_val, (int, float)) and w_val != float("-inf"):
+                try:
+                    w_str = datetime.fromtimestamp(w_val).strftime("%Y-%m-%d %H:%M:%S")
+                except (OSError, ValueError, OverflowError):
+                    w_str = f"{w_val:.1f}"
+            else:
+                w_str = "—"
+            row = {
+                "Partition": p["partition"],
+                "Worker": p["worker"],
+                "Received": p["received"],
+                "On-Time": p["on_time"],
+                "Late": p["late"],
+                "Completeness %": p["completeness"],
+                "Duplicates": p["dupes"],
+                "BP Drops": p["bp_drops"],
+                "DLQ": p["dlq"],
+                "Watermark": w_str,
+                "Open Windows": p["open_windows"],
+                "Closed Windows": p["closed_windows"],
+            }
+            if mode == "strict":
+                row["Dedup TTL"] = p["dedup_ttl"]
+                row["Fencing Violations"] = p["fencing_violations"]
+            else:
+                row["Replay Mode"] = "Active" if p["replay"] else "Normal"
+            tbl.append(row)
+        st.dataframe(pd.DataFrame(tbl), use_container_width=True, hide_index=True)
+
+    with stats_tab2:
+        if mode == "heuristic":
+            st.markdown("#### Heuristic Latency & Profiling")
+            ds_tbl = []
+            for p in sorted(parts, key=lambda x: int(x["partition"])):
+                ds_tbl.append({
+                    "Partition": p["partition"],
+                    "Worker": p["worker"],
+                    "Effective Lag (s)": p["L_eff_s"],
+                    "Percentile (p)": p["p_current"],
+                    "Lag p50 (ms)": round(p["sketch_p50"], 1),
+                    "Lag p99 (ms)": round(p["sketch_p99"], 1),
+                    "Proc p50 (\u03bcs)": round(p["proc_p50"], 1),
+                    "Proc p99 (\u03bcs)": round(p["proc_p99"], 1),
+                    "Sketch Update p95 (us)": round(p["sketch_update_p95"], 1),
+                    "Sketch Query p95 (us)": round(p["sketch_query_p95"], 1),
+                    "Negative Lag Rate": f"{p['neg_lag_rate'] * 100:.3f}%",
+                    "Estimator Drift": p["est_drift"],
+                })
+            st.dataframe(pd.DataFrame(ds_tbl), use_container_width=True, hide_index=True)
+
+            # Show summary metrics
+            p50s = [p["sketch_p50"] for p in parts if p["sketch_p50"] > 0]
+            p95s = [p["sketch_p95"] for p in parts if p["sketch_p95"] > 0]
+            proc_p50s = [p["proc_p50"] for p in parts if p["proc_p50"] > 0]
+
+            col_l1, col_l2, col_l3 = st.columns(3)
+            col_l1.metric("Max Lag p95", f"{max(p95s):.1f} ms" if p95s else "—")
+            col_l2.metric("Avg Lag p50", f"{sum(p50s)/len(p50s):.1f} ms" if p50s else "—")
+            col_l3.metric("Avg Proc p50", f"{sum(proc_p50s)/len(proc_p50s):.1f} \u03bcs" if proc_p50s else "—")
+        else:
+            st.markdown("#### Strict Profiling & Event Processing Latency")
+            strict_tbl = []
+            for p in sorted(parts, key=lambda x: int(x["partition"])):
+                strict_tbl.append({
+                    "Partition": p["partition"],
+                    "Worker": p["worker"],
+                    "Proc p50 (\u03bcs)": round(p["proc_p50"], 1),
+                    "Proc p95 (\u03bcs)": round(p["proc_p95"], 1),
+                    "Proc p99 (\u03bcs)": round(p["proc_p99"], 1),
+                    "Poll Decode p95 (us)": round(p["poll_decode_p95"], 1),
+                    "Dedup p95 (us)": round(p["dedup_p95"], 1),
+                    "State Write p95 (us)": round(p["state_write_p95"], 1),
+                    "Dedup TTL Entries": p["dedup_ttl"],
+                    "Fencing Violations": p["fencing_violations"],
+                })
+            st.dataframe(pd.DataFrame(strict_tbl), use_container_width=True, hide_index=True)
+
+            proc_p50s = [p["proc_p50"] for p in parts if p["proc_p50"] > 0]
+            proc_p99s = [p["proc_p99"] for p in parts if p["proc_p99"] > 0]
+            fencing_viols = [p["fencing_violations"] for p in parts]
+
+            col_l1, col_l2, col_l3 = st.columns(3)
+            col_l1.metric("Avg Proc p50", f"{sum(proc_p50s)/len(proc_p50s):.1f} \u03bcs" if proc_p50s else "—")
+            col_l2.metric("Max Proc p99", f"{max(proc_p99s):.1f} \u03bcs" if proc_p99s else "—")
+            col_l3.metric("Total Fencing Violations", f"{sum(fencing_viols)}" if fencing_viols else "0")
+
+    with stats_tab3:
+        st.markdown("#### Event Load Balance & Skew")
+        col_chart, col_skew = st.columns([3, 2])
+        with col_chart:
             chart_data = pd.DataFrame([
-                {"Partition": p["partition"], "Received": p["received"], "On-Time": p["on_time"], "Late": p["late"]}
+                {"Partition": p["partition"], "On-Time": p["on_time"], "Late": p["late"]}
                 for p in parts
             ])
             st.bar_chart(chart_data.set_index("Partition")[["On-Time", "Late"]], height=300)
-    with col_table:
-        st.markdown("**Partition Stats**")
-        tbl = []
-        for p in sorted(parts, key=lambda x: int(x["partition"])):
-            tbl.append({
-                "P": p["partition"],
-                "Recv": p["received"],
-                "On-Time": p["on_time"],
-                "Late": p["late"],
-                "Comp %": p["completeness"],
-                "W_h": round(p["W_h"], 1) if isinstance(p["W_h"], (int, float)) and p["W_h"] != float("-inf") else "—",
-            })
-        st.dataframe(pd.DataFrame(tbl), use_container_width=True, hide_index=True)
 
-    # Distribution summary
-    st.markdown("---")
-    st.markdown("**Event Distribution Skew**")
-    recv_vals = [p["received"] for p in parts]
-    if recv_vals and max(recv_vals) > 0:
-        skew_ratio = max(recv_vals) / max(sum(recv_vals) / len(recv_vals), 1)
-        st.caption(f"Max/avg ratio: {skew_ratio:.2f}x | "
-                   f"Min: {min(recv_vals):,} | Max: {max(recv_vals):,} | "
-                   f"StdDev: {pd.Series(recv_vals).std():.0f}")
+        with col_skew:
+            recv_vals = [p["received"] for p in parts]
+            if recv_vals and max(recv_vals) > 0:
+                skew_ratio = max(recv_vals) / max(sum(recv_vals) / len(recv_vals), 1)
+                st.metric("Max/Avg Load Ratio", f"{skew_ratio:.2f}x")
+                st.markdown(f"""
+                - **Min events per partition:** {min(recv_vals):,}
+                - **Max events per partition:** {max(recv_vals):,}
+                - **Standard Deviation:** {pd.Series(recv_vals).std():.1f}
+                """)
 
-    # Chunk boundary effects
-    if total_rows > 0 and total_recv > 0:
-        st.markdown("**Chunk Boundary Effects**")
-        parts_sorted = sorted(parts, key=lambda x: int(x["partition"]))
-        min_recv_parts = [p for p in parts_sorted if p["received"] == min(recv_vals)]
-        max_recv_parts = [p for p in parts_sorted if p["received"] == max(recv_vals)]
-        st.caption(f"Least-loaded partitions: {', '.join(p['partition'] for p in min_recv_parts)} "
-                   f"({min(recv_vals):,} events)")
-        st.caption(f"Most-loaded partitions: {', '.join(p['partition'] for p in max_recv_parts)} "
-                   f"({max(recv_vals):,} events)")
-        if max(recv_vals) > 0:
-            st.caption(f"Spread: {(max(recv_vals) - min(recv_vals)) / max(recv_vals) * 100:.1f}% "
-                       f"of max — caused by hash(chunk_host) % 12 rounding at chunk boundaries")
+                # Chunk boundary effects
+                parts_sorted = sorted(parts, key=lambda x: int(x["partition"]))
+                min_recv_parts = [p for p in parts_sorted if p["received"] == min(recv_vals)]
+                max_recv_parts = [p for p in parts_sorted if p["received"] == max(recv_vals)]
+                st.caption(f"Least-loaded partitions: {', '.join(p['partition'] for p in min_recv_parts)} ({min(recv_vals):,} events)")
+                st.caption(f"Most-loaded partitions: {', '.join(p['partition'] for p in max_recv_parts)} ({max(recv_vals):,} events)")
+                spread = (max(recv_vals) - min(recv_vals)) / max(recv_vals) * 100
+                st.caption(f"Load Spread: {spread:.1f}% (caused by hash rounding at chunk boundaries)")
 
 
 # ---------------------------------------------------------------------------
@@ -1092,8 +1425,185 @@ def render_raw(metrics: dict):
 
 
 # ---------------------------------------------------------------------------
-# Main
+# Node Control & Fault Injection
 # ---------------------------------------------------------------------------
+
+def get_container_status_docker(service: str) -> str:
+    """Check the container status using docker compose ps."""
+    cmd = _compose_base() + ["ps", "--format", "json", service]
+    try:
+        r = subprocess.run(cmd, capture_output=True, text=True, encoding="utf-8",
+                           errors="replace", cwd=str(DEPLOY_DIR), timeout=5)
+        if r.returncode == 0 and r.stdout.strip():
+            lines = r.stdout.strip().split("\n")
+            for line in lines:
+                try:
+                    data = json.loads(line)
+                    state = data.get("State", data.get("Status", "")).lower()
+                    if "up" in state or "running" in state:
+                        return "running"
+                    if "exit" in state or "stop" in state:
+                        return "stopped"
+                except Exception:
+                    pass
+    except Exception:
+        pass
+    return "unknown"
+
+
+def check_node_status(service: str, port: int = None) -> str:
+    """Combined health status using port health check and Docker state fallback."""
+    infra_key = _infra_key(service)
+    if infra_key is not None:
+        if check_infra_health(infra_key):
+            return "running"
+        docker_status = get_container_status_docker(service)
+        if docker_status != "unknown":
+            return docker_status
+        return "stopped"
+
+    if port:
+        if is_healthy(port):
+            return "running"
+
+    docker_status = get_container_status_docker(service)
+    if docker_status != "unknown":
+        return docker_status
+
+    return "stopped"
+
+
+def compose_start_service(service: str) -> tuple[bool, str]:
+    cmd = _compose_base() + ["start", service]
+    try:
+        r = subprocess.run(cmd, capture_output=True, text=True, encoding="utf-8",
+                           errors="replace", cwd=str(DEPLOY_DIR), timeout=30)
+        return r.returncode == 0, r.stdout + r.stderr
+    except Exception as e:
+        return False, str(e)
+
+
+def compose_stop_service(service: str) -> tuple[bool, str]:
+    cmd = _compose_base() + ["stop", service]
+    try:
+        r = subprocess.run(cmd, capture_output=True, text=True, encoding="utf-8",
+                           errors="replace", cwd=str(DEPLOY_DIR), timeout=30)
+        return r.returncode == 0, r.stdout + r.stderr
+    except Exception as e:
+        return False, str(e)
+
+
+def compose_kill_service(service: str) -> tuple[bool, str]:
+    cmd = _compose_base() + ["kill", service]
+    try:
+        r = subprocess.run(cmd, capture_output=True, text=True, encoding="utf-8",
+                           errors="replace", cwd=str(DEPLOY_DIR), timeout=30)
+        return r.returncode == 0, r.stdout + r.stderr
+    except Exception as e:
+        return False, str(e)
+
+
+def render_node_control_row(service_name: str, display_name: str, port: int = None, role: str = ""):
+    status = check_node_status(service_name, port)
+
+    col1, col2, col3, col4, col5, col6 = st.columns([2, 1.5, 2.5, 1, 1, 1])
+    col1.markdown(f"**{display_name}**")
+
+    if status == "running":
+        col2.markdown("🟢 :green[Running]")
+    else:
+        col2.markdown("🔴 :red[Stopped]")
+
+    col3.caption(f"{role} (:{port})" if port else role)
+
+    start_btn = col4.button("Start", key=f"start_{service_name}", disabled=(status == "running"), use_container_width=True)
+    stop_btn = col5.button("Stop", key=f"stop_{service_name}", disabled=(status == "stopped"), use_container_width=True)
+    kill_btn = col6.button("Kill", key=f"kill_{service_name}", disabled=(status == "stopped"), type="secondary", use_container_width=True)
+
+    if start_btn:
+        with st.spinner(f"Starting {service_name}..."):
+            ok, err = compose_start_service(service_name)
+            if ok:
+                st.toast(f"Started {display_name} successfully!", icon="🟢")
+                time.sleep(1)
+                st.rerun()
+            else:
+                st.error(f"Failed to start {display_name}: {err}")
+
+    if stop_btn:
+        with st.spinner(f"Stopping {service_name}..."):
+            ok, err = compose_stop_service(service_name)
+            if ok:
+                st.toast(f"Stopped {display_name} successfully!", icon="🔴")
+                time.sleep(1)
+                st.rerun()
+            else:
+                st.error(f"Failed to stop {display_name}: {err}")
+
+    if kill_btn:
+        with st.spinner(f"Killing {service_name}..."):
+            ok, err = compose_kill_service(service_name)
+            if ok:
+                st.toast(f"Killed {display_name} successfully!", icon="💥")
+                time.sleep(1)
+                st.rerun()
+            else:
+                st.error(f"Failed to kill {display_name}: {err}")
+
+
+def render_node_control(mode: str):
+    st.markdown("### Node Control / Fault Injection")
+    st.markdown("Abruptly kill, gracefully stop, or start individual system services to verify fault-tolerance.")
+
+    if not st.session_state.running:
+        st.info("Start the system from the sidebar to enable node control.")
+        return
+
+    is_sim = _is_sim()
+
+    if is_sim:
+        st.markdown("#### Simulation Cluster")
+        if mode == "strict":
+            render_node_control_row("strict-coordinator", "Strict Coordinator", 9000, "Coordinator / Raft Leader")
+            render_node_control_row("strict-worker", "Strict Worker", 9101, "Worker / Partitions 0..11")
+            render_node_control_row("strict-ingestor", "Strict Ingestor", 9200, "Ingestor")
+        else:
+            render_node_control_row("heuristic-aggregator", "Heuristic Aggregator", 9017, "Aggregator")
+            render_node_control_row("heuristic-worker", "Heuristic Worker", 9111, "Worker / Partitions 0..11")
+            render_node_control_row("heuristic-ingestor", "Heuristic Ingestor", 9210, "Ingestor")
+    else:
+        st.markdown("#### Core Cluster")
+        if mode == "strict":
+            render_node_control_row("coordinator-1", "Coordinator 1", 9000, "Coordinator Leader / Term")
+            render_node_control_row("coordinator-2", "Coordinator 2", 9003, "Coordinator Peer")
+            render_node_control_row("coordinator-3", "Coordinator 3", 9004, "Coordinator Peer")
+        else:
+            render_node_control_row("aggregator", "Aggregator Primary", 9007, "Aggregator Leader")
+            render_node_control_row("aggregator-standby", "Aggregator Standby", 9005, "Aggregator Standby")
+
+        st.markdown("---")
+        st.markdown("#### Workers")
+        render_node_control_row("node0", "Node 0 (Worker)", 9101, "Worker (Partitions 0,1,2)")
+        render_node_control_row("node1", "Node 1 (Worker)", 9102, "Worker (Partitions 3,4,5)")
+        render_node_control_row("node2", "Node 2 (Worker)", 9103, "Worker (Partitions 6,7,8)")
+        render_node_control_row("node3", "Node 3 (Worker)", 9104, "Worker (Partitions 9,10,11)")
+
+        st.markdown("---")
+        st.markdown("#### Ingestion Layer")
+        render_node_control_row("ingestor", "Ingestor Service", None, "Dataset Ingestion")
+
+        st.markdown("---")
+        st.markdown("#### Infrastructure")
+        render_node_control_row("kafka", "Kafka Broker", 29092, "Message Queue")
+        render_node_control_row("zookeeper", "ZooKeeper", 2181, "Coordination Ensemble")
+        render_node_control_row("prometheus", "Prometheus", 9090, "Metrics Server")
+        render_node_control_row("grafana", "Grafana", 3000, "Visualization Server")
+        render_node_control_row("minio", "MinIO Object Storage", 9002, "Tiered Storage Store")
+
+
+# -----------------------------------------------------------------------------------------------------------
+# Main
+# -----------------------------------------------------------------------------------------------------------
 
 def main():
     st.set_page_config(
@@ -1122,47 +1632,58 @@ def main():
     mode = st.session_state.mode
     is_sim = _is_sim()
 
-    # Fetch live metrics
-    metrics = {}
-    if st.session_state.running:
-        metrics = fetch_all_metrics(mode)
-        st.session_state.last_metrics = metrics
+    # Determine auto-refresh interval for the fragment
+    run_interval = REFRESH_INTERVAL_S if (st.session_state.running and st.session_state.auto_refresh) else None
 
-        if metrics.get("workers"):
-            agg = aggregate_worker_metrics(metrics)
-            elapsed = time.time() - (st.session_state.start_time or time.time())
-            st.session_state.metrics_history.append({
-                "elapsed_s": elapsed,
-                "completeness": agg["data_completeness_pct"],
-                "total_received": agg["total_received"],
-                "on_time": agg["on_time"],
-                "late_dropped": agg["late_dropped"],
-                "late_rate": agg["late_arrival_rate_pct"],
-            })
-            if len(st.session_state.metrics_history) > MAX_HISTORY:
-                st.session_state.metrics_history = st.session_state.metrics_history[-MAX_HISTORY:]
+    @st.fragment(run_every=run_interval)
+    def render_content_fragment(mode: str, is_sim: bool):
+        # Fetch live metrics
+        metrics = {}
+        if st.session_state.running:
+            metrics = fetch_all_metrics(mode)
+            st.session_state.last_metrics = metrics
 
-    # Tabs — sim mode adds "Sim Stats" tab
-    if is_sim:
-        tab_dash, tab_sim, tab_logs, tab_compare, tab_raw = st.tabs(
-            ["Dashboard", "Sim Stats", "Logs", "Compare", "Raw JSON"]
-        )
-    else:
-        tab_dash, tab_logs, tab_compare, tab_raw = st.tabs(
-            ["Dashboard", "Logs", "Compare", "Raw JSON"]
-        )
+            if metrics.get("workers"):
+                agg = aggregate_worker_metrics(metrics)
+                elapsed = time.time() - (st.session_state.start_time or time.time())
+                st.session_state.metrics_history.append({
+                    "elapsed_s": elapsed,
+                    "completeness": agg["data_completeness_pct"],
+                    "total_received": agg["total_received"],
+                    "on_time": agg["on_time"],
+                    "late_dropped": agg["late_dropped"],
+                    "late_rate": agg["late_arrival_rate_pct"],
+                    "proc_p95_us": agg.get("proc_lat_p95_us", 0.0),
+                    "proc_p99_us": agg.get("proc_lat_p99_us", 0.0),
+                    "wm_lag_max_s": agg.get("wm_lag_max_s", 0.0),
+                    "event_lag_p95_ms": agg.get("sketch_p95_ms", 0.0),
+                })
+                if len(st.session_state.metrics_history) > MAX_HISTORY:
+                    st.session_state.metrics_history = st.session_state.metrics_history[-MAX_HISTORY:]
 
-    with tab_dash:
-        if st.session_state.running and metrics.get("workers"):
-            render_dashboard(mode, metrics)
-        elif st.session_state.running:
-            st.info("Waiting for services to start...")
-            st.caption("This may take 30-60 seconds on first run.")
-        else:
-            st.markdown("### CSDLPT Watermark Processing System")
+        # Define tabs list dynamically: Dashboard, Sim Stats (if is_sim), Node Control (if running), Logs, Compare, Raw JSON
+        tab_names = ["Dashboard"]
+        if is_sim:
+            tab_names.append("Sim Stats")
+        if st.session_state.running:
+            tab_names.append("Node Control")
+        tab_names.extend(["Logs", "Compare", "Raw JSON"])
 
-            if is_sim:
-                st.markdown(f"""
+        tabs = st.tabs(tab_names)
+        current_tab_idx = 0
+
+        # Tab: Dashboard
+        with tabs[current_tab_idx]:
+            if st.session_state.running and metrics.get("workers"):
+                render_dashboard(mode, metrics)
+            elif st.session_state.running:
+                st.info("Waiting for services to start...")
+                st.caption("This may take 30-60 seconds on first run.")
+            else:
+                st.markdown("### CSDLPT Watermark Processing System")
+
+                if is_sim:
+                    st.markdown(f"""
 **Deploy Mode: Simulation** — HTTP-only, no Kafka/ZK/MinIO. Single worker handling all 12 partitions.
 
 **How to use:**
@@ -1178,8 +1699,8 @@ def main():
 
 **Sim containers:** strict-coordinator / strict-worker / strict-ingestor or heuristic-aggregator / heuristic-worker / heuristic-ingestor
 """)
-            else:
-                st.markdown("""
+                else:
+                    st.markdown("""
 **Deploy Mode: Full** — 3 Coordinators (HA) + 4 Workers (12 partitions) + Kafka + ZooKeeper + Prometheus + Grafana + MinIO
 
 **How to use:**
@@ -1203,29 +1724,41 @@ def main():
 - [Prometheus](http://localhost:9090) — Raw metrics queries
 - [MinIO Console](http://localhost:9001) — Tiered storage (minioadmin/minioadmin)
 """)
+        current_tab_idx += 1
 
-    if is_sim:
-        with tab_sim:
-            if st.session_state.running and metrics.get("workers"):
-                render_sim_stats(mode, metrics)
-            elif st.session_state.running:
-                st.info("Waiting for partition data...")
-            else:
-                st.info("Start the simulation to see replay statistics.")
+        # Tab: Sim Stats
+        if is_sim:
+            with tabs[current_tab_idx]:
+                if st.session_state.running and metrics.get("workers"):
+                    render_sim_stats(mode, metrics)
+                elif st.session_state.running:
+                    st.info("Waiting for partition data...")
+                else:
+                    st.info("Start the simulation to see replay statistics.")
+            current_tab_idx += 1
 
-    with tab_logs:
-        render_logs()
+        # Tab: Node Control
+        if st.session_state.running:
+            with tabs[current_tab_idx]:
+                render_node_control(mode)
+            current_tab_idx += 1
 
-    with tab_compare:
-        render_comparison()
+        # Tab: Logs
+        with tabs[current_tab_idx]:
+            render_logs()
+        current_tab_idx += 1
 
-    with tab_raw:
-        render_raw(metrics)
+        # Tab: Compare
+        with tabs[current_tab_idx]:
+            render_comparison()
+        current_tab_idx += 1
 
-    # Auto-refresh
-    if st.session_state.running and st.session_state.auto_refresh:
-        time.sleep(REFRESH_INTERVAL_S)
-        st.rerun()
+        # Tab: Raw JSON
+        with tabs[current_tab_idx]:
+            render_raw(metrics)
+
+    # Call the fragment rendering
+    render_content_fragment(mode, is_sim)
 
 
 if __name__ == "__main__":

@@ -18,8 +18,19 @@ import sys
 import time
 import threading
 import random
+import traceback
 from http.server import HTTPServer, BaseHTTPRequestHandler
 from socketserver import ThreadingMixIn
+
+def dump_tracebacks(signum, frame):
+    print("=== DUMPING TRACEBACKS ===", file=sys.stderr)
+    for thread_id, stack in sys._current_frames().items():
+        print(f"\nThread {thread_id}:", file=sys.stderr)
+        traceback.print_stack(stack, file=sys.stderr)
+    print("=== END OF DUMP ===", file=sys.stderr)
+
+if hasattr(signal, "SIGUSR1"):
+    signal.signal(signal.SIGUSR1, dump_tracebacks)
 
 # Ensure sibling packages (common, heuristic, strict, etc.) are importable
 # when run.py lives inside a refactor/ package directory.
@@ -637,28 +648,34 @@ def run_coordinator(args):
 
     ckpt_dir = os.environ.get("CHECKPOINT_DIR", "/data/checkpoint")
 
-    # Core coordinator
-    coord = StrictCoordinator(
-        delta_base_s=float(os.environ.get("DELTA_BASE_S", "10.0")),
-        state_path=ckpt_dir + "/coordinator.json",
-        db_path=ckpt_dir + "/rocksdb-coordinator",
-    )
-    coord.load_state()
-
     # Optional Raft HA wrapper (or ZK election if ZK_ENSEMBLE is set)
-    raft_peers = []
-    if args.coordinator_id:
-        peers_str = args.coordinator_peers or os.environ.get("COORDINATOR_PEERS", "")
-        raft_peers = [p.strip() for p in peers_str.split(",") if p.strip()]
+    # Auto-detect coordinator_id from env if not provided as CLI arg
+    coordinator_id = args.coordinator_id or os.environ.get("COORDINATOR_ID", "")
+
+    if coordinator_id:
+        # RaftCoordinator wraps its own StrictCoordinator internally — do NOT create StrictCoordinator first
+        # to avoid RocksDB double-open lock collision (each Rdict call holds an exclusive LOCK file)
+        peers_str = args.coordinator_peers or os.environ.get("COORDINATOR_PEERS", "") or os.environ.get("RAFT_PEERS", "")
+        raft_peers = [p.strip() for p in peers_str.split(",") if p.strip() and p.strip() != coordinator_id]
         zk_ensemble = os.environ.get("ZK_ENSEMBLE", "").lower() in ("1", "true", "yes")
         from strict.raft_coordinator import RaftCoordinator
         coord = RaftCoordinator(
-            args.coordinator_id, raft_peers,
+            coordinator_id, raft_peers,
             delta_base_s=float(os.environ.get("DELTA_BASE_S", "10.0")),
             state_path=ckpt_dir + "/coordinator.json",
             db_path=ckpt_dir + "/rocksdb-coordinator",
             zk_ensemble=zk_ensemble,
         )
+        # load_state is already called by RaftCoordinator.__init__ -> StrictCoordinator.__init__
+    else:
+        # Standalone (no Raft/ZK): plain StrictCoordinator
+        from strict.coordinator import StrictCoordinator
+        coord = StrictCoordinator(
+            delta_base_s=float(os.environ.get("DELTA_BASE_S", "10.0")),
+            state_path=ckpt_dir + "/coordinator.json",
+            db_path=ckpt_dir + "/rocksdb-coordinator",
+        )
+        coord.load_state()
 
     # Failover manager
     fm = None
@@ -851,6 +868,18 @@ def run_coordinator(args):
                     failed = self.fm.detect_failures()
                     if failed:
                         self.fm.reassign_failed_partitions()
+                # ── Fix: refresh cached_state so /state returns live data ──
+                now = time.time()
+                if now - _coord_last_cache_update[0] >= 1.0:
+                    try:
+                        _cached = self.coord.broadcast() if hasattr(self.coord, "broadcast") else {}
+                        if self.fm is not None:
+                            _cached["failover"] = self.fm.summary()
+                        _cached["timestamp"] = now
+                        state["cached_state"] = _cached
+                        _coord_last_cache_update[0] = now
+                    except Exception:
+                        pass
                 return csdlpt_pb2.EmptyReply(ok=True)
                 
             def IngestorHeartbeat(self, request, context):
@@ -867,7 +896,7 @@ def run_coordinator(args):
                 broadcast = self.coord.broadcast()
                 partition_types = {}
                 if self.fm is not None:
-                    partition_types = {int(k): str(v) for k, v in self.fm.broadcast().get("partition_types", {}).items()}
+                    partition_types = {int(k): str(v) for k, v in self.fm.get_partition_types().items()}
                 return csdlpt_pb2.StateReply(
                     W_global=self.coord.W_global,
                     term=getattr(self.coord, "term", 0),
@@ -1132,6 +1161,7 @@ def _run_strict_worker(node_id, parts, args):
         partition_ids=parts,
         window_size_s=float(os.environ.get("WINDOW_SIZE_S", "5.0")),
         delta_base_s=float(os.environ.get("DELTA_BASE_S", "10.0")),
+        max_queue=int(os.environ.get("BP_PAUSE_THRESHOLD", "500")),
         tiered_storage=tiered_storage,
         db_path=f"{ckpt_dir}/rocksdb-strict-{node_id}",
         output_mode=output_mode,
@@ -1235,14 +1265,15 @@ def _run_strict_worker(node_id, parts, args):
     # Alerting
     _start_alerting_thread(mon_mgr, stop)
 
+    strict_drain_sleep = float(os.environ.get("STRICT_DRAIN_SLEEP_S", "0.1"))
+    strict_drain_batch = int(os.environ.get("STRICT_DRAIN_BATCH_SIZE", "200"))
+
     def drain_loop():
         while not stop.is_set():
-            time.sleep(0.1)
-            for pid, buf in worker.buffers.items():
-                bp.report_buffer(node_id, pid, len(buf))
-                batch = buf.pop_all_ready(batch_size=200)
-                for ev in batch:
-                    worker._process_event(ev, pid)
+            time.sleep(strict_drain_sleep)
+            for pid in worker.buffers:
+                bp.report_buffer(node_id, pid, worker.buffer_size(pid))
+                worker.drain_ready(pid, batch_size=strict_drain_batch)
     threading.Thread(target=drain_loop, daemon=True).start()
 
     worker_kafka_offsets = {}
@@ -1301,11 +1332,13 @@ def _run_strict_worker(node_id, parts, args):
                             worker_kafka_offsets[pid] = msg["offset"] + 1
                             poll_total[0] += 1
                     # Kafka backpressure: check all assigned partitions
+                    bp_pause_val = int(os.environ.get("BP_PAUSE_THRESHOLD", str(BACKPRESSURE_MAX_QUEUE)))
+                    bp_resume_val = int(os.environ.get("BP_RESUME_THRESHOLD", str(BACKPRESSURE_RESUME_AT)))
                     for pid in kafka_consumer.assigned_partitions():
                         buf_len = len(worker.buffers.get(pid, []))
-                        if buf_len >= BACKPRESSURE_MAX_QUEUE:
+                        if buf_len >= bp_pause_val:
                             kafka_consumer.pause([pid])
-                        elif buf_len < BACKPRESSURE_RESUME_AT:
+                        elif buf_len < bp_resume_val:
                             kafka_consumer.resume([pid])
                     # commit offsets
                     if committed_offsets:
@@ -1406,8 +1439,8 @@ def _run_strict_worker(node_id, parts, args):
                             )
                             stub.WorkerHeartbeat(msg, timeout=2)
                             sent = True
-                    except Exception:
-                        pass
+                    except Exception as e:
+                        print(f"[worker-strict:{node_id}] grpc heartbeat failed: {e}", file=sys.stderr)
                     if not sent and coordinator_peers:
                         for peer in coordinator_peers:
                             try:
@@ -1441,8 +1474,8 @@ def _run_strict_worker(node_id, parts, args):
                         )
                         urllib.request.urlopen(req, timeout=2)
                         sent = True
-                    except Exception:
-                        pass
+                    except Exception as e:
+                        print(f"[worker-strict:{node_id}] http heartbeat failed: {e}", file=sys.stderr)
                     if not sent and coordinator_peers:
                         for peer in coordinator_peers:
                             try:
@@ -2240,6 +2273,8 @@ def run_ingestor(args):
                 "partition_id": i % 12,
             })
 
+    csv_row_counter = [0]
+
     def _next_csv_event():
         """Read next row from CSV, normalize timestamp, return event dict or None on EOF."""
         nonlocal csv_first_time
@@ -2256,8 +2291,9 @@ def run_ingestor(args):
         sim_lag = float(os.environ.get("SIMULATED_LAG_S", "2.0"))
         next_arr = max(last_simulated_arrival_time[0] + 0.001, event_time + sim_lag)
         last_simulated_arrival_time[0] = next_arr
+        csv_row_counter[0] += 1
         return {
-            "event_id": f"csv-{row.get('', '0')}",
+            "event_id": f"csv-{csv_row_counter[0]}",
             "event_time": event_time,
             "arrival_time": next_arr,
             "status": int(row.get('response', '200')),
@@ -2313,6 +2349,8 @@ def run_ingestor(args):
     # stays behind ALL events in the CSV. In simulation, all events are "historical"
     # from the system's perspective, so none should be late.
     max_event_time_sent: float = 0.0
+    # In replay mode the CSV can be heavily out of order. Keep the watermark
+    # below all real event timestamps until EOF, then jump it forward to flush.
     min_event_time_sent: float = 0.0
     max_event_time_per_part: dict[int, float] = {}
     punctuation_mode = os.environ.get("PUNCTUATION_MODE", "data-driven")

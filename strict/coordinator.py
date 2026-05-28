@@ -2,6 +2,7 @@
 
 import json
 import os
+import threading
 import time
 from dataclasses import dataclass
 from typing import Optional
@@ -49,6 +50,7 @@ class StrictCoordinator:
         self._lag_status: str = "OK"
         self._combined_status: str = "Initializing"
         self._combined_diagnosis: str = "Initializing"
+        self._lock = threading.RLock()
 
         # Optional failover manager reference (injected after construction)
         self._failover_manager: object | None = None
@@ -102,40 +104,41 @@ class StrictCoordinator:
         self._ingestor_health = health_monitor
 
     def receive_heartbeat(self, hb: WorkerHeartbeat) -> None:
-        now = time.time()
+        with self._lock:
+            now = time.time()
 
-        # Fencing token enforcement: reject stale-token heartbeats
-        worker = hb.worker_id
-        if worker in self._worker_fencing_tokens:
-            if hb.fencing_token < self._worker_fencing_tokens[worker]:
-                self._fencing_violations += 1
-                return
-        self._worker_fencing_tokens[worker] = max(
-            self._worker_fencing_tokens.get(worker, 0), hb.fencing_token
-        )
-        if hb.fencing_token > self.term:
-            self.term = hb.fencing_token
+            # Fencing token enforcement: reject stale-token heartbeats
+            worker = hb.worker_id
+            if worker in self._worker_fencing_tokens:
+                if hb.fencing_token < self._worker_fencing_tokens[worker]:
+                    self._fencing_violations += 1
+                    return
+            self._worker_fencing_tokens[worker] = max(
+                self._worker_fencing_tokens.get(worker, 0), hb.fencing_token
+            )
+            if hb.fencing_token > self.term:
+                self.term = hb.fencing_token
 
-        self._worker_last_seen[worker] = now
-        for part_id, lw in hb.partitions.items():
-            if part_id not in self.partitions:
-                self.partitions[part_id] = PartitionInfo(
-                    partition_id=part_id,
-                    worker_id=hb.worker_id,
-                    local_watermark=lw,
-                    last_update=now,
-                    status=WorkerStatus.ACTIVE,
-                )
-                self._persist_partition(part_id)
-            else:
-                p = self.partitions[part_id]
-                p.local_watermark = max(p.local_watermark, lw)
-                p.last_update = now
-                p.worker_id = hb.worker_id
-                p.status = WorkerStatus.ACTIVE
-                self._persist_partition(part_id)
-        self._update_statuses()
-        self._compute_global()
+            self._worker_last_seen[worker] = now
+            for part_id, lw in hb.partitions.items():
+                if part_id not in self.partitions:
+                    self.partitions[part_id] = PartitionInfo(
+                        partition_id=part_id,
+                        worker_id=hb.worker_id,
+                        local_watermark=lw,
+                        last_update=now,
+                        status=WorkerStatus.ACTIVE,
+                    )
+                    self._persist_partition(part_id)
+                else:
+                    p = self.partitions[part_id]
+                    p.local_watermark = max(p.local_watermark, lw)
+                    p.last_update = now
+                    p.worker_id = hb.worker_id
+                    p.status = WorkerStatus.ACTIVE
+                    self._persist_partition(part_id)
+            self._update_statuses()
+            self._compute_global()
 
     def _update_statuses(self) -> None:
         now = time.time()
@@ -221,104 +224,110 @@ class StrictCoordinator:
             self._combined_diagnosis = "Cum cham + co Node yeu hon"
 
     def broadcast(self) -> dict:
-        result = {
-            "W_global": self.W_global,
-            "term": self.term,
-            "timestamp": time.time(),
-            "partition_count": len(self.partitions),
-            "active_workers": len(self._worker_last_seen),
-            "fencing_violations": self._fencing_violations,
-            "node_skew_max_ms": self._node_skew_max_ms,
-            "watermark_lag_s": self._watermark_lag_s,
-            "skew_status": self._skew_status,
-            "lag_status": self._lag_status,
-            "combined_status": self._combined_status,
-            "combined_diagnosis": self._combined_diagnosis,
-        }
-        if self._failover_manager is not None:
-            fm = self._failover_manager
-            result["partition_types"] = fm.get_partition_types()
-            recovery_info: dict[int, dict] = {}
-            for pid in range(result["partition_count"]):
-                owner = fm.get_partition_owner(pid)
-                orig = getattr(fm, "_original_owner", {}).get(pid)
-                if owner != orig:
-                    recovery_info[pid] = fm.get_partition_recovery_info(pid)
-            result["recovery_info"] = recovery_info
-        ingestor = getattr(self, "_ingestor_health", None)
-        if ingestor is not None:
-            result["ingestor_health"] = {
-                "W_meta_global": getattr(ingestor, "W_meta_global", 0.0),
-                "summary": ingestor.summary() if hasattr(ingestor, "summary") else {},
+        with self._lock:
+            result = {
+                "W_global": self.W_global,
+                "term": self.term,
+                "timestamp": time.time(),
+                "partition_count": len(self.partitions),
+                "active_workers": len(self._worker_last_seen),
+                "fencing_violations": self._fencing_violations,
+                "node_skew_max_ms": self._node_skew_max_ms,
+                "watermark_lag_s": self._watermark_lag_s,
+                "skew_status": self._skew_status,
+                "lag_status": self._lag_status,
+                "combined_status": self._combined_status,
+                "combined_diagnosis": self._combined_diagnosis,
             }
-        return result
+            if self._failover_manager is not None:
+                fm = self._failover_manager
+                result["partition_types"] = fm.get_partition_types()
+                recovery_info: dict[int, dict] = {}
+                for pid in range(result["partition_count"]):
+                    owner = fm.get_partition_owner(pid)
+                    orig = getattr(fm, "_original_owner", {}).get(pid)
+                    if owner != orig:
+                        recovery_info[pid] = fm.get_partition_recovery_info(pid)
+                result["recovery_info"] = recovery_info
+            ingestor = getattr(self, "_ingestor_health", None)
+            if ingestor is not None:
+                result["ingestor_health"] = {
+                    "W_meta_global": getattr(ingestor, "W_meta_global", 0.0),
+                    "summary": ingestor.summary() if hasattr(ingestor, "summary") else {},
+                }
+            return result
 
     def save_state(self) -> None:
-        state = {
-            "term": self.term,
-            "W_global": self.W_global,
-            "partitions": {
-                str(k): {
-                    "worker_id": v.worker_id,
-                    "local_watermark": v.local_watermark,
-                    "status": v.status.value,
-                    "state": v.state.value,
-                }
-                for k, v in self.partitions.items()
-            },
-        }
-        tmp = self.state_path + ".tmp"
-        with open(tmp, "w") as f:
-            json.dump(state, f)
-        os.replace(tmp, self.state_path)
-
-    def checkpoint(self) -> None:
-        self.save_state()
-        if self._store is not None:
-            self._store.flush()
-
-    def flush(self) -> None:
-        self.save_state()
-        if self._store is not None:
-            self._store.flush()
-
-    def close(self) -> None:
-        self.save_state()
-        if self._store is not None:
-            self._store.close()
-            self._store = None
-
-        # RocksDB state persistence
-        if self._store is not None:
-            for part_id in self.partitions:
-                self._persist_partition(part_id)
-            meta = {
+        with self._lock:
+            state = {
                 "term": self.term,
                 "W_global": self.W_global,
+                "partitions": {
+                    str(k): {
+                        "worker_id": v.worker_id,
+                        "local_watermark": v.local_watermark,
+                        "status": v.status.value,
+                        "state": v.state.value,
+                    }
+                    for k, v in self.partitions.items()
+                },
             }
-            self._store.put(f"{_PFX_META}state", meta)
-            self._store.flush()
+            tmp = self.state_path + ".tmp"
+            with open(tmp, "w") as f:
+                json.dump(state, f)
+            os.replace(tmp, self.state_path)
+
+    def checkpoint(self) -> None:
+        with self._lock:
+            self.save_state()
+            if self._store is not None:
+                self._store.flush()
+
+    def flush(self) -> None:
+        with self._lock:
+            self.save_state()
+            if self._store is not None:
+                self._store.flush()
+
+    def close(self) -> None:
+        with self._lock:
+            self.save_state()
+            if self._store is not None:
+                self._store.close()
+                self._store = None
+
+            # RocksDB state persistence
+            if self._store is not None:
+                for part_id in self.partitions:
+                    self._persist_partition(part_id)
+                meta = {
+                    "term": self.term,
+                    "W_global": self.W_global,
+                }
+                self._store.put(f"{_PFX_META}state", meta)
+                self._store.flush()
 
     def load_state(self) -> bool:
-        # If RocksDB is available, state was already restored in constructor
-        if self._store is not None:
-            return True
+        with self._lock:
+            # If RocksDB is available, state was already restored in constructor
+            if self._store is not None:
+                return True
 
-        if os.path.exists(self.state_path):
-            with open(self.state_path) as f:
-                state = json.load(f)
-            self.term = state["term"]
-            self.W_global = state["W_global"]
-            self.W_global_prev = self.W_global
-            for k_str, v in state.get("partitions", {}).items():
-                pid = int(k_str)
-                self.partitions[pid] = PartitionInfo(
-                    partition_id=pid,
-                    worker_id=v["worker_id"],
-                    local_watermark=v["local_watermark"],
-                    last_update=time.time(),
-                    status=WorkerStatus(v["status"]),
-                    state=PartitionState(v.get("state", "assigned")),
-                )
-            return True
-        return False
+            if os.path.exists(self.state_path):
+                with open(self.state_path) as f:
+                    state = json.load(f)
+                self.term = state["term"]
+                self.W_global = state["W_global"]
+                self.W_global_prev = self.W_global
+                for k_str, v in state.get("partitions", {}).items():
+                    pid = int(k_str)
+                    self.partitions[pid] = PartitionInfo(
+                        partition_id=pid,
+                        worker_id=v["worker_id"],
+                        local_watermark=v["local_watermark"],
+                        last_update=time.time(),
+                        status=WorkerStatus(v["status"]),
+                        state=PartitionState(v.get("state", "assigned")),
+                    )
+                return True
+            return False

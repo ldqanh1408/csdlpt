@@ -1,0 +1,41 @@
+refactor-ingestor  | [ingestor] detected access-log CSV format, mapping columns
+refactor-ingestor  | [ingestor] using Kafka producer -> kafka:9092
+refactor-ingestor  | [alerting] PagerDuty not configured, alerts logged to stderr
+refactor-ingestor  | [ingestor] listening on :8100, source=/data/access.log/access_sample.csv
+refactor-ingestor  | [ingestor] CSV EOF at event 200, switching to idle loop
+refactor-ingestor  | [ingestor] punctuation T_commit=1779983458.980 min_et=1779983406.980 max_et=1779983448.980 eof=True mode=data-driven is_empty=False
+refactor-ingestor  | [ingestor] punctuation T_commit=1779983458.980 min_et=1779983406.980 max_et=1779983448.980 eof=True mode=data-driven is_empty=True
+refactor-ingestor  | [ingestor] punctuation T_commit=1779983458.980 min_et=1779983406.980 max_et=1779983448.980 eof=True mode=data-driven is_empty=True
+refactor-ingestor  | [ingestor] punctuation T_commit=1779983458.980 min_et=1779983406.980 max_et=1779983448.980 eof=True mode=data-driven is_empty=True
+refactor-ingestor  | [ingestor] punctuation T_commit=1779983458.980 min_et=1779983406.980 max_et=1779983448.980 eof=True mode=data-driven is_empty=True
+refactor-ingestor  | [ingestor] punctuation T_commit=1779983458.980 min_et=1779983406.980 max_et=1779983448.980 eof=True mode=data-driven is_empty=True
+refactor-ingestor  | [ingestor] punctuation T_commit=1779983458.980 min_et=1779983406.980 max_et=1779983448.980 eof=True mode=data-driven is_empty=True
+refactor-ingestor  | [ingestor] punctuation T_commit=1779983458.980 min_et=1779983406.980 max_et=1779983448.980 eof=True mode=data-driven is_empty=True
+refactor-ingestor  | [ingestor] punctuation T_commit=1779983458.980 min_et=1779983406.980 max_et=1779983448.980 eof=True mode=data-driven is_empty=True
+refactor-ingestor  | [ingestor] punctuation T_commit=1779983458.980 min_et=1779983406.980 max_et=1779983448.980 eof=True mode=data-driven is_empty=True
+refactor-ingestor  | [ingestor] punctuation T_commit=1779983458.980 min_et=1779983406.980 max_et=1779983448.980 eof=True mode=data-driven is_empty=True
+refactor-ingestor  | [ingestor] punctuation T_commit=1779983458.980 min_et=1779983406.980 max_et=1779983448.980 eof=True mode=data-driven is_empty=True
+refactor-ingestor  | [ingestor] punctuation T_commit=1779983458.980 min_et=1779983406.980 max_et=1779983448.980 eof=True mode=data-driven is_empty=True
+refactor-ingestor  | [ingestor] punctuation T_commit=1779983458.980 min_et=1779983406.980 max_et=1779983448.980 eof=True mode=data-driven is_empty=True
+refactor-ingestor  | [ingestor] punctuation T_commit=1779983458.980 min_et=1779983406.980 max_et=1779983448.980 eof=True mode=data-driven is_empty=True
+refactor-ingestor  | [ingestor] punctuation T_commit=1779983458.980 min_et=1779983406.980 max_et=1779983448.980 eof=True mode=data-driven is_empty=True
+refactor-ingestor  | [ingestor] punctuation T_commit=1779983458.980 min_et=1779983406.980 max_et=1779983448.980 eof=True mode=data-driven is_empty=True
+refactor-ingestor  | [ingestor] punctuation T_commit=1779983458.980 min_et=1779983406.980 max_et=1779983448.980 eof=True mode=data-driven is_empty=True
+refactor-ingestor  | [ingestor] punctuation T_commit=1779983458.980 min_et=1779983406.980 max_et=1779983448.980 eof=True mode=data-driven is_empty=True
+refactor-ingestor  | [ingestor] punctuation T_commit=1779983458.980 min_et=1779983406.980 max_et=1779983448.980 eof=True mode=data-driven is_empty=True
+refactor-ingestor  | [ingestor] punctuation T_commit=1779983458.980 min_et=1779983406.980 max_et=1779983448.980 eof=True mode=data-driven is_empty=True
+refactor-ingestor  | [ingestor] punctuation T_commit=1779983458.980 min_et=1779983406.980 max_et=1779983448.980 eof=True mode=data-driven is_empty=True
+refactor-ingestor  | [ingestor] punctuation T_commit=1779983458.980 min_et=1779983406.980 max_et=1779983448.980 eof=True mode=data-driven is_empty=True
+refactor-ingestor  | [ingestor] punctuation T_commit=1779983458.980 min_et=1779983406.980 max_et=1779983448.980 eof=True mode=data-driven is_empty=True
+refactor-ingestor  | [ingestor] punctuation T_commit=1779983458.980 min_et=1779983406.980 max_et=1779983448.980 eof=True mode=data-driven is_empty=True
+refactor-ingestor  | [ingestor] punctuation T_commit=1779983458.980 min_et=1779983406.980 max_et=1779983448.980 eof=True mode=data-driven is_empty=True
+refactor-ingestor  | [ingestor] punctuation T_commit=1779983458.980 min_et=1779983406.980 max_et=1779983448.980 eof=True mode=data-driven is_empty=True
+refactor-ingestor  | [ingestor] punctuation T_commit=1779983458.980 min_et=1779983406.980 max_et=1779983448.980 eof=True mode=data-driven is_empty=True
+refactor-ingestor  | [ingestor] punctuation T_commit=1779983458.980 min_et=1779983406.980 max_et=1779983448.980 eof=True mode=data-driven is_empty=True
+refactor-ingestor  | [ingestor] punctuation T_commit=1779983458.980 min_et=1779983406.980 max_et=1779983448.980 eof=True mode=data-driven is_empty=True
+refactor-ingestor  | [ingestor] punctuation T_commit=1779983458.980 min_et=1779983406.980 max_et=1779983448.980 eof=True mode=data-driven is_empty=True
+refactor-ingestor  | [ingestor] punctuation T_commit=1779983458.980 min_et=1779983406.980 max_et=1779983448.980 eof=True mode=data-driven is_empty=True
+refactor-ingestor  | [ingestor] punctuation T_commit=1779983458.980 min_et=1779983406.980 max_et=1779983448.980 eof=True mode=data-driven is_empty=True
+refactor-ingestor  | [ingestor] punctuation T_commit=1779983458.980 min_et=1779983406.980 max_et=1779983448.980 eof=True mode=data-driven is_empty=True
+refactor-ingestor  | [ingestor] punctuation T_commit=1779983458.980 min_et=1779983406.980 max_et=1779983448.980 eof=True mode=data-driven is_empty=True
+refactor-ingestor  | [ingestor] punctuation T_commit=1779983458.980 min_et=1779983406.980 max_et=1779983448.980 eof=True mode=data-driven is_empty=True

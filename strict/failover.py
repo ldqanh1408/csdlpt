@@ -76,7 +76,7 @@ class FailoverManager:
         self.heartbeat_timeout_s = heartbeat_timeout_s
         self._original_timeout_s = heartbeat_timeout_s
         self.total_partitions = total_partitions
-        self._lock = threading.Lock()
+        self._lock = threading.RLock()
         self._workers: dict[str, WorkerRecord] = {}
         self._partition_state: dict[int, PartitionState] = {}
         self._partition_owner: dict[int, str] = {}

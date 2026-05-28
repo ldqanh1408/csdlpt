@@ -72,7 +72,7 @@ class RaftCoordinator:
         self.leader_id: str = ""
         self._last_leader_heartbeat: float = 0.0
         self._last_committed_term: int = 0
-        self._lock = threading.Lock()
+        self._lock = threading.RLock()  # RLock prevents self-deadlock in ZK election loop
         self.coordinator = StrictCoordinator(delta_base_s=delta_base_s,
                                               state_path=state_path, db_path=db_path)
         self.coordinator.load_state()
@@ -221,6 +221,27 @@ class RaftCoordinator:
         """Inject a FailoverManager, delegating to the inner StrictCoordinator."""
         self.coordinator.set_failover_manager(fm)
 
+    def set_ingestor_health(self, monitor: object) -> None:
+        """Proxy: inject ingestor health monitor into inner coordinator."""
+        if hasattr(self.coordinator, "set_ingestor_health"):
+            self.coordinator.set_ingestor_health(monitor)
+
+    def load_state(self) -> None:
+        """Proxy: inner StrictCoordinator already loaded state in __init__; no-op here."""
+        pass
+
+    def __getattr__(self, name):
+        """Proxy any unresolved attribute lookups to the inner StrictCoordinator.
+        This covers partitions, delta_base, _node_skew_max_ms, _watermark_lag_s, etc.
+        """
+        # Avoid infinite recursion on 'coordinator' itself (set in __init__ via __dict__)
+        if name == "coordinator":
+            raise AttributeError(name)
+        try:
+            return getattr(object.__getattribute__(self, "coordinator"), name)
+        except AttributeError:
+            raise AttributeError(f"'RaftCoordinator' object has no attribute '{name}'")
+
     def broadcast(self) -> dict:
         r = self.coordinator.broadcast()
         r["raft_role"] = self.role.value
@@ -248,7 +269,17 @@ class RaftCoordinator:
         if zk_hosts and zk_hosts.lower() in ("1", "true", "yes", "on"):
             zk_hosts = None
 
+        # Try to import kazoo; fall back to simulated HTTP if unavailable
+        kazoo_available = False
         if zk_hosts:
+            try:
+                from kazoo.client import KazooClient  # noqa: F401
+                kazoo_available = True
+            except ImportError:
+                logger.warning("RaftCoordinator: kazoo not installed; falling back to simulated HTTP ZK election")
+                zk_hosts = None
+
+        if zk_hosts and kazoo_available:
             logger.info("RaftCoordinator: starting real ZooKeeper election on hosts=%s", zk_hosts)
             self._zk_hosts = zk_hosts
             self._zk_client = None

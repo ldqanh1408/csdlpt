@@ -2,6 +2,7 @@
 
 import heapq
 import os
+import threading
 import time
 
 from strict.engine import StrictWatermarkEngine
@@ -91,12 +92,22 @@ class StrictWorker:
         self.partition_ids = partition_ids
         self.engines: dict[int, StrictWatermarkEngine] = {}
         self.buffers: dict[int, BoundedPriorityQueue] = {}
+        self._partition_locks: dict[int, threading.RLock] = {}
         self.max_event_times: dict[int, float] = {}
 
         # Idleness detection
         self._last_event_time: dict[int, float] = {}
 
-        # Backpressure
+        # Backpressure pause/resume is a flow-control signal, not a data-loss
+        # boundary. The hard queue limit is intentionally much higher so a
+        # fetched Kafka batch can be accepted before the consumer pause takes
+        # effect.
+        self.max_queue = int(os.environ.get("BP_PAUSE_THRESHOLD", str(max_queue)))
+        self.resume_threshold = int(os.environ.get("BP_RESUME_THRESHOLD", "100"))
+        self.hard_queue_limit = int(os.environ.get(
+            "STRICT_HARD_QUEUE_LIMIT",
+            str(max(10000, self.max_queue * 20)),
+        ))
         self._backpressure_active: dict[int, bool] = {}
         self._pending_count: dict[int, int] = {}
         self.backpressure_pause_count: int = 0
@@ -118,7 +129,7 @@ class StrictWorker:
             eng = StrictWatermarkEngine(
                 window_size_s=window_size_s,
                 delta_base_s=delta_base_s,
-                max_queue=max_queue,
+                max_queue=self.hard_queue_limit,
                 checkpoint_dir=os.path.join(
                     os.environ.get("CHECKPOINT_DIR", "/data/checkpoint"),
                     f"partition_{pid}"),
@@ -130,7 +141,8 @@ class StrictWorker:
             )
             eng.partition_id = pid  # §9.3: deterministic window_id requires correct partition_id
             self.engines[pid] = eng
-            self.buffers[pid] = BoundedPriorityQueue()
+            self.buffers[pid] = BoundedPriorityQueue(maxsize=self.hard_queue_limit)
+            self._partition_locks[pid] = threading.RLock()
             self.max_event_times[pid] = float("-inf")
             self._last_event_time[pid] = time.time()
             self._backpressure_active[pid] = False
@@ -148,7 +160,8 @@ class StrictWorker:
 
     def on_punctuation(self, token: PunctuationToken) -> None:
         if token.partition_id in self.engines:
-            self.engines[token.partition_id].on_punctuation(token)
+            with self._partition_locks[token.partition_id]:
+                self.engines[token.partition_id].on_punctuation(token)
 
     # ---- Idleness detection ----
     def is_idle(self, partition_id: int) -> bool:
@@ -166,58 +179,77 @@ class StrictWorker:
         if partition_id not in self.engines:
             return None
 
-        buf = self.buffers[partition_id]
+        with self._partition_locks[partition_id]:
+            buf = self.buffers[partition_id]
 
-        # Check backpressure threshold BEFORE accepting event
-        if self._backpressure_active.get(partition_id, False):
-            if len(buf) < BACKPRESSURE_RESUME_AT:
-                self._backpressure_active[partition_id] = False
-            return None
-        if len(buf) >= BACKPRESSURE_MAX_QUEUE:
-            self._backpressure_active[partition_id] = True
-            self.backpressure_pause_count += 1
-            return None
+            # Backpressure should pause upstream polling, but strict mode must still
+            # accept any records that were already fetched from Kafka.
+            if self._backpressure_active.get(partition_id, False):
+                if len(buf) < self.resume_threshold:
+                    self._backpressure_active[partition_id] = False
+            if len(buf) >= self.max_queue:
+                if not self._backpressure_active[partition_id]:
+                    self._backpressure_active[partition_id] = True
+                    self.backpressure_pause_count += 1
 
-        event.arrival_time = time.time()
+            event.arrival_time = time.time()
 
-        # Track last event time for idleness detection
-        self._last_event_time[partition_id] = time.time()
+            # Track last event time for idleness detection
+            self._last_event_time[partition_id] = time.time()
 
-        ready = buf.push(event)
+            ready = buf.push(event)
 
-        # Check backpressure threshold after push
-        if len(buf) >= BACKPRESSURE_MAX_QUEUE:
-            if not self._backpressure_active[partition_id]:
-                self._backpressure_active[partition_id] = True
-                self.backpressure_pause_count += 1
+            # Check backpressure threshold after push
+            if len(buf) >= self.max_queue:
+                if not self._backpressure_active[partition_id]:
+                    self._backpressure_active[partition_id] = True
+                    self.backpressure_pause_count += 1
 
-        result = None
-        if ready:
-            result = self._process_event(ready, partition_id)
-        else:
-            ready = buf.pop_ready()
             if ready:
                 result = self._process_event(ready, partition_id)
+            else:
+                ready = buf.pop_ready()
+                result = self._process_event(ready, partition_id) if ready else None
 
-        # Resume backpressure: clear flag if queue drained below threshold
-        if self._backpressure_active.get(partition_id, False):
-            if len(buf) < BACKPRESSURE_RESUME_AT:
-                self._backpressure_active[partition_id] = False
+            # Resume backpressure: clear flag if queue drained below threshold
+            if self._backpressure_active.get(partition_id, False):
+                if len(buf) < self.resume_threshold:
+                    self._backpressure_active[partition_id] = False
 
-        return result
+            return result
 
     def _process_event(self, event: LogEvent, partition_id: int) -> float | None:
-        self.max_event_times[partition_id] = max(
-            self.max_event_times[partition_id], event.event_time
-        )
-        return self.engines[partition_id].process(
-            event, len(self.buffers[partition_id])
-        )
+        with self._partition_locks[partition_id]:
+            self.max_event_times[partition_id] = max(
+                self.max_event_times[partition_id], event.event_time
+            )
+            return self.engines[partition_id].process(
+                event, len(self.buffers[partition_id])
+            )
+
+    def buffer_size(self, partition_id: int) -> int:
+        if partition_id not in self.buffers:
+            return 0
+        with self._partition_locks[partition_id]:
+            return len(self.buffers[partition_id])
+
+    def drain_ready(self, partition_id: int, batch_size: int = 200) -> int:
+        if partition_id not in self.buffers:
+            return 0
+        with self._partition_locks[partition_id]:
+            batch = self.buffers[partition_id].pop_all_ready(batch_size=batch_size)
+            for event in batch:
+                self._process_event(event, partition_id)
+            if self._backpressure_active.get(partition_id, False):
+                if len(self.buffers[partition_id]) < self.resume_threshold:
+                    self._backpressure_active[partition_id] = False
+            return len(batch)
 
     def heartbeat(self) -> WorkerHeartbeat:
         partitions = {}
         for pid, eng in self.engines.items():
-            partitions[pid] = eng.local_watermark
+            with self._partition_locks[pid]:
+                partitions[pid] = eng.local_watermark
         return WorkerHeartbeat(
             worker_id=self.worker_id,
             partitions=partitions,
@@ -233,9 +265,10 @@ class StrictWorker:
     ) -> None:
         if not self.validate_command(term, command_id):
             return
-        for eng in self.engines.values():
-            eng.watermark = max(eng.watermark, W_global)
-            eng.raft_term = max(eng.raft_term, term)
+        for pid, eng in self.engines.items():
+            with self._partition_locks[pid]:
+                eng.watermark = max(eng.watermark, W_global)
+                eng.raft_term = max(eng.raft_term, term)
 
     def summary(self) -> dict:
         total_recv = 0
@@ -244,18 +277,39 @@ class StrictWorker:
         total_dupes = 0
         total_bp = 0
         partitions = {}
+        proc_p50_vals, proc_p95_vals, proc_p99_vals = [], [], []
+        poll_p95_vals, dedup_p95_vals, state_p95_vals = [], [], []
         for pid, eng in self.engines.items():
-            s = eng.summary()
-            m = eng.metrics
+            with self._partition_locks[pid]:
+                s = eng.summary()
+                m = eng.metrics
             total_recv += m.total_received
             total_on_time += m.on_time
             total_late += m.late_dropped
             total_dupes += m.duplicates
             total_bp += m.backpressure_drops
             partitions[pid] = s
+            for src, field in (
+                (proc_p50_vals, "proc_latency_p50_us"),
+                (proc_p95_vals, "proc_latency_p95_us"),
+                (proc_p99_vals, "proc_latency_p99_us"),
+                (poll_p95_vals, "poll_decode_latency_p95_us"),
+                (dedup_p95_vals, "dedup_latency_p95_us"),
+                (state_p95_vals, "state_write_latency_p95_us"),
+            ):
+                val = s.get(field, 0.0)
+                if val:
+                    src.append(val)
         unique = max(total_recv - total_dupes, 1)
         completeness = 100.0 * total_on_time / unique
         late_rate = 100.0 * total_late / max(total_recv, 1)
+
+        def _avg(values: list[float]) -> float:
+            return round(sum(values) / len(values), 2) if values else 0.0
+
+        def _max(values: list[float]) -> float:
+            return round(max(values), 2) if values else 0.0
+
         return {
             "worker_id": self.worker_id,
             "mode": "strict",
@@ -269,19 +323,26 @@ class StrictWorker:
             "non_monotonic_punctuation": sum(
                 eng.metrics.non_monotonic_punctuation for eng in self.engines.values()
             ),
+            "proc_latency_p50_us": _avg(proc_p50_vals),
+            "proc_latency_p95_us": _avg(proc_p95_vals),
+            "proc_latency_p99_us": _max(proc_p99_vals),
+            "poll_decode_latency_p95_us": _avg(poll_p95_vals),
+            "dedup_latency_p95_us": _avg(dedup_p95_vals),
+            "state_write_latency_p95_us": _avg(state_p95_vals),
             "partitions": partitions,
         }
 
     def broadcast(self) -> dict:
         partitions = {}
         for pid, eng in self.engines.items():
-            partitions[pid] = {
-                "watermark": eng.watermark,
-                "local_watermark": eng.local_watermark,
-                "open_windows": len(eng.open_windows),
-                "closed_windows": len(eng.closed_windows),
-                "data_completeness_pct": eng.metrics.data_completeness(),
-            }
+            with self._partition_locks[pid]:
+                partitions[pid] = {
+                    "watermark": eng.watermark,
+                    "local_watermark": eng.local_watermark,
+                    "open_windows": len(eng.open_windows),
+                    "closed_windows": len(eng.closed_windows),
+                    "data_completeness_pct": eng.metrics.data_completeness(),
+                }
         return {
             "worker_id": self.worker_id,
             "mode": "strict",
@@ -290,8 +351,9 @@ class StrictWorker:
 
     def flush_all(self) -> None:
         for pid, buf in self.buffers.items():
-            for event in buf.flush_all():
-                self._process_event(event, pid)
-        for eng in self.engines.values():
-            eng.flush()
-            eng.checkpoint()
+            with self._partition_locks[pid]:
+                for event in buf.flush_all():
+                    self._process_event(event, pid)
+                eng = self.engines[pid]
+                eng.flush()
+                eng.checkpoint()

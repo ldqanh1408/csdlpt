@@ -93,6 +93,36 @@ class TestStrictWatermarkEngine:
             assert eng2.last_T_commit == 200.0
             assert eng2.watermark == eng.watermark
 
+    def test_concurrent_checkpoint_uses_independent_temp_files(self):
+        import json
+        import os
+        import tempfile
+        import threading
+
+        with tempfile.TemporaryDirectory() as d:
+            eng = StrictWatermarkEngine(checkpoint_dir=d)
+            eng.process(LogEvent(event_id="e1", event_time=100.0, status=200))
+
+            errors = []
+
+            def checkpoint_many():
+                for _ in range(25):
+                    try:
+                        eng.checkpoint()
+                    except Exception as exc:
+                        errors.append(exc)
+
+            threads = [threading.Thread(target=checkpoint_many) for _ in range(4)]
+            for t in threads:
+                t.start()
+            for t in threads:
+                t.join()
+
+            assert errors == []
+            with open(os.path.join(d, "checkpoint.json")) as f:
+                data = json.load(f)
+            assert data["partition_id"] == 0
+
 
 class TestStrictCoordinator:
     def test_W_global_computation(self):
@@ -172,3 +202,19 @@ class TestStrictWorker:
         w.flush_all()
         eng0 = w.engines[0]
         assert len(eng0.closed_windows) >= 1
+
+    def test_backpressure_pauses_without_dropping_accepted_events(self, monkeypatch):
+        monkeypatch.delenv("BP_PAUSE_THRESHOLD", raising=False)
+        monkeypatch.delenv("BP_RESUME_THRESHOLD", raising=False)
+        monkeypatch.delenv("STRICT_HARD_QUEUE_LIMIT", raising=False)
+        w = StrictWorker("w-bp", [0], max_queue=3)
+        for i in range(20):
+            w.process(LogEvent(event_id=f"bp-{i}", event_time=100.0 + i, status=200), partition_id=0)
+
+        w.flush_all()
+        s = w.summary()
+        assert w.backpressure_pause_count >= 1
+        assert s["total_received"] == 20
+        assert s["on_time"] == 20
+        assert s["backpressure_drops"] == 0
+        assert s["data_completeness_pct"] == 100.0

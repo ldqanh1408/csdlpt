@@ -357,7 +357,21 @@ class HeuristicWatermarkEngine:
                 "sketch": self.sketch.to_dict(),
                 "updated_at": time.time(),
             }, f)
-        os.replace(sketch_tmp, sketch_path)
+
+        # Robust replace to handle transient WSL2/Docker filesystem sync delays
+        for attempt in range(5):
+            try:
+                os.replace(sketch_tmp, sketch_path)
+                break
+            except FileNotFoundError:
+                if attempt == 4:
+                    raise
+                try:
+                    os.makedirs(self.checkpoint_dir, exist_ok=True)
+                except Exception:
+                    pass
+                time.sleep(0.05)
+
 
     def _restore_from_sketch_bin(self) -> None:
         """Try loading state from sketch.bin as a secondary recovery path.
@@ -513,9 +527,13 @@ class HeuristicWatermarkEngine:
         if p99 < 1.0 and self._current_alpha > 0.001:
             self.sketch.alpha = 0.001
             self._current_alpha = 0.001
+            self.sketch._sketches.clear()
+            self.sketch._cached_quantiles.clear()
         elif p99 > 30.0 and self._current_alpha < 0.01:
             self.sketch.alpha = 0.01
             self._current_alpha = 0.01
+            self.sketch._sketches.clear()
+            self.sketch._cached_quantiles.clear()
 
     def update_global_watermark(self, W_global_h: float) -> None:
         """Update global watermark copy and proactively close windows."""
@@ -780,6 +798,8 @@ class HeuristicWatermarkEngine:
 
         lat_ns = HighResTimer.now_ns() - t0
         self.proc_latencies_ns.append(lat_ns)
+        if len(self.proc_latencies_ns) > 10000:
+            self.proc_latencies_ns.pop(0)
 
         # Update metrics
         self.metrics.sketch_total_count = self.sketch.total_count
@@ -912,6 +932,25 @@ class HeuristicWatermarkEngine:
         total_events = sum(wl["total"] for wl in wl_values)
         overall_loss_rate = round(total_late / max(total_events, 1), 4)
 
+        latencies = self.proc_latencies_ns
+        p50 = 0.0
+        p95 = 0.0
+        p99 = 0.0
+        if latencies:
+            sorted_l = sorted(latencies)
+            n = len(sorted_l)
+            p50 = sorted_l[int(n * 0.5)] / 1000.0
+            p95 = sorted_l[int(n * 0.95)] / 1000.0
+            p99 = sorted_l[int(n * 0.99)] / 1000.0
+
+        def _lat_us(values: list[float], percentile: float) -> float:
+            values = [v for v in values if v >= 0]
+            if not values:
+                return 0.0
+            sorted_v = sorted(values)
+            idx = min(int(len(sorted_v) * percentile), len(sorted_v) - 1)
+            return round(sorted_v[idx] / 1000.0, 2)
+
         base = self.metrics.summary()
         base.update({
             "mode": "heuristic",
@@ -930,5 +969,14 @@ class HeuristicWatermarkEngine:
             "negative_lag": self.neg_lag.status(),
             "per_window_loss": per_window_loss,
             "overall_loss_rate": overall_loss_rate,
+            "proc_latency_p50_us": round(p50, 2),
+            "proc_latency_p95_us": round(p95, 2),
+            "proc_latency_p99_us": round(p99, 2),
+            "sketch_update_latency_p50_us": _lat_us(self.metrics.T_sketch_update_ns, 0.50),
+            "sketch_update_latency_p95_us": _lat_us(self.metrics.T_sketch_update_ns, 0.95),
+            "sketch_update_latency_p99_us": _lat_us(self.metrics.T_sketch_update_ns, 0.99),
+            "sketch_query_latency_p50_us": _lat_us(self.metrics.T_sketch_query_ns, 0.50),
+            "sketch_query_latency_p95_us": _lat_us(self.metrics.T_sketch_query_ns, 0.95),
+            "sketch_query_latency_p99_us": _lat_us(self.metrics.T_sketch_query_ns, 0.99),
         })
         return base

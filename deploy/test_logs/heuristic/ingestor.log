@@ -1,0 +1,37 @@
+refactor-ingestor  | [ingestor] using Kafka producer -> kafka:9092
+refactor-ingestor  | [alerting] PagerDuty not configured, alerts logged to stderr
+refactor-ingestor  | [ingestor] listening on :8100, source=/data/data.csv
+refactor-ingestor  | [ingestor] punctuation T_commit=1779143921.283 min_et=1779143921.283 max_et=1784432363.283 eof=False mode=data-driven is_empty=False
+refactor-ingestor  | [ingestor] punctuation T_commit=1779117656.283 min_et=1779117656.283 max_et=1784433527.283 eof=False mode=data-driven is_empty=False
+refactor-ingestor  | [ingestor] punctuation T_commit=1779117656.283 min_et=1779117656.283 max_et=1784433527.283 eof=False mode=data-driven is_empty=False
+refactor-ingestor  | [ingestor] punctuation T_commit=1779117656.283 min_et=1779117656.283 max_et=1784433527.283 eof=False mode=data-driven is_empty=False
+refactor-ingestor  | [ingestor] progress: 19755 CSV rows read, 19755 total sent to Kafka, rate=3951 ev/s, et_range=[1779117656.283..1784433527.283] span=5315871.0s partitions_active=12 eof=False
+refactor-ingestor  | [ingestor] punctuation T_commit=1779117656.283 min_et=1779117656.283 max_et=1784433527.283 eof=False mode=data-driven is_empty=False
+refactor-ingestor  | [ingestor] punctuation T_commit=1779117656.283 min_et=1779117656.283 max_et=1784433527.283 eof=False mode=data-driven is_empty=False
+refactor-ingestor  | [ingestor] punctuation T_commit=1779117656.283 min_et=1779117656.283 max_et=1784433527.283 eof=False mode=data-driven is_empty=False
+refactor-ingestor  | [ingestor] punctuation T_commit=1779117656.283 min_et=1779117656.283 max_et=1784433527.283 eof=False mode=data-driven is_empty=False
+refactor-ingestor  | [ingestor] punctuation T_commit=1779117656.283 min_et=1779117656.283 max_et=1784433527.283 eof=False mode=data-driven is_empty=False
+refactor-ingestor  | [ingestor] progress: 52377 CSV rows read, 52377 total sent to Kafka, rate=6511 ev/s, et_range=[1779117656.283..1784433527.283] span=5315871.0s partitions_active=12 eof=False
+refactor-ingestor  | [ingestor] punctuation T_commit=1779117656.283 min_et=1779117656.283 max_et=1784433527.283 eof=False mode=data-driven is_empty=False
+refactor-ingestor  | [ingestor] punctuation T_commit=1779117656.283 min_et=1779117656.283 max_et=1784433527.283 eof=False mode=data-driven is_empty=False
+refactor-ingestor  | [ingestor] punctuation T_commit=1779117656.283 min_et=1779117656.283 max_et=1784433527.283 eof=False mode=data-driven is_empty=False
+refactor-ingestor  | [ingestor] punctuation T_commit=1779117656.283 min_et=1779117656.283 max_et=1784436420.283 eof=False mode=data-driven is_empty=False
+refactor-ingestor  | [ingestor] punctuation T_commit=1779091258.283 min_et=1779091258.283 max_et=1784439222.283 eof=False mode=data-driven is_empty=False
+refactor-ingestor  | [ingestor] progress: 89608 CSV rows read, 89608 total sent to Kafka, rate=7427 ev/s, et_range=[1779091258.283..1784441435.283] span=5350177.0s partitions_active=12 eof=False
+refactor-ingestor  | [ingestor] punctuation T_commit=1779091258.283 min_et=1779091258.283 max_et=1784441435.283 eof=False mode=data-driven is_empty=False
+refactor-ingestor  | [ingestor] punctuation T_commit=1779091258.283 min_et=1779091258.283 max_et=1784441435.283 eof=False mode=data-driven is_empty=False
+refactor-ingestor  | [ingestor] punctuation T_commit=1779091258.283 min_et=1779091258.283 max_et=1784441435.283 eof=False mode=data-driven is_empty=False
+refactor-ingestor  | [ingestor] punctuation T_commit=1779091258.283 min_et=1779091258.283 max_et=1784441435.283 eof=False mode=data-driven is_empty=False
+refactor-ingestor  | [ingestor] punctuation T_commit=1779091258.283 min_et=1779091258.283 max_et=1784441435.283 eof=False mode=data-driven is_empty=False
+refactor-ingestor  | [ingestor] progress: 112445 CSV rows read, 112445 total sent to Kafka, rate=4550 ev/s, et_range=[1779091258.283..1784441435.283] span=5350177.0s partitions_active=12 eof=False
+refactor-ingestor  | [ingestor] punctuation T_commit=1779091258.283 min_et=1779091258.283 max_et=1784441435.283 eof=False mode=data-driven is_empty=False
+refactor-ingestor  | [ingestor] punctuation T_commit=1779091258.283 min_et=1779091258.283 max_et=1784441435.283 eof=False mode=data-driven is_empty=False
+refactor-ingestor  | [ingestor] punctuation T_commit=1779089882.283 min_et=1779089882.283 max_et=1784441435.283 eof=False mode=data-driven is_empty=False
+refactor-ingestor  | [ingestor] punctuation T_commit=1779089882.283 min_et=1779089882.283 max_et=1784445205.283 eof=False mode=data-driven is_empty=False
+refactor-ingestor  | [ingestor] progress: 134727 CSV rows read, 134727 total sent to Kafka, rate=4415 ev/s, et_range=[1779089882.283..1784445205.283] span=5355323.0s partitions_active=12 eof=False
+refactor-ingestor  | [ingestor] punctuation T_commit=1779089882.283 min_et=1779089882.283 max_et=1784445205.283 eof=False mode=data-driven is_empty=False
+refactor-ingestor  | [ingestor] punctuation T_commit=1779089882.283 min_et=1779089882.283 max_et=1784445205.283 eof=False mode=data-driven is_empty=False
+refactor-ingestor  | [ingestor] punctuation T_commit=1779089703.283 min_et=1779089703.283 max_et=1784445205.283 eof=False mode=data-driven is_empty=False
+refactor-ingestor  | [ingestor] punctuation T_commit=1779089703.283 min_et=1779089703.283 max_et=1784445205.283 eof=False mode=data-driven is_empty=False
+refactor-ingestor  | [ingestor] punctuation T_commit=1779089703.283 min_et=1779089703.283 max_et=1784445205.283 eof=False mode=data-driven is_empty=False
+refactor-ingestor  | [ingestor] progress: 153264 CSV rows read, 153264 total sent to Kafka, rate=3670 ev/s, et_range=[1779089703.283..1784445205.283] span=5355502.0s partitions_active=12 eof=False

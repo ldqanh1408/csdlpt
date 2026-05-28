@@ -639,51 +639,27 @@ Kế thừa từ Strict — `Skew_i = W_max - W_h_i`. Red alert > 5000ms.
 
 **Bắt buộc** — không được drop late data silently. Chi tiết §12.
 
-### 11.3. Tầng 7 — Replay-Mode Sketch Snapshot + Rollback
+### 11.3. Tầng 7 — Khôi phục trạng thái bộ ước lượng (Sketch Snapshot & Rollback) trong chế độ Replay
 
-**Vấn đề**: Khi node sập rồi replay, dòng dữ liệu replay có lag bất thường lớn → sketch bị nhiễm bẩn nếu nuốt vào.
+**Vấn đề**: Khi node sập và khởi động lại, hệ thống sẽ thực hiện đọc lại dữ liệu lịch sử từ Kafka (Replay). Trong quá trình replay, dòng dữ liệu có độ trễ đo được (lag) lớn bất thường so với thời gian xử lý thực tế. Nếu bộ ước lượng trễ (DDSketch) liên tục tiếp nhận các mẫu trễ ảo này, trạng thái thống kê sẽ bị sai lệch nghiêm trọng ("nhiễm bẩn"), dẫn đến việc tính toán watermark sau khi replay xong không còn chính xác.
 
-**Snapshot Manager**:
+#### Trình quản lý ảnh chụp trạng thái (Snapshot Manager)
+Để bảo vệ bộ ước lượng, hệ thống thiết lập cơ chế lưu trữ ảnh chụp lịch sử của DDSketch:
+- **Cơ cấu lưu trữ**: Lưu trữ một hàng đợi gồm tối đa 6 ảnh chụp trạng thái (mỗi ảnh tương ứng với một mốc thời gian vật lý, lưu giữ tổng cộng 60 giây lịch sử gần nhất).
+- **Chu kỳ chụp**: Cứ mỗi 10 giây (đồng bộ với chu kỳ lưu checkpoint trạng thái), hệ thống chụp lại trạng thái hiện tại của bộ ước lượng và đưa vào hàng đợi. Nếu hàng đợi đầy, ảnh chụp cũ nhất sẽ bị loại bỏ.
+- **Quy trình phục hồi (Rollback)**: Khi cần thiết, hệ thống có thể truy vấn lại hàng đợi và tìm kiếm ảnh chụp trạng thái tại mốc thời gian an toàn gần nhất trước sự cố để khôi phục lại bộ ước lượng.
 
-```
-class SketchSnapshotManager:
-    snapshots: deque[(timestamp, sketch_copy)]
-    max_snapshots: 6  // giữ 60s lịch sử
+#### Cơ chế phát hiện chế độ Replay (Replay-Mode Detection)
+- **Kích hoạt**: Khi nhận được một mẫu dữ liệu có độ trễ lớn gấp 10 lần độ trễ cơ sở trung bình đang theo dõi:
+  1. Xác định hệ thống đang trong quá trình khôi phục (Replay).
+  2. Xác định mốc thời gian khôi phục an toàn (ví dụ: thời điểm hiện tại trừ đi một khoảng đệm 5 giây).
+  3. Tìm kiếm và phục hồi trạng thái của bộ ước lượng về ảnh chụp trạng thái tại mốc an toàn đó.
+  4. Tạm dừng hoàn toàn việc cập nhật các mẫu trễ mới vào bộ ước lượng trong suốt quá trình chạy replay.
+- **Thoát chế độ Replay**:
+  - Điều kiện thoát: Khi độ trễ của các mẫu dữ liệu giảm xuống dưới 2 lần độ trễ cơ sở trung bình và duy trì ổn định liên tục trong 10 giây.
+  - Hành động: Hủy bỏ trạng thái Replay, cho phép tiếp tục ghi nhận mẫu trễ vào bộ ước lượng, và thực hiện hiệu chuẩn lại độ trễ cơ sở theo phân phối thực tế mới.
 
-    def take_snapshot(self):
-        snap = (now, deepcopy(self.sketch))
-        snapshots.append(snap)
-        if len(snapshots) > 6: snapshots.popleft()
-
-    def rollback_to(self, target_time):
-        for ts, snap in reversed(snapshots):
-            if ts <= target_time: return snap
-```
-
-Snapshot taken mỗi 10s (cùng checkpoint cycle).
-
-**Replay-Mode Detection**:
-
-```
-on_lag_received(lag, now):
-    if lag > 10 × baseline_lag (đã track):
-        in_replay_mode = True
-        rollback_target = now - 5s   // buffer
-        clean_sketch = snapshot_manager.rollback_to(rollback_target)
-        self.sketch = clean_sketch
-        # Pause sketch updates
-```
-
-**Exit Replay-Mode**:
-
-```
-if lag < 2 × baseline_lag stable in 10s:
-    in_replay_mode = False
-    resume sketch updates
-    baseline_lag = current_lag  // recalibrate
-```
-
-**Memory cost**: 6 × 50KB = 300KB per partition. Chấp nhận được.
+**Chi phí bộ nhớ**: Khoảng 300 KB cho mỗi phân vùng dữ liệu để lưu trữ 6 bản sao trạng thái của bộ ước lượng, hoàn toàn phù hợp cho vận hành thực tế.
 
 ---
 
@@ -691,94 +667,55 @@ if lag < 2 × baseline_lag stable in 10s:
 
 > **Mục tiêu**: Mọi log `T_event < W_global_h` đến muộn được route vào DLQ, sau đó emit correction xuống downstream. Không drop silently.
 
-### 12.1. DLQ Topic Schema
+### 12.1. Cấu trúc thông điệp hàng đợi dữ liệu muộn (DLQ Topic Schema)
 
-`late_logs_dlq` (Kafka topic, 12 partitions, retention 7 ngày):
+Hàng đợi dữ liệu muộn (Kafka topic với 12 phân vùng, thời gian lưu giữ dữ liệu 7 ngày) lưu trữ các bản ghi log bị muộn hơn mốc watermark toàn cục ước lượng tại thời điểm tiếp nhận. Mỗi thông điệp chứa các trường thông tin:
+- **Định danh bản ghi**: Chuỗi ký tự định danh duy nhất của log.
+- **Thời gian sự kiện**: Mốc thời gian logic khi log được tạo ra.
+- **Thời gian tiếp nhận**: Mốc thời gian vật lý khi Worker tiếp nhận bản ghi.
+- **Độ trễ đo được**: Hiệu số giữa thời gian tiếp nhận và thời gian sự kiện.
+- **Watermark toàn cục ước lượng**: Mốc watermark toàn cục tại thời điểm bản ghi đến.
+- **Thời gian trễ**: Khoảng thời gian bản ghi bị muộn hơn mốc watermark.
+- **Định danh phân vùng**: Số hiệu phân vùng Kafka chứa bản ghi.
+- **Định danh Worker**: Định danh Worker tiếp nhận dữ liệu.
+- **Nội dung bản ghi gốc**: Dữ liệu log gốc ban đầu.
 
-```json
-{
-  "log_id": "abc-123",
-  "T_event": 1704067200.123,
-  "arrival_time": 1704067230.456,
-  "lag": 30.333,
-  "W_global_h_at_arrival": 1704067225.000,
-  "lateness": 4.877,
-  "partition_id": 7,
-  "worker_id": "worker-2",
-  "original_payload": "..."
-}
-```
+### 12.2. Tiến trình xử lý dữ liệu muộn (DLQ Consumer)
 
-### 12.2. DLQ Consumer (Offline Reconciliation Job)
+Tiến trình xử lý dữ liệu muộn chạy định kỳ theo giờ (hoặc liên tục tùy thuộc vào yêu cầu nghiệp vụ):
+1. **Thu thập**: Đọc một lô (batch) các thông điệp dữ liệu muộn tích lũy từ hàng đợi trong khoảng thời gian xác định.
+2. **Phân nhóm**: Gom các thông điệp muộn theo cặp định danh phân vùng và định danh cửa sổ thời gian tương ứng.
+3. **Tính toán lại**: Nạp lại trạng thái cũ của cửa sổ và thực hiện tính toán cộng dồn dữ liệu muộn (cập nhật các chỉ số tổng hợp như số lượng, tổng giá trị).
+4. **Xác định chênh lệch**: Tính toán độ lệch giữa kết quả sau khi cập nhật và kết quả đã phát đi trước đó.
+5. **Phát bản tin sửa lỗi**: Gửi thông điệp sửa lỗi xuống hệ thống tiêu thụ (downstream).
+6. **Xác nhận hoàn thành**: Ghi nhận offset đã xử lý xong của lô dữ liệu.
 
-**Tần suất**: Hourly batch (hoặc continuous với relaxed SLA).
+### 12.3. Cấu trúc thông điệp sửa lỗi (Correction Message Schema)
 
-**Logic**:
+Thông điệp sửa lỗi gửi xuống hệ thống tiêu thụ chứa các thông tin:
+- **Loại thông điệp**: Xác định đây là thông điệp sửa lỗi cửa sổ.
+- **Định danh cửa sổ**: Chuỗi định danh kết hợp giữa phân vùng và khoảng thời gian bắt đầu/kết thúc của cửa sổ.
+- **Định danh sửa lỗi**: Mã định danh duy nhất cho phiên giao dịch sửa lỗi này.
+- **Thời gian phát lần trước**: Thời điểm phát kết quả cửa sổ lần đầu tiên.
+- **Thời gian sửa lỗi**: Thời điểm phát bản tin sửa lỗi hiện tại.
+- **Kết quả cũ**: Các giá trị tổng hợp đã phát trước đó (ví dụ: số đếm cũ, tổng cũ).
+- **Kết quả mới**: Các giá trị tổng hợp mới sau khi đã cộng dồn dữ liệu muộn.
+- **Chênh lệch (Delta)**: Giá trị chênh lệch tăng/giảm của các chỉ số tổng hợp.
+- **Danh sách định danh log muộn**: Danh sách các bản ghi log muộn đã được xử lý trong đợt này.
 
-```
-1. Đọc batch DLQ messages từ N giờ qua.
-2. Group theo (partition_id, window_id).
-3. Tính lại aggregation: count, sum, etc.
-4. Compute delta = (final_count - previous_count, final_sum - previous_sum).
-5. Emit correction message xuống downstream (xem §12.3).
-6. Mark batch processed (commit offset).
-```
+### 12.4. Các mô hình cập nhật phía hệ thống tiêu thụ (Downstream Sink Patterns)
 
-### 12.3. Correction Message Schema
+Hệ thống tiêu thụ kết quả có thể lựa chọn 1 trong 3 mô hình cập nhật:
+1. **Mô hình cập nhật cộng dồn (Incremental Update)**: Thực hiện cộng thêm giá trị chênh lệch (Delta) trực tiếp vào cơ sở dữ liệu dựa trên định danh cửa sổ thời gian.
+2. **Mô hình ghi đè (Replace)**: Thay thế hoàn toàn kết quả cũ của cửa sổ thời gian bằng kết quả mới vừa nhận được.
+3. **Mô hình ghi nhật ký phiên bản (Append with Versioning)**: Ghi thêm một bản ghi mới với mã loại phù hợp (ví dụ: `INITIAL` cho kết quả đầu tiên, `CORRECTION` cho kết quả sửa lỗi) và tăng số hiệu phiên bản (`version++`). Hệ thống tiêu thụ khi đọc sẽ luôn lấy phiên bản cao nhất.
 
-```json
-{
-  "message_type": "WINDOW_CORRECTION",
-  "window_id": "P7_1704067200-1704067205",
-  "correction_id": "uuid-v4",
-  "previous_emit_timestamp": 1704067210000,
-  "correction_timestamp": 1704070800000,
-  "previous_result": {
-    "count": 12500, "sum": 9876543.21
-  },
-  "corrected_result": {
-    "count": 12545, "sum": 9879876.54
-  },
-  "delta": {
-    "count": 45, "sum": 3333.33
-  },
-  "late_log_ids": ["log-001", ...]
-}
-```
+### 12.5. Khử trùng lặp bản tin sửa lỗi (Correction Deduplication)
 
-### 12.4. Downstream Sink Patterns (3 lựa chọn)
-
-**Pattern 1 — Incremental Update Sink** (database, materialized view):
-
-```sql
-UPDATE window_results 
-SET count = count + delta.count, sum = sum + delta.sum
-WHERE window_id = correction.window_id
-```
-
-**Pattern 2 — Replace Sink** (cache, key-value):
-
-```
-PUT window_results/{window_id} = correction.corrected_result
-```
-
-**Pattern 3 — Append + Versioning** (event log):
-
-```
-APPEND log: {type: INITIAL, window_id: X, result: prev_result, version: 1}
-APPEND log: {type: CORRECTION, window_id: X, result: corrected_result, version: 2}
-```
-
-Downstream consumer chọn version cao nhất.
-
-### 12.5. Correction Dedup
-
-Downstream maintain table `processed_corrections`:
-
-```
-SELECT 1 FROM processed_corrections 
-WHERE window_id = X AND correction_id = Y
-```
+Để đảm bảo an toàn, hệ thống tiêu thụ duy trì một bảng ghi nhận các bản tin sửa lỗi đã xử lý:
+- Tra cứu theo cặp định danh cửa sổ và định danh sửa lỗi.
+- Nếu đã tồn tại, bỏ qua bản tin (tránh xử lý trùng lặp).
+- Nếu chưa tồn tại, thực hiện cập nhật kết quả và lưu lại thông tin phiên sửa lỗi.
 
 Existed → skip. Không → apply + insert.
 
@@ -943,3 +880,152 @@ loss_rate(W_k) = late_dropped_count(W_k) / total_arrived_count(W_k)
 - Downstream không hỗ trợ correction.
 - Multi-region active-active.
 - Schema runtime changes (cần migration plan).
+
+---
+
+## 16. Chi tiết Triển khai Code (Low-Level & High-Level Code Specifications)
+
+Để đồng bộ tài liệu thiết kế với mã nguồn triển khai thực tế trong hệ thống, dưới đây là đặc tả chi tiết về cấu trúc các lớp (classes), trường dữ liệu (fields), phương thức (methods) và luồng chạy (execution flow) của chế độ **Heuristic Watermark**.
+
+### 16.1. Sơ đồ Cấu trúc File trong Heuristic Path
+
+Mã nguồn triển khai của heuristic path được phân tách rõ ràng thành các cấu phần chuyên biệt nằm tại thư mục [heuristic/](file:///D:/dev/csdlpt/heuristic):
+
+| Đường dẫn file | Vai trò chính |
+|---|---|
+| [heuristic/engine.py](file:///D:/dev/csdlpt/heuristic/engine.py) | Bộ xử lý lõi của từng phân vùng (`HeuristicWatermarkEngine`), gom cửa sổ, tích lũy DDSketch và sinh watermark. |
+| [heuristic/aggregator.py](file:///D:/dev/csdlpt/heuristic/aggregator.py) | Bộ gom watermark toàn cục (`HeuristicAggregator`) gom `W_h` từ các phân vùng thành `W_global_h`. |
+| [heuristic/aggregator_ha.py](file:///D:/dev/csdlpt/heuristic/aggregator_ha.py) | Quản lý độ khả dụng cao (`HeuristicAggregatorHA`) cấu hình Active-Standby sử dụng ZooKeeper locks. |
+| [heuristic/cold_start.py](file:///D:/dev/csdlpt/heuristic/cold_start.py) | Điều khiển chu trình Warm-up (`ColdStartManager`) và áp dụng cận an toàn (Conservative Prior). |
+| [heuristic/negative_lag.py](file:///D:/dev/csdlpt/heuristic/negative_lag.py) | Xử lý nhiễu lệch đồng hồ (`NegativeLagHandler`) phát hiện và hiệu chuẩn độ trễ âm (skew). |
+| [heuristic/dlq.py](file:///D:/dev/csdlpt/heuristic/dlq.py) | Quản lý hàng đợi log muộn (`DLQPipeline`) lưu trữ đĩa và xuất bản thông điệp đền bù (`CorrectionMessage`). |
+
+---
+
+### 16.2. Đặc tả Chi tiết các Lớp Core (Class-level & API Specifications)
+
+#### 16.2.1. Động cơ ước lượng trễ thích ứng (`HeuristicWatermarkEngine`)
+Định nghĩa tại [heuristic/engine.py](file:///D:/dev/csdlpt/heuristic/engine.py#L74), chịu trách nhiệm tính toán watermark cục bộ dựa trên phân phối thực nghiệm của lag.
+
+```python
+class HeuristicWatermarkEngine:
+    def __init__(self, partition_id: int = 0, worker_id: str = "", **kwargs):
+        self.partition_id = partition_id
+        self.worker_id = worker_id
+        self.sketch = SlidingWindowDDSketch(...) # Theo dõi phân phối lag trong 60 giây trượt
+        self.cold_start = ColdStartManager(...)  # Quản lý 3 trạng thái warm-up khởi đầu
+        self.neg_lag = NegativeLagHandler(...)   # Giám sát và triệt tiêu clock skew
+        self.watermark: float = float("-inf")   # Heuristic Watermark cục bộ (W_h)
+        self.max_event_time: float = float("-inf") # T_event lớn nhất từng quan sát được
+```
+
+* **Xử lý LogEvent đầu vào (`process(self, event: LogEvent) -> Optional[float]`):**
+  1. **Tính toán trễ thực tế:**
+     $$lag = arrival\_time - event.event\_time$$
+  2. **Hiệu chỉnh đồng hồ lệch:** Đưa `lag` qua bộ kiểm soát [NegativeLagHandler](file:///D:/dev/csdlpt/heuristic/negative_lag.py#L22). Nếu tỷ lệ lệch âm vượt ngưỡng cảnh báo (>=1%), tiến hành hiệu chuẩn:
+     $$lag\_adjusted = lag + |median\_negative\_lag|$$
+     Sau đó đẩy `lag_adjusted` vào bộ đệm `self.sketch`.
+  3. **Lọc sự kiện đến muộn (Late Data Drop):** So khớp `event.event_time` với watermark hiện tại (`self.watermark`). Nếu sự kiện có `event.event_time < self.watermark`, sự kiện bị coi là **LATE**:
+     * Tăng chỉ số lỗi `late_dropped` của hệ thống.
+     * Đóng gói sự kiện gửi vào [DLQPipeline](file:///D:/dev/csdlpt/heuristic/dlq.py#L41) để xử lý đền bù sau.
+  4. **Tích lũy cửa sổ:** Gom dữ liệu vào Tumbling Window cục bộ, lưu trữ trực tiếp xuống RocksDB.
+  5. **Cập nhật Watermark (`_update_watermark()`):**
+     * Truy vấn phân vị lag hiệu dụng từ sketch (mặc định `p=0.99`).
+     * Lọc thích ứng qua `ColdStartManager.get_L_eff(quantile)` để lấy độ trễ hiệu dụng an toàn ($L_{eff}$).
+     * Tính toán watermark ứng viên:
+       $$W_{candidate} = self.max\_event\_time - L_{eff}$$
+     * Áp dụng ràng buộc tăng tốc độ tối đa (`wm_max_advance_rate = 1.5` lần so với thời gian trôi qua thực tế) để tránh watermark nhảy vọt bất thường do mất mẫu dữ liệu tạm thời.
+     * Bảo đảm tính đơn điệu: `self.watermark = max(self.watermark, W_candidate)`.
+
+#### 16.2.2. Lớp điều khiển chu trình khởi động (`ColdStartManager`)
+Nằm tại [heuristic/cold_start.py](file:///D:/dev/csdlpt/heuristic/cold_start.py#L21), giải quyết bài toán thiếu số liệu thống kê lúc bắt đầu chạy.
+
+* **Thuật toán thoát Warm-up 2 điều kiện (Two-Condition Exit):**
+  Phương thức `update(self, sample_count)` liên tục cập nhật trạng thái khởi động:
+  * **Trạng thái 0 (PHASE_0):** Thời gian chạy `< 5.0` giây và số mẫu `< 100`. Hệ thống không phát sinh Watermark.
+  * **Trạng thái 1 (PHASE_1):** Thời gian chạy `< 10.0` giây hoặc số mẫu `< 1000`. Hệ thống cho phép phát sinh Watermark nhưng găm giữ ở cận an toàn (Conservative Prior):
+    $$L_{eff} = \max(L_{sketch\_quantile}, L_{max\_design\_cap})$$
+    Với `L_max_design_cap` mặc định là 60.0 giây (HEURISTIC_L_MAX). Việc này ngăn chặn watermark tiến lên quá nhanh khi phân phối mẫu chưa hội tụ.
+  * **Trạng thái thường (NORMAL):** Đạt thời gian chạy `>= 10.0` giây **VÀ** tích lũy đủ `>= 1000` mẫu dữ liệu. Hệ thống chuyển sang sử dụng phân vị trực tiếp từ `DDSketch`.
+
+#### 16.2.3. Hàng đợi log muộn & Đường ống sửa lỗi (`DLQPipeline`)
+Nằm tại [heuristic/dlq.py](file:///D:/dev/csdlpt/heuristic/dlq.py#L41), chịu trách nhiệm lưu trữ và đền bù các log bị loại bỏ do đến muộn.
+
+* **Lưu trữ đệm đĩa cứng:** Toàn bộ log muộn được chuyển đổi thành cấu trúc `DLQEntry` và lưu trữ bền bỉ trong RocksDB cục bộ với tiền tố `"dlq:"` để phòng ngừa mất mát khi sập Worker, đồng thời đẩy lên Kafka topic `"late_logs_dlq"`.
+* **Thuật toán gom cụm đền bù (`compute_corrections`):**
+  1. Gom nhóm toàn bộ các bản ghi muộn có trong hàng đợi theo phân vùng và cửa sổ thời gian đích mà bản ghi đó thuộc về.
+  2. Với mỗi nhóm, thực hiện truy vấn trạng thái kết quả cửa sổ đã phát trước đó (`results_lookup`).
+  3. Tính toán các giá trị delta chênh lệch:
+     $$delta\_count = \text{số log muộn mới gom}$$
+     $$corrected\_count = previous\_count + delta\_count$$
+  4. Tạo thông điệp đền bù `CorrectionMessage` chứa:
+     * `message_id`: UUID duy nhất.
+     * `window_id`: ID cửa sổ định danh dạng `{partition_id}_{window_start}`.
+     * `previous_count` & `corrected_count`.
+     * `message_type`: `"WINDOW_CORRECTION"` (sửa đổi tức thời) hoặc `"FINAL_RECONCILIATION"` (chốt số liệu đối soát cuối cùng).
+  5. Phát thông điệp đền bù xuống hệ thống downstream để thực hiện cập nhật lại số liệu.
+
+---
+
+### 16.3. Luồng chạy Ingestion & Xử lý thời gian thực (Execution Engine Flow)
+
+Trong chế độ Heuristic, sự tương tác diễn ra song song trực tiếp trên luồng tiêu thụ Kafka tại [run.py](file:///D:/dev/csdlpt/run.py):
+
+```mermaid
+sequenceDiagram
+    participant K as Kafka Broker
+    participant W as HeuristicWorker
+    participant E as HeuristicWatermarkEngine
+    participant DLQ as DLQPipeline
+    
+    K->>W: Đọc lô LogEvent mới (Kafka poll loop)
+    W->>E: Xử lý sự kiện (E.process(event))
+    alt T_event < E.watermark (Log đến muộn)
+        E->>DLQ: Đẩy log vào hàng đợi (DLQ.enqueue(event))
+        Note over DLQ: Lưu RocksDB & Kafka 'late_logs_dlq'
+    else Bình thường (On-time)
+        E->>E: Gom nhóm vào cửa sổ trạng thái
+        E->>E: Quan sát lag và cập nhật DDSketch
+        E->>E: Cập nhật watermark thích ứng cục bộ (W_h)
+    end
+    W->>K: Đồng bộ và commit Kafka Offset
+```
+
+### 16.4. Cơ chế Đảm bảo Độ khả dụng cao của Aggregator (Active-Standby HA)
+
+Để gom mốc watermark cục bộ `W_h` từ các Worker mà không tạo điểm sập duy nhất (SPOF) cho toàn hệ thống, cấu phần [heuristic/aggregator_ha.py](file:///D:/dev/csdlpt/heuristic/aggregator_ha.py) triển khai mô hình Active-Standby dựa trên ZooKeeper:
+
+1. **Tranh chấp Leader:** Cả hai node Aggregator (`aggregator` và `aggregator-standby`) khi khởi động đều cố gắng thiết lập khóa loại trừ (ephemeral node lock) tại đường dẫn `/csdlpt/locks/heuristic-aggregator` trong ZooKeeper.
+2. **Node Active (Leader):**
+   * Đăng ký thành công khóa ZK.
+   * Lắng nghe báo cáo watermark cục bộ gửi từ các Worker.
+   * Thực hiện tính toán `W_global_h = min(W_h)` của các phân vùng khỏe mạnh.
+   * Định kỳ broadcast mốc `W_global_h` thu được xuống toàn bộ các Worker cục bộ để thực hiện chốt cửa sổ.
+3. **Node Standby (Hot Standby):**
+   * Thất bại khi tranh chấp khóa ZK. Đăng ký cơ chế theo dõi (Watcher) trạng thái của khóa đó.
+   * Vẫn chạy ngầm, liên tục đồng bộ hóa metadata phân vùng và các mốc watermark cục bộ thông qua đĩa lưu trữ chung (Shared Volume / RocksDB) để duy trì trạng thái nóng.
+4. **Quy trình Failover:**
+   * Khi Node Active sập, kết nối ZooKeeper bị đứt, ephemeral node chứa khóa bị xóa tự động sau 2.0 giây.
+   * Node Standby nhận tín hiệu Watcher thay đổi, lập tức nhảy vào đăng ký khóa, chuyển trạng thái thành `Active`.
+   * Nhờ có RocksDB đồng bộ nóng trước đó, Node mới tiếp quản lập tức tính toán và phát tiếp `W_global_h` mà không làm đứt quãng dòng chảy dữ liệu. Thời gian phục hồi (RTO) thực tế $\le 2$ giây.
+
+---
+
+### 16.5. Khắc phục lỗi Mismatch Alpha trên DDSketch
+
+Trong quá trình vận hành thực tế ở chế độ Heuristic Watermark với cơ chế tự thích ứng độ chính xác phân vị (DDSketch Strategy 3), hệ thống thực hiện điều chỉnh động tham số sai số `alpha` của `SlidingWindowDDSketch` (ví dụ chuyển từ `0.01` sang `0.001` dựa trên độ ổn định của dữ liệu).
+
+#### 16.5.1. Nguyên nhân lỗi
+Do `SlidingWindowDDSketch` quản lý lịch sử trượt bằng cách chia nhỏ thành các `sub_sketches` độc lập cho từng khoảng thời gian. Khi giá trị `alpha` toàn cục thay đổi:
+* Các `sub-sketches` cũ vẫn giữ cấu hình `alpha` cũ.
+* Khi hệ thống thực hiện gộp (`merge`) các phân đoạn con này để truy vấn phân vị tổng thể, DDSketch sẽ bắn ra lỗi trùng khớp sai số: `ValueError: alpha mismatch`.
+
+#### 16.5.2. Giải pháp khắc phục
+Trong hàm `_check_adaptive_alpha` thuộc [heuristic/engine.py](file:///D:/dev/csdlpt/heuristic/engine.py#L510-L533), khi phát hiện sự chuyển dịch ngưỡng `alpha`:
+1. Tiến hành cập nhật giá trị `alpha` mới cho đối tượng `sketch` chính.
+2. Thực hiện xóa sạch danh sách các sketch con trượt (`self.sketch._sketches.clear()`).
+3. Làm rỗng bộ nhớ cache phân vị (`self.sketch._cached_quantiles.clear()`).
+
+Cơ chế này cho phép hệ thống làm sạch các phân đoạn con mang tham số sai số cũ không tương thích, đồng thời tái thiết lập các sketch con mới đồng nhất dưới tham số `alpha` mới, đảm bảo hệ thống chạy liên tục không bị gián đoạn hoặc sập worker do xung đột cấu hình phân vị.
+
+---

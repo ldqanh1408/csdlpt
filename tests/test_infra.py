@@ -10,7 +10,7 @@ from common.kafka_real import KafkaProducer, KafkaConsumer
 
 
 class TestZKLeaderElection(unittest.TestCase):
-    @patch("refactor.common.zk_lock.KazooClient")
+    @patch("common.zk_lock.KazooClient")
     def test_zk_lock_lifecycle(self, mock_kazoo):
         mock_client = MagicMock()
         mock_lock = MagicMock()
@@ -38,7 +38,7 @@ class TestZKLeaderElection(unittest.TestCase):
 
 
 class TestKafkaRealAdapters(unittest.TestCase):
-    @patch("refactor.common.kafka_real.PyKafkaProducer")
+    @patch("common.kafka_real.PyKafkaProducer")
     def test_producer_send(self, mock_producer_cls):
         mock_producer = MagicMock()
         mock_producer_cls.return_value = mock_producer
@@ -61,7 +61,7 @@ class TestKafkaRealAdapters(unittest.TestCase):
         producer.flush()
         mock_producer.flush.assert_called_once()
 
-    @patch("refactor.common.kafka_real.PyKafkaConsumer")
+    @patch("common.kafka_real.PyKafkaConsumer")
     @patch.dict(os.environ, {"PARTITIONS": "0,1,2"})
     def test_consumer_operations(self, mock_consumer_cls):
         mock_consumer = MagicMock()

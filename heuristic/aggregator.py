@@ -165,7 +165,18 @@ class HeuristicAggregator:
         tmp = self.state_path + ".tmp"
         with open(tmp, "w") as f:
             json.dump(state, f)
-        os.replace(tmp, self.state_path)
+        
+        # Robust replace to handle transient WSL2/Docker filesystem sync delays
+        for attempt in range(5):
+            try:
+                os.replace(tmp, self.state_path)
+                break
+            except FileNotFoundError:
+                if attempt == 4:
+                    raise
+                os.makedirs(os.path.dirname(self.state_path), exist_ok=True)
+                time.sleep(0.05)
+
 
         # RocksDB state persistence
         if self._store is not None:

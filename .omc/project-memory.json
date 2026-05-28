@@ -1,25 +1,25 @@
 {
   "version": "1.0.0",
-  "lastScanned": 1779717453307,
+  "lastScanned": 1779982913244,
   "projectRoot": "D:\\dev\\csdlpt",
   "techStack": {
     "languages": [
       {
-        "name": "C/C++",
+        "name": "Python",
         "version": null,
         "confidence": "high",
         "markers": [
-          "Makefile"
+          "requirements.txt"
         ]
       }
     ],
     "frameworks": [],
-    "packageManager": null,
+    "packageManager": "pip",
     "runtime": null
   },
   "build": {
-    "buildCommand": "make build",
-    "testCommand": "python -m pytest refactor/tests/ -q 2>&1 | tail -10",
+    "buildCommand": null,
+    "testCommand": null,
     "lintCommand": null,
     "devCommand": null,
     "scripts": {}
@@ -35,150 +35,124 @@
     "workspaces": [],
     "mainDirectories": [
       "docs",
-      "scripts"
+      "tests"
     ],
     "gitBranches": null
   },
   "customNotes": [],
   "directoryMap": {
+    "common": {
+      "path": "common",
+      "purpose": null,
+      "fileCount": 18,
+      "lastAccessed": 1779982913223,
+      "keyFiles": [
+        "alerting.py",
+        "config.py",
+        "csdlpt.proto",
+        "csdlpt_pb2.py",
+        "csdlpt_pb2_grpc.py"
+      ]
+    },
     "dataset": {
       "path": "dataset",
       "purpose": null,
-      "fileCount": 2,
-      "lastAccessed": 1779717453281,
+      "fileCount": 1,
+      "lastAccessed": 1779982913224,
       "keyFiles": [
-        "access.log.zip",
         "data.csv"
+      ]
+    },
+    "ddsketch": {
+      "path": "ddsketch",
+      "purpose": null,
+      "fileCount": 3,
+      "lastAccessed": 1779982913224,
+      "keyFiles": [
+        "compat.py",
+        "sketch.py",
+        "__init__.py"
       ]
     },
     "deploy": {
       "path": "deploy",
       "purpose": null,
-      "fileCount": 2,
-      "lastAccessed": 1779717453282,
+      "fileCount": 8,
+      "lastAccessed": 1779982913225,
       "keyFiles": [
+        "dashboard.py",
+        "docker-compose.sim.yml",
         "docker-compose.yml",
-        "prometheus.yml"
+        "Dockerfile",
+        "grafana-dashboard.json"
       ]
-    },
-    "dlq": {
-      "path": "dlq",
-      "purpose": null,
-      "fileCount": 0,
-      "lastAccessed": 1779717453282,
-      "keyFiles": []
     },
     "docs": {
       "path": "docs",
       "purpose": "Documentation",
-      "fileCount": 9,
-      "lastAccessed": 1779717453282,
+      "fileCount": 0,
+      "lastAccessed": 1779982913225,
+      "keyFiles": []
+    },
+    "heuristic": {
+      "path": "heuristic",
+      "purpose": null,
+      "fileCount": 8,
+      "lastAccessed": 1779982913226,
       "keyFiles": [
-        "ARCHITECTURE.md",
-        "DESIGN.md",
-        "EOS_MARKER.md",
-        "GLOSSARY.md",
-        "INDEX.md"
+        "aggregator.py",
+        "aggregator_ha.py",
+        "cold_start.py",
+        "dlq.py",
+        "downstream_emitter.py"
       ]
     },
-    "pending": {
-      "path": "pending",
+    "hybrid": {
+      "path": "hybrid",
       "purpose": null,
-      "fileCount": 5,
-      "lastAccessed": 1779717453283,
+      "fileCount": 2,
+      "lastAccessed": 1779982913226,
       "keyFiles": [
-        "ARCHITECTURE.md",
-        "CONTAINER_COORDINATION.md",
-        "Online assessment v1.docx",
-        "PROPOSAL.md",
-        "REPORT.md"
-      ]
-    },
-    "refactor": {
-      "path": "refactor",
-      "purpose": null,
-      "fileCount": 6,
-      "lastAccessed": 1779717453283,
-      "keyFiles": [
-        "docker-compose.yml",
-        "Dockerfile",
-        "requirements.txt",
-        "run.py",
+        "router.py",
         "__init__.py"
       ]
     },
-    "scripts": {
-      "path": "scripts",
-      "purpose": "Build/utility scripts",
-      "fileCount": 13,
-      "lastAccessed": 1779717453284,
-      "keyFiles": [
-        "demo_live.sh",
-        "lib.sh",
-        "run_all.sh",
-        "test_01_smoke.sh",
-        "test_02_happy.sh"
-      ]
-    },
-    "ui": {
-      "path": "ui",
+    "strict": {
+      "path": "strict",
       "purpose": null,
-      "fileCount": 10,
-      "lastAccessed": 1779717453284,
+      "fileCount": 11,
+      "lastAccessed": 1779982913227,
       "keyFiles": [
-        "demos.py",
-        "dist.py",
-        "helpers.py",
-        "overview.py",
-        "report.py"
-      ]
-    },
-    "wm": {
-      "path": "wm",
-      "purpose": null,
-      "fileCount": 9,
-      "lastAccessed": 1779717453285,
-      "keyFiles": [
-        "actions.py",
-        "config.py",
-        "demos.py",
+        "backpressure.py",
+        "coordinator.py",
+        "disaster_recovery.py",
         "engine.py",
-        "partition.py"
+        "failover.py"
+      ]
+    },
+    "tests": {
+      "path": "tests",
+      "purpose": "Test files",
+      "fileCount": 15,
+      "lastAccessed": 1779982913227,
+      "keyFiles": [
+        "test_backpressure.py",
+        "test_chaos.py",
+        "test_ddsketch.py",
+        "test_docker_compose_e2e.py",
+        "test_failover.py"
       ]
     },
     "__pycache__": {
       "path": "__pycache__",
       "purpose": null,
-      "fileCount": 5,
-      "lastAccessed": 1779717453285,
+      "fileCount": 4,
+      "lastAccessed": 1779982913228,
       "keyFiles": [
-        "app.cpython-310.pyc",
-        "app.cpython-314.pyc",
-        "log_generator.cpython-310.pyc",
-        "nasa_loader.cpython-310.pyc",
-        "watermark_engine.cpython-310.pyc"
-      ]
-    },
-    "refactor\\docs": {
-      "path": "refactor\\docs",
-      "purpose": "Documentation",
-      "fileCount": 8,
-      "lastAccessed": 1779717453287,
-      "keyFiles": [
-        "00_TOC_AND_PROJECT_ONBOARDING.md",
-        "01_SYSTEM_ARCHITECTURE_OVERVIEW.md",
-        "02_STRICT_PATH_DETAILED_DESIGN.md"
-      ]
-    },
-    "wm\\data": {
-      "path": "wm\\data",
-      "purpose": "Data files",
-      "fileCount": 3,
-      "lastAccessed": 1779717453287,
-      "keyFiles": [
-        "nasa.py",
-        "synthetic.py",
-        "__init__.py"
+        "run.cpython-310.pyc",
+        "run.cpython-314.pyc",
+        "__init__.cpython-310.pyc",
+        "__init__.cpython-314.pyc"
       ]
     }
   },

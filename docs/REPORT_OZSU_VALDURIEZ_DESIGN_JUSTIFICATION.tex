@@ -1,0 +1,526 @@
+\documentclass[12pt,a4paper]{article}
+
+\usepackage{iftex}
+\ifPDFTeX
+    \usepackage[utf8]{inputenc}
+    \usepackage[T5]{fontenc}
+    \usepackage[vietnamese]{babel}
+    \usepackage{lmodern}
+\else
+    \usepackage{fontspec}
+    \setmainfont{Times New Roman}
+\fi
+\usepackage{geometry}
+\usepackage{longtable}
+\usepackage{booktabs}
+\usepackage{array}
+\usepackage{enumitem}
+\usepackage{hyperref}
+\usepackage{xcolor}
+\usepackage{listings}
+\usepackage{amsmath}
+
+\geometry{margin=2.5cm}
+\hypersetup{
+    colorlinks=true,
+    linkcolor=blue,
+    urlcolor=blue,
+    citecolor=blue
+}
+
+\lstset{
+    basicstyle=\ttfamily\small,
+    breaklines=true,
+    frame=single,
+    columns=fullflexible
+}
+
+\title{Báo cáo biện minh lựa chọn thiết kế dựa trên lý thuyết Özsu và Valduriez}
+\author{Project: Distributed Watermark Tracker / Log Delay Compensator}
+\date{}
+
+\begin{document}
+
+\maketitle
+
+\section{Mục đích báo cáo}
+
+Báo cáo này biện minh các lựa chọn thiết kế chính của dự án dựa trên lý thuyết hệ cơ sở dữ liệu phân tán của Özsu và Valduriez. Dự án không phải là một hệ quản trị cơ sở dữ liệu quan hệ phân tán truyền thống, nhưng vẫn có các bài toán cốt lõi của \textit{Distributed Data Management}: dữ liệu được chia thành các \textit{partitions}, xử lý bởi nhiều \textit{nodes}, điều phối bằng \textit{global metadata}, nhân bản để tăng \textit{availability}, phục hồi sau lỗi, và được trình bày cho người dùng như một hệ thống xử lý logic thống nhất.
+
+Báo cáo dựa trên các tài liệu thiết kế:
+
+\begin{itemize}
+    \item \texttt{docs/legacy/Thiet\_Ke\_Strict\_Watermark.md}
+    \item \texttt{docs/legacy/Thiet\_Ke\_Heuristic\_Watermark.md}
+    \item \texttt{docs/legacy/Trien\_Khai\_He\_Thong.md}
+\end{itemize}
+
+Dự án có hai hướng thiết kế chính:
+
+\begin{enumerate}
+    \item \textbf{Strict Watermark}: ưu tiên \textit{correctness}, \textit{consistency}, \textit{Exactly-Once Processing} và không mất dữ liệu do \textit{late arrival}.
+    \item \textbf{Heuristic Watermark}: ưu tiên \textit{low latency}, \textit{site autonomy}, ước lượng thích nghi bằng \textit{DDSketch}, và xử lý dữ liệu muộn thông qua \textit{DLQ} cùng \textit{correction}.
+\end{enumerate}
+
+Hai thiết kế đều tuân theo các nguyên tắc của hệ cơ sở dữ liệu phân tán, nhưng chọn hai điểm đánh đổi khác nhau giữa \textit{consistency}, \textit{availability}, \textit{latency}, \textit{autonomy} và \textit{communication cost}.
+
+\section{Cơ sở lý thuyết Özsu và Valduriez}
+
+Theo Özsu và Valduriez, thiết kế một hệ cơ sở dữ liệu phân tán cần được đánh giá qua các khía cạnh sau:
+
+\begin{longtable}{p{0.25\textwidth} p{0.34\textwidth} p{0.33\textwidth}}
+\toprule
+\textbf{Khái niệm lý thuyết} & \textbf{Ý nghĩa trong Distributed Database} & \textbf{Ánh xạ trong dự án} \\
+\midrule
+\endhead
+\textbf{Fragmentation / Partitioning} & Chia dữ liệu thành các mảnh để mỗi \textit{site} xử lý một phần dữ liệu toàn cục. & \textit{Kafka partitions} chia luồng log vô hạn cho nhiều \textit{Workers}. \\
+\textbf{Allocation} & Quyết định mảnh dữ liệu được lưu và xử lý ở đâu. & \textit{Partitions} được gán cho \textit{Worker nodes}; khi lỗi có thể \textit{reassign}. \\
+\textbf{Replication} & Lưu nhiều bản sao dữ liệu hoặc metadata để tăng \textit{availability} và khả năng phục hồi. & \textit{Kafka replication}, \textit{Coordinator HA}, \textit{Aggregator HA}, \textit{checkpoints}, \textit{Tier 2/Tier 3 state}. \\
+\textbf{Distributed Processing} & Thực thi xử lý trên nhiều \textit{sites} và hợp nhất kết quả cục bộ. & \textit{Workers} xử lý \textit{local windows/local watermarks}; \textit{Coordinator/Aggregator} tính \textit{global watermark}. \\
+\textbf{Distributed Coordination} & Điều phối trạng thái hoặc metadata dùng chung giữa nhiều \textit{sites}. & \textit{Coordinator} tính \texttt{W\_global}; \textit{Aggregator} tính \texttt{W\_global\_h}. \\
+\textbf{Consistency Management} & Đảm bảo tính đúng khi nhiều node cùng cập nhật trạng thái logic. & \textit{Exactly-Once}, \textit{Fencing Token}, \textit{Failback State Machine}, \textit{Idempotent Output}. \\
+\textbf{Reliability and Recovery} & Phục hồi khi có lỗi node, storage hoặc communication. & \textit{Checkpoint}, \textit{Replay}, \textit{DLQ}, \textit{Tiered State Storage}, \textit{Disaster Recovery}. \\
+\textbf{Transparency} & Che giấu sự phân tán để người dùng nhìn thấy một hệ thống logic thống nhất. & Người dùng nhìn thấy một pipeline xử lý log thống nhất dù bên dưới có nhiều nodes và partitions. \\
+\textbf{Communication Cost} & Tối ưu chi phí truyền thông giữa các node. & \textit{Strict Watermark} chấp nhận cost cao hơn; \textit{Heuristic Watermark} giảm \textit{blocking coordination}. \\
+\textbf{Site Autonomy} & Cho phép mỗi site hoạt động cục bộ khi có thể. & \textit{Heuristic Workers} tự ước lượng watermark bằng \textit{DDSketch}. \\
+\bottomrule
+\end{longtable}
+
+Những khái niệm này là cơ sở để biện minh hai hướng thiết kế của dự án.
+
+\section{Tổng quan hệ thống}
+
+Dự án giải quyết bài toán xử lý luồng log phân tán. Log từ \textit{Web Server} đến liên tục, có thể đến sai thứ tự và có thể đến muộn. Hệ thống phải gom log vào các \textit{event-time windows} và phát kết quả cửa sổ theo mức độ đúng phù hợp với từng chế độ.
+
+Các thành phần chính gồm:
+
+\begin{itemize}
+    \item \textbf{Ingestor Layer}: nhận log, gắn \textit{Event-Time}, phát dữ liệu vào Kafka.
+    \item \textbf{Kafka Cluster}: đóng vai trò \textit{durable distributed log} và lớp \textit{partitioning}.
+    \item \textbf{Worker Nodes}: xử lý partitions, duy trì \textit{window state}, tính \textit{local watermark}, emit kết quả.
+    \item \textbf{Coordinator / Aggregator}: hợp nhất tiến độ cục bộ thành \textit{global watermark}.
+    \item \textbf{State Storage}: gồm RocksDB local, shared checkpoint volume và object storage.
+    \item \textbf{Output Layer}: emit \textit{window results} với \textit{Exactly-Once} hoặc \textit{correction semantics}.
+\end{itemize}
+
+Theo góc nhìn của Özsu và Valduriez, đây là một hệ \textit{Distributed Data Management} có \textit{fragmented data}, \textit{replicated metadata/state}, \textit{distributed processing}, \textit{recovery protocols} và yêu cầu quản lý \textit{global consistency}.
+
+\section{Biện minh thiết kế Strict Watermark}
+
+\subsection{Mục tiêu thiết kế}
+
+\textit{Strict Watermark} ưu tiên tính đúng. Một \textit{window} chỉ được emit khi hệ thống có đủ bằng chứng rằng mọi \textit{partitions} liên quan đã đi qua mốc thời gian của window đó.
+
+Mục tiêu chính:
+
+\begin{itemize}
+    \item 0\% mất dữ liệu do \textit{late arrival}.
+    \item \textit{Exactly-Once Input Processing}.
+    \item \textit{Exactly-Once} hoặc \textit{Idempotent Output}.
+    \item Phục hồi mạnh khi \textit{Worker}, \textit{Coordinator} hoặc storage gặp lỗi.
+    \item \textit{High Availability} thông qua \textit{Coordinator HA} và \textit{Tiered State Storage}.
+\end{itemize}
+
+Thiết kế này phù hợp với các nghiệp vụ không chấp nhận sai lệch như \textit{audit logs}, \textit{billing}, \textit{compliance reporting} hoặc \textit{security monitoring}.
+
+\subsection{Fragmentation và Parallel Processing}
+
+Özsu và Valduriez xem \textit{Fragmentation} là bước thiết kế cốt lõi của hệ phân tán. Dự án áp dụng nguyên tắc này bằng cách chia luồng log thành nhiều \textit{Kafka partitions}.
+
+\begin{longtable}{p{0.42\textwidth} p{0.5\textwidth}}
+\toprule
+\textbf{Lựa chọn thiết kế} & \textbf{Biện minh theo lý thuyết} \\
+\midrule
+\endhead
+Kafka dùng 12 \textit{partitions}. & Đây là \textit{horizontal fragmentation} của luồng sự kiện. Mỗi partition chứa một phần của luồng log toàn cục. \\
+Bốn \textit{Workers} xử lý các nhóm partitions. & Đây là \textit{distributed processing} trên các mảnh dữ liệu, giúp tránh xử lý tập trung tại một node. \\
+Mỗi Worker có RocksDB riêng theo partition. & Bảo toàn tính độc lập của mỗi fragment và tránh lock contention giữa partitions. \\
+\bottomrule
+\end{longtable}
+
+Việc chọn partition làm đơn vị sở hữu là hợp lý vì partition vừa là đơn vị xử lý, vừa là đơn vị phục hồi, \textit{failover} và đảm bảo \textit{Exactly-Once}.
+
+\subsection{Allocation và Reallocation}
+
+Trong thiết kế cơ sở dữ liệu phân tán, \textit{Allocation} quyết định mỗi fragment được đặt ở đâu. Trong dự án, \textit{Kafka partitions} được gán cho các \textit{Worker nodes}.
+
+\textit{Strict Watermark} mở rộng \textit{Allocation} bằng cơ chế \textit{controlled reallocation}:
+
+\begin{itemize}
+    \item Nếu một Worker lỗi, các partitions của nó được \textit{reassigned}.
+    \item Worker mới phải nạp checkpoint mới nhất.
+    \item Worker tiếp tục đọc Kafka từ offset chính xác.
+    \item Coordinator điều phối chuyển đổi thông qua \textit{State Machine}.
+\end{itemize}
+
+Điều này tuân theo nguyên tắc của Özsu và Valduriez: việc di chuyển fragment giữa các sites phải bảo toàn tính đúng. Một partition không được xử lý đồng thời bởi hai Workers vì điều đó gây duplicate state updates và duplicate output.
+
+\subsection{Distributed Coordination và Strong Consistency}
+
+\textit{Strict Watermark} cần một quyết định toàn cục: khi nào một window an toàn để đóng. Mỗi Worker chỉ biết tiến độ cục bộ. Coordinator hợp nhất các \textit{local watermarks}:
+
+\begin{lstlisting}
+W_global = min(LW_i(P_k)) over valid active partitions
+\end{lstlisting}
+
+Đây là dạng \textit{distributed metadata coordination}. Theo Özsu và Valduriez, khi tính đúng phụ thuộc vào trạng thái của nhiều sites, hệ phân tán cần một cơ chế điều phối metadata toàn cục.
+
+\begin{longtable}{p{0.38\textwidth} p{0.52\textwidth}}
+\toprule
+\textbf{Thành phần Strict} & \textbf{Tương đương trong Distributed Database} \\
+\midrule
+\endhead
+\texttt{LW\_i(P\_k)} & Local site progress metadata. \\
+\texttt{W\_global} & Global consistency metadata. \\
+Coordinator Leader & Distributed transaction/metadata coordinator. \\
+Worker Heartbeat & Site status and progress report. \\
+Fencing Token / Term & Cơ chế chống stale coordinator và split-brain. \\
+\bottomrule
+\end{longtable}
+
+Thiết kế chấp nhận \textit{coordination overhead} vì yêu cầu correctness mạnh hơn yêu cầu latency.
+
+\subsection{Punctuation Token như Distributed Progress Metadata}
+
+\textit{Strict Watermark} sử dụng \textit{Punctuation Token} từ upstream để biểu thị rằng một partition đã đi qua một mốc event-time. Ngay cả khi partition idle, hệ thống vẫn phát \textit{Empty Punctuation Token}.
+
+Thiết kế này giải quyết một vấn đề phân tán quan trọng: không có dữ liệu không đồng nghĩa với đã hoàn tất. Nếu không có punctuation, Coordinator không thể phân biệt:
+
+\begin{itemize}
+    \item partition thật sự idle,
+    \item Ingestor của partition đã lỗi,
+    \item partition bị delay do network hoặc broker.
+\end{itemize}
+
+Vì vậy, \textit{Punctuation Token} là \textit{progress metadata} rõ ràng, phù hợp với yêu cầu điều phối metadata trong hệ phân tán.
+
+\subsection{Replication và High Availability}
+
+\textit{Strict Watermark} dùng replication ở nhiều tầng:
+
+\begin{longtable}{p{0.25\textwidth} p{0.35\textwidth} p{0.32\textwidth}}
+\toprule
+\textbf{Tầng} & \textbf{Cơ chế Replication / Redundancy} & \textbf{Mục đích} \\
+\midrule
+\endhead
+Kafka & Broker replication & Input log bền vững và có thể replay. \\
+Coordinator & Raft / ZooKeeper-style HA & Tránh Coordinator single point of failure. \\
+State & Tier 2 shared checkpoints & Worker failover nhanh. \\
+Disaster Recovery & Tier 3 object storage & Phục hồi khi mất local/shared storage. \\
+Output & Transactional hoặc idempotent sink & Tránh duplicate output. \\
+\bottomrule
+\end{longtable}
+
+Điều này phù hợp với nguyên tắc \textit{Reliability}: dữ liệu và metadata quan trọng phải tồn tại sau lỗi node hoặc lỗi storage.
+
+\subsection{Recovery và Exactly-Once Semantics}
+
+Özsu và Valduriez xem \textit{Recovery} là yêu cầu nền tảng của hệ dữ liệu phân tán. \textit{Strict Watermark} triển khai recovery bằng:
+
+\begin{itemize}
+    \item checkpoint \textit{active window state},
+    \item lưu Kafka offsets,
+    \item replay sau lỗi,
+    \item dedup input events,
+    \item fencing stale leaders,
+    \item đảm bảo mỗi partition chỉ có một owner hợp lệ,
+    \item dùng \textit{Exactly-Once} hoặc \textit{Idempotent Output}.
+\end{itemize}
+
+\textit{Failback State Machine} đặc biệt quan trọng. Khi Worker đã lỗi quay lại, nó không được tự ý resume partition cũ. Coordinator phải pause owner tạm thời, flush state, ghi checkpoint metadata, chuyển ownership, rồi mới cho Worker phục hồi tiếp tục.
+
+Invariant cốt lõi là:
+
+\begin{lstlisting}
+At any time, each partition has exactly one valid processing owner.
+\end{lstlisting}
+
+Invariant này là nền tảng để giữ \textit{Exactly-Once Processing}.
+
+\subsection{Tiered State Storage}
+
+Thiết kế dùng ba tầng lưu trữ:
+
+\begin{longtable}{p{0.25\textwidth} p{0.35\textwidth} p{0.32\textwidth}}
+\toprule
+\textbf{Tier} & \textbf{Vai trò} & \textbf{Biện minh lý thuyết} \\
+\midrule
+\endhead
+Tier 1: Local RocksDB & Hot state cho active windows. & Data locality và xử lý cục bộ nhanh. \\
+Tier 2: Shared Volume & Warm checkpoint cho failover nhanh. & State có thể phục hồi và cấp phát lại. \\
+Tier 3: Object Storage & Cold archive và Disaster Recovery. & Reliability dài hạn và storage scalability. \\
+\bottomrule
+\end{longtable}
+
+Cách tổ chức này phù hợp với nguyên tắc dữ liệu truy cập thường xuyên nên ở gần nơi xử lý, còn bản sao phục hồi phải nằm ngoài node có thể lỗi.
+
+\subsection{Communication Cost Trade-off}
+
+\textit{Strict Watermark} cần:
+
+\begin{itemize}
+    \item Worker Heartbeats,
+    \item Ingestor Heartbeats,
+    \item Punctuation Tokens,
+    \item Coordinator Broadcasts,
+    \item State Machine Transitions,
+    \item Raft/ZooKeeper Coordination.
+\end{itemize}
+
+Chi phí truyền thông cao hơn là đánh đổi có chủ đích. Theo Özsu và Valduriez, \textit{Communication Cost} phải được đánh giá cùng với correctness và reliability. Ở đây, hệ thống chọn tăng coordination để đạt \textit{strong consistency} và recovery mạnh.
+
+\subsection{Kết luận cho Strict Watermark}
+
+\textit{Strict Watermark} được biện minh theo lý thuyết Özsu và Valduriez vì nó sử dụng:
+
+\begin{itemize}
+    \item \textit{Fragmentation} để mở rộng,
+    \item \textit{Allocation/Reallocation} để quản lý partition ownership,
+    \item \textit{Replication} để tăng reliability,
+    \item \textit{Distributed Coordination} để duy trì global watermark consistency,
+    \item \textit{Recovery Protocols} để chịu lỗi,
+    \item \textit{Exactly-Once Semantics} để bảo toàn correctness,
+    \item \textit{Transparency} để che giấu sự phức tạp phân tán.
+\end{itemize}
+
+Thiết kế này phù hợp khi \textit{correctness} quan trọng hơn \textit{low latency}.
+
+\section{Biện minh thiết kế Heuristic Watermark}
+
+\subsection{Mục tiêu thiết kế}
+
+\textit{Heuristic Watermark} ưu tiên \textit{low latency} và khả năng thích nghi. Thiết kế này không chờ \textit{Punctuation Token} nghiêm ngặt từ upstream hoặc \textit{blocking global coordination}. Thay vào đó, Worker dùng \textit{DDSketch} để ước lượng độ trễ và sinh \textit{heuristic watermark}.
+
+Mục tiêu chính:
+
+\begin{itemize}
+    \item giảm end-to-end latency,
+    \item chấp nhận \textit{bounded loss} hoặc xử lý late data có kiểm soát,
+    \item ước lượng watermark thích nghi,
+    \item giảm phụ thuộc vào strict upstream signals,
+    \item correction dữ liệu muộn thông qua DLQ.
+\end{itemize}
+
+Thiết kế này phù hợp với realtime dashboard, monitoring hoặc near-realtime analytics, nơi kết quả nhanh có giá trị hơn việc chờ completeness tuyệt đối.
+
+\subsection{Fragmentation và Distributed Processing}
+
+Tương tự \textit{Strict Watermark}, \textit{Heuristic Watermark} dùng Kafka partitions và nhiều Workers. Đây vẫn là áp dụng nguyên tắc \textit{Fragmentation}.
+
+\begin{longtable}{p{0.42\textwidth} p{0.5\textwidth}}
+\toprule
+\textbf{Lựa chọn thiết kế} & \textbf{Biện minh lý thuyết} \\
+\midrule
+\endhead
+Kafka partitions chia luồng log. & Horizontal fragmentation giúp xử lý song song. \\
+Workers xử lý partitions độc lập. & Distributed processing giảm bottleneck trung tâm. \\
+Mỗi Worker ước lượng local lag. & Computation được đẩy về site nơi dữ liệu được quan sát. \\
+\bottomrule
+\end{longtable}
+
+Điểm khác biệt chính là \textit{Heuristic Watermark} trao nhiều quyền tự trị hơn cho Worker. Worker không cần chờ upstream \textit{Punctuation Token} để ước lượng tiến độ.
+
+\subsection{Site Autonomy}
+
+Özsu và Valduriez xem \textit{Site Autonomy} là một thuộc tính quan trọng của hệ phân tán. \textit{Heuristic Watermark} áp dụng trực tiếp nguyên tắc này:
+
+\begin{itemize}
+    \item Mỗi Worker quan sát local arrival delay.
+    \item Mỗi Worker cập nhật DDSketch riêng.
+    \item Mỗi Worker tính local heuristic watermark \texttt{W\_h\_i\textasciicircum\{P\_k\}}.
+    \item Aggregator chỉ hợp nhất local watermarks thành \texttt{W\_global\_h}.
+\end{itemize}
+
+Điều này làm giảm vai trò của coordinator trung tâm. Worker có thể tiến triển dựa trên quan sát cục bộ, giúp hệ thống phản hồi nhanh hơn và giảm blocking.
+
+\subsection{DDSketch như Distributed Metadata}
+
+\textit{DDSketch} được dùng để tóm tắt phân phối lag. Đây không phải dữ liệu nghiệp vụ thô mà là metadata về hành vi của stream. Theo góc nhìn distributed database, đây là một compact local summary có thể dùng để ước lượng tiến độ cục bộ.
+
+Lựa chọn DDSketch hợp lý vì:
+
+\begin{itemize}
+    \item bounded memory,
+    \item cập nhật hiệu quả,
+    \item ước lượng quantile,
+    \item mergeability,
+    \item phù hợp với heavy-tail delay distribution.
+\end{itemize}
+
+Hệ thống ước lượng:
+
+\begin{lstlisting}
+lag = arrival_time - T_event
+L_eff = P_p(lag history)
+W_h = max_event_time - L_eff
+\end{lstlisting}
+
+Đây là thiết kế \textit{approximate distributed metadata}: giảm coordination cost nhưng vẫn có cơ sở thống kê để quyết định event-time progress.
+
+\subsection{Aggregator HA và Reduced Coordination}
+
+\textit{Heuristic Watermark} dùng Aggregator nhẹ hơn so với Strict Coordinator. Aggregator theo dõi heuristic watermarks theo partition và tính:
+
+\begin{lstlisting}
+W_global_h = min(W_h_i)
+\end{lstlisting}
+
+Cơ chế này vẫn có một điểm hợp nhất toàn cục, nhưng nhẹ hơn:
+
+\begin{itemize}
+    \item không yêu cầu upstream punctuation,
+    \item không cần strict failback state machine cho mỗi quyết định watermark,
+    \item có thể chạy \textit{Active-Standby} bằng ZooKeeper lock,
+    \item tập trung vào global progress aggregation thay vì chứng minh strict correctness.
+\end{itemize}
+
+Theo Özsu và Valduriez, khi ứng dụng cho phép correction, giảm \textit{blocking coordination} để giảm latency là một trade-off hợp lý.
+
+\subsection{Eventual Correction thay cho Immediate Strong Consistency}
+
+\textit{Heuristic Watermark} có thể emit window trước khi toàn bộ late data đến. Điều này làm yếu \textit{immediate consistency}. Thiết kế bù lại bằng:
+
+\begin{itemize}
+    \item DLQ cho late logs,
+    \item Correction Messages,
+    \item Downstream Update Patterns,
+    \item Final Reconciliation,
+    \item Correction Deduplication.
+\end{itemize}
+
+Đây là mô hình gần với \textit{Eventual Consistency} và \textit{Compensating Transaction}. Kết quả ban đầu có thể mang tính speculative, nhưng hệ thống ghi nhận late data và có thể sửa kết quả sau.
+
+\begin{longtable}{p{0.42\textwidth} p{0.5\textwidth}}
+\toprule
+\textbf{Vấn đề} & \textbf{Giải pháp trong Heuristic Watermark} \\
+\midrule
+\endhead
+Late log đến sau watermark. & Đưa vào DLQ. \\
+Window đã emit nhưng thiếu dữ liệu. & Tính Correction Message. \\
+Downstream nhận correction trùng. & Dùng Correction Deduplication. \\
+Kết quả ban đầu chưa phải final. & Dùng Versioning hoặc Final Reconciliation. \\
+\bottomrule
+\end{longtable}
+
+Thiết kế không drop dữ liệu âm thầm. Nó chuyển mô hình correctness từ \textit{Immediate Strong Consistency} sang \textit{Eventual Correction}.
+
+\subsection{Cold Start và Conservative Prior}
+
+Khi mới khởi động, DDSketch chưa đủ mẫu. Nếu hệ thống tin ngay vào tập mẫu nhỏ, watermark có thể tiến quá nhanh và phân loại nhầm các sự kiện hợp lệ thành late data.
+
+Thiết kế dùng:
+
+\begin{itemize}
+    \item Warm-up phases,
+    \item minimum sample count,
+    \item minimum running time,
+    \item Conservative Prior,
+    \item baseline history.
+\end{itemize}
+
+Đây là cơ chế reliability cho approximate distributed metadata. Approximation chỉ hợp lý khi hệ thống kiểm soát giai đoạn thống kê chưa hội tụ.
+
+\subsection{Negative Lag và Clock Skew Handling}
+
+Hệ phân tán thường gặp \textit{clock skew}. \textit{Heuristic Watermark} xử lý rõ \textit{negative lag}:
+
+\begin{lstlisting}
+lag = arrival_time - T_event
+\end{lstlisting}
+
+Nếu \texttt{lag < 0}, hệ thống nhận diện clock skew và tránh làm nhiễm DDSketch. Điều này phù hợp với lý thuyết hệ phân tán vì không thể giả định đồng hồ vật lý giữa các sites luôn đồng bộ tuyệt đối.
+
+\subsection{Replay-Mode Snapshot và Rollback}
+
+Khi replay sau lỗi, các events cũ có thể tạo ra lag rất lớn. Nếu những mẫu này được đưa vào DDSketch, estimator sẽ bị nhiễm và watermark sau phục hồi sẽ sai.
+
+Thiết kế xử lý bằng:
+
+\begin{itemize}
+    \item DDSketch snapshots,
+    \item replay-mode detection,
+    \item rollback về clean sketch state,
+    \item tạm dừng sketch updates trong replay,
+    \item recalibration khi điều kiện ổn định trở lại.
+\end{itemize}
+
+Đây là recovery protocol cho approximate metadata. Vì watermark phụ thuộc vào estimator, bảo vệ estimator trong recovery là điều bắt buộc.
+
+\subsection{Communication Cost Trade-off}
+
+So với \textit{Strict Watermark}, \textit{Heuristic Watermark} giảm:
+
+\begin{itemize}
+    \item phụ thuộc vào upstream Punctuation Tokens,
+    \item blocking coordination,
+    \item strict global proof trước khi đóng mỗi window,
+    \item độ phức tạp của Coordinator.
+\end{itemize}
+
+Đổi lại, immediate consistency yếu hơn. Tuy nhiên, hệ thống bù bằng DLQ và Correction. Theo Özsu và Valduriez, đây là trade-off hợp lý khi application semantics cho phép \textit{later reconciliation}.
+
+\subsection{Kết luận cho Heuristic Watermark}
+
+\textit{Heuristic Watermark} được biện minh theo lý thuyết Özsu và Valduriez vì nó sử dụng:
+
+\begin{itemize}
+    \item \textit{Fragmentation} để mở rộng,
+    \item \textit{Site Autonomy} để giảm latency,
+    \item \textit{Distributed Processing} cho partition-local state,
+    \item \textit{DDSketch} làm compact metadata estimation,
+    \item lightweight global aggregation,
+    \item recovery bằng snapshot và replay-mode handling,
+    \item eventual correction bằng DLQ và Correction Messages.
+\end{itemize}
+
+Thiết kế này phù hợp khi \textit{low latency} và \textit{adaptive operation} quan trọng hơn \textit{Immediate Strong Consistency}.
+
+\section{So sánh hai thiết kế}
+
+\begin{longtable}{p{0.28\textwidth} p{0.31\textwidth} p{0.31\textwidth}}
+\toprule
+\textbf{Khía cạnh} & \textbf{Strict Watermark} & \textbf{Heuristic Watermark} \\
+\midrule
+\endhead
+Mục tiêu chính & Correctness và Strong Consistency & Low Latency và Adaptive Performance \\
+Nguồn watermark & Punctuation Token và Local Watermarks & DDSketch Lag Estimation \\
+Điều phối toàn cục & Strong Coordinator & Lightweight Aggregator \\
+Consistency model & Emit khi globally safe & Emit sớm, correct sau \\
+Late data handling & Cố gắng tránh late-data loss bằng cách chờ & Đưa late data vào DLQ và Correction \\
+Communication cost & Cao hơn & Thấp hơn \\
+Site autonomy & Thấp hơn, phụ thuộc global coordination & Cao hơn, Worker tự ước lượng cục bộ \\
+Recovery model & Checkpoint, Replay, Fencing, Failback State Machine & Snapshot, Replay-Mode Rollback, DLQ Reconciliation \\
+Phù hợp với & Audit, Billing, Compliance, Security & Realtime Dashboard, Monitoring, Near-Realtime Analytics \\
+\bottomrule
+\end{longtable}
+
+Hai thiết kế không mâu thuẫn nhau. Chúng đại diện cho hai điểm hợp lý trong không gian thiết kế hệ phân tán:
+
+\begin{itemize}
+    \item \textit{Strict Watermark} chọn \textit{Consistency} và \textit{Reliability}.
+    \item \textit{Heuristic Watermark} chọn \textit{Performance} và \textit{Autonomy}.
+\end{itemize}
+
+Lý thuyết của Özsu và Valduriez ủng hộ cả hai hướng vì hệ phân tán không tối ưu theo một chiều duy nhất. Thiết kế phải cân bằng giữa correctness, communication cost, availability, recovery và performance theo yêu cầu nghiệp vụ.
+
+\section{Kết luận chung}
+
+Các lựa chọn thiết kế của dự án được biện minh như sau:
+
+\begin{enumerate}
+    \item Hệ thống dùng \textit{Fragmentation} đúng cách bằng cách chia luồng log vô hạn thành Kafka partitions.
+    \item Hệ thống dùng \textit{Distributed Processing} đúng cách bằng cách gán partitions cho Workers và giữ state cục bộ khi có thể.
+    \item Hệ thống dùng \textit{Replication} và \textit{Checkpointing} để chịu lỗi broker, worker, coordinator và storage.
+    \item Hệ thống tách rõ local metadata và global metadata thông qua local watermarks, global watermarks, DDSketch summaries và Coordinator/Aggregator state.
+    \item Hệ thống xử lý recovery rõ ràng bằng Replay, Checkpoint, DLQ, Fencing Token và Failback State Machine.
+    \item Hệ thống nhận thức rõ \textit{Communication Cost Trade-off} bằng cách cung cấp cả Strict path và Heuristic path.
+    \item Hệ thống cung cấp \textit{Transparency} vì người dùng tương tác với một dịch vụ xử lý stream logic thống nhất dù bên trong là phân tán.
+\end{enumerate}
+
+Vì vậy, kiến trúc tổng thể tuân theo các nguyên tắc thiết kế của Özsu và Valduriez. \textit{Strict Watermark} được biện minh như một thiết kế phân tán ưu tiên \textit{Consistency}. \textit{Heuristic Watermark} được biện minh như một thiết kế phân tán ưu tiên \textit{Performance}, \textit{Autonomy} và \textit{Controlled Correction}.
+
+\section{Tài liệu tham khảo}
+
+Özsu, M. T., and Valduriez, P. \textit{Principles of Distributed Database Systems}. Springer.
+
+\end{document}

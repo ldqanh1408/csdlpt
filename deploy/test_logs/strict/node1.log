@@ -1,0 +1,11 @@
+refactor-node1  | [worker-strict:1] Kafka consumer assigned=[3, 4, 5]
+refactor-node1  | [alerting] PagerDuty not configured, alerts logged to stderr
+refactor-node1  | [worker-strict:1] listening on :8000, partitions=[3, 4, 5]
+refactor-node1  | [worker-strict:1] received=3 on_time=3 late=0 dupes=0 bp_drops=0 completeness=100.0% late_rate=0.0% open_windows=3 closed_windows=0 buf=[p3=48q p4=22q p5=2q] watermarks=[p3:W=-inf p4:W=-inf p5:W=-inf]
+refactor-node1  | [worker-strict:1] received=75 on_time=75 late=0 dupes=0 bp_drops=0 completeness=100.0% late_rate=0.0% open_windows=16 closed_windows=0 buf=[p3=0q p4=0q p5=0q] watermarks=[p3:W=1779983449.0 p4:W=1779983449.0 p5:W=1779983449.0]
+refactor-node1  | [worker-strict:1] received=75 on_time=75 late=0 dupes=0 bp_drops=0 completeness=100.0% late_rate=0.0% open_windows=16 closed_windows=0 buf=[p3=0q p4=0q p5=0q] watermarks=[p3:W=1779983449.0 p4:W=1779983449.0 p5:W=1779983449.0]
+refactor-node1  | [worker-strict:1] received=75 on_time=75 late=0 dupes=0 bp_drops=0 completeness=100.0% late_rate=0.0% open_windows=16 closed_windows=0 buf=[p3=0q p4=0q p5=0q] watermarks=[p3:W=1779983449.0 p4:W=1779983449.0 p5:W=1779983449.0]
+refactor-node1  | [worker-strict:1] received=75 on_time=75 late=0 dupes=0 bp_drops=0 completeness=100.0% late_rate=0.0% open_windows=16 closed_windows=0 buf=[p3=0q p4=0q p5=0q] watermarks=[p3:W=1779983449.0 p4:W=1779983449.0 p5:W=1779983449.0]
+refactor-node1  | [worker-strict:1] received=75 on_time=75 late=0 dupes=0 bp_drops=0 completeness=100.0% late_rate=0.0% open_windows=16 closed_windows=0 buf=[p3=0q p4=0q p5=0q] watermarks=[p3:W=1779983449.0 p4:W=1779983449.0 p5:W=1779983449.0]
+refactor-node1  | [worker-strict:1] received=75 on_time=75 late=0 dupes=0 bp_drops=0 completeness=100.0% late_rate=0.0% open_windows=16 closed_windows=0 buf=[p3=0q p4=0q p5=0q] watermarks=[p3:W=1779983449.0 p4:W=1779983449.0 p5:W=1779983449.0]
+refactor-node1  | [worker-strict:1] received=75 on_time=75 late=0 dupes=0 bp_drops=0 completeness=100.0% late_rate=0.0% open_windows=16 closed_windows=0 buf=[p3=0q p4=0q p5=0q] watermarks=[p3:W=1779983449.0 p4:W=1779983449.0 p5:W=1779983449.0]

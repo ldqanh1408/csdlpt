@@ -1,20 +1,34 @@
 """
-ddsketch/compat.py — Compatibility wrapper around the official ``ddsketch`` library.
+ddsketch/compat.py — Compatibility wrapper that delegates to our own
+pure-Python ``sketch.DDSketch`` implementation.
 
-Wraps the official ``ddsketch`` v3.0.1 and presents our legacy API so that
-existing callers require zero changes.
+This module previously wrapped the official pip-installed ``ddsketch``
+library, but Docker container path-shadowing caused infinite recursion
+when ``sys.modules['ddsketch']`` pointed back to *this* local package.
 
-Key API mappings
-----------------
-  Legacy (our custom)              Official ddsketch library
-  ───────────────────────────────  ───────────────────────────────
-  DDSketch(alpha=0.01)            ddsketch.DDSketch(relative_accuracy=0.01)
-  s.add(value)                    s.add(value)
-  s.quantile(q)                   s.get_quantile_value(q)
-  s.total_count  (int)            s.count  (float)
-  s.merge(other) -> new           s.merge(other)  (in-place)
-  s.to_dict() -> dict             s.to_proto() -> bytes
-  DDSketch.from_dict(d)           DDSketch.from_proto(bytes)
+The fix is simple: always use ``sketch.DDSketch`` (our own, self-contained
+implementation) so that no pip-package import trickery is required.
+All public API is preserved — callers require zero changes.
+
+Key API
+-------
+  DDSketch(alpha=0.01)
+  s.add(value)
+  s.quantile(q)              -> float
+  s.total_count              -> int
+  s.bucket_count             -> int
+  s.merge(other)             -> new DDSketch
+  s.merge_into(other)        (in-place)
+  s.copy()                   -> DDSketch
+  s.to_dict() / from_dict()
+  s.to_protobuf() / from_protobuf()
+
+  SlidingWindowDDSketch(window_seconds=60.0, ...)
+  sw.add(value, timestamp)
+  sw.quantile(q)             -> float
+  sw.total_count             -> int
+  sw.advance(current_time)
+  sw.to_dict() / from_dict()
 """
 
 from __future__ import annotations
@@ -25,29 +39,29 @@ import pickle
 import time
 from typing import Dict, List, Optional, Tuple
 
-import ddsketch as _ddsketch
+# Always use our own pure-Python implementation — no pip-package dependency,
+# no sys.path / sys.modules shadowing issues.
+from ddsketch.sketch import DDSketch as _PureDDSketch, SlidingWindowDDSketch as _PureSlidingWindow
 
 
 # ---------------------------------------------------------------------------
-# DDSketch — compatibility wrapper
+# DDSketch — thin compatibility shim over sketch.DDSketch
 # ---------------------------------------------------------------------------
 
 class DDSketch:
-    """Wrapper around the official ``ddsketch.DDSketch`` presenting our legacy API.
+    """Compatibility wrapper around ``sketch.DDSketch`` with extended API.
 
     Parameters
     ----------
     alpha : float
-        Relative error guarantee (default 0.01 = 1%).  Passed through to the
-        official library as ``relative_accuracy``.
+        Relative error guarantee (default 0.01 = 1%).
     max_buckets : int
-        Stored for backward compatibility.  The official library manages its
-        own bin limits internally based on *alpha*.
+        Hard cap on non-empty buckets (default 1024).
     min_value : float
-        Smallest representable value.  Inputs below this are clamped up.
+        Smallest representable value (inputs below are clamped).
         Negative values are silently dropped (legacy behaviour).
     max_value : float
-        Largest representable value.  Inputs above this are clamped down.
+        Largest representable value (inputs above are clamped).
     """
 
     def __init__(
@@ -71,39 +85,26 @@ class DDSketch:
         self.min_value = min_value
         self.max_value = max_value
 
-        # The official library treats *relative_accuracy* identically to
-        # *alpha* in the DDSketch algorithm: gamma = (1+alpha)/(1-alpha).
-        self._sketch = _ddsketch.DDSketch(alpha=alpha)
-
-        # Track total count separately because the official library accepts
-        # negative values but our legacy API silently drops them.  We need
-        # ``total_count`` to reflect only the values we actually forwarded.
-        self._total_count: int = 0
+        self._sketch = _PureDDSketch(
+            alpha=alpha,
+            max_buckets=max_buckets,
+            min_value=min_value,
+            max_value=max_value,
+        )
 
     # --- public properties --------------------------------------------------
 
     @property
     def total_count(self) -> int:
-        """Total number of (non-negative, in-range) values inserted."""
-        return self._total_count
+        """Total number of values inserted (excluding negative / dropped)."""
+        return self._sketch.total_count
 
     @property
     def bucket_count(self) -> int:
-        """Approximate number of non-empty bins in the underlying store.
-
-        The official library does not expose bucket count directly.  We
-        read the internal store's total count of populated bins.
-        """
-        store = getattr(self._sketch, "_store", None)
-        if store is None:
-            return 0
-        # DenseStore exposes ``count`` (total count across bins) and
-        # ``bins`` (the raw bin array).  We approximate non-empty bins
-        # by counting non-zero entries.
+        """Approximate number of non-empty bins in the underlying store."""
         try:
-            bins = store.bins
-            return sum(1 for b in bins if b > 0)
-        except (TypeError, AttributeError):
+            return len([c for c in self._sketch._buckets.values() if c > 0])
+        except AttributeError:
             pass
         return 0
 
@@ -115,11 +116,7 @@ class DDSketch:
         Values outside [min_value, max_value] are capped to the nearest bound.
         Negative values are silently dropped (legacy behaviour).
         """
-        if value < 0:
-            return
-        capped = max(self.min_value, min(self.max_value, value))
-        self._sketch.add(capped)
-        self._total_count += 1
+        self._sketch.add(value)
 
     def add_many(self, values: List[float]) -> None:
         """Batch-insert a list of values."""
@@ -132,32 +129,24 @@ class DDSketch:
         """Return the estimated *q*-quantile (0 <= q <= 1).
 
         Returns 0.0 when the sketch is empty.
-
-        Raises
-        ------
-        ValueError
-            If *q* is outside [0, 1].
         """
         if not (0.0 <= q <= 1.0):
             raise ValueError(f"q must be in [0, 1], got {q}")
-        if self._total_count == 0:
-            return 0.0
-        return self._sketch.get_quantile_value(q)
+        return self._sketch.quantile(q)
 
     # --- merge --------------------------------------------------------------
 
-    def merge(self, other: DDSketch) -> DDSketch:
+    def merge(self, other: "DDSketch") -> "DDSketch":
         """Merge *other* into a **new** sketch (legacy API: returns new object)."""
         merged = self.copy()
         merged.merge_into(other)
         return merged
 
-    def merge_into(self, other: DDSketch) -> None:
+    def merge_into(self, other: "DDSketch") -> None:
         """Merge *other* into **this** sketch in-place."""
-        self._total_count += other._total_count
-        self._sketch.merge(other._sketch)
+        self._sketch.merge_into(other._sketch)
 
-    def copy(self) -> DDSketch:
+    def copy(self) -> "DDSketch":
         """Return a deep copy with identical configuration and state."""
         cp = DDSketch(
             alpha=self.alpha,
@@ -165,26 +154,20 @@ class DDSketch:
             min_value=self.min_value,
             max_value=self.max_value,
         )
-        cp._total_count = self._total_count
-        # Use the library's internal _copy method to clone the sketch state.
-        cp._sketch._copy(self._sketch)
+        # Use merge_into on the underlying pure sketch to clone state.
+        cp._sketch.merge_into(self._sketch)
         return cp
 
     # --- serialisation ------------------------------------------------------
 
     def to_protobuf(self) -> bytes:
-        """Serialize to protobuf-equivalent bytes (pickle-based for checkpoint).
-
-        The official ddsketch library does not expose a public protobuf
-        serialization API.  We use pickle as a stable wire format that
-        preserves full sketch state for checkpoint/restore.
-        """
+        """Serialize to bytes (pickle-based for checkpoint compatibility)."""
         return pickle.dumps({
             "alpha": self.alpha,
             "max_buckets": self.max_buckets,
             "min_value": self.min_value,
             "max_value": self.max_value,
-            "total_count": self._total_count,
+            "total_count": self.total_count,
             "sketch": self._sketch,
         })
 
@@ -198,30 +181,24 @@ class DDSketch:
             min_value=d.get("min_value", 1e-3),
             max_value=d.get("max_value", 3600.0),
         )
-        sketch._total_count = d.get("total_count", 0)
         sketch._sketch = d["sketch"]
         return sketch
 
     def to_dict(self) -> dict:
-        """Serialize to a plain dict (suitable for JSON).
-
-        Uses pickle internally, encoded as base64 for JSON compatibility.
-        The official ``ddsketch`` library does not provide a public
-        serialization API, so we rely on pickle to capture full state.
-        """
+        """Serialize to a plain dict (suitable for JSON via base64 pickle)."""
         pickled_bytes = pickle.dumps(self._sketch)
         return {
-            "v": 1,  # format version — future-proofing
+            "v": 2,  # format version
             "alpha": self.alpha,
             "max_buckets": self.max_buckets,
             "min_value": self.min_value,
             "max_value": self.max_value,
-            "total_count": self._total_count,
+            "total_count": self.total_count,
             "pickle": base64.b64encode(pickled_bytes).decode("ascii"),
         }
 
     @classmethod
-    def from_dict(cls, d: dict) -> DDSketch:
+    def from_dict(cls, d: dict) -> "DDSketch":
         """Deserialize from a dict previously produced by ``to_dict``."""
         sketch = cls(
             alpha=d["alpha"],
@@ -229,7 +206,6 @@ class DDSketch:
             min_value=d.get("min_value", 1e-3),
             max_value=d.get("max_value", 3600.0),
         )
-        sketch._total_count = d.get("total_count", 0)
         pickled_bytes = base64.b64decode(d["pickle"].encode("ascii"))
         sketch._sketch = pickle.loads(pickled_bytes)
         return sketch
@@ -238,24 +214,16 @@ class DDSketch:
 
     def __repr__(self) -> str:
         return (
-            f"DDSketch(alpha={self.alpha}, count={self._total_count})"
+            f"DDSketch(alpha={self.alpha}, count={self.total_count})"
         )
 
 
 # ---------------------------------------------------------------------------
-# SlidingWindowDDSketch — compatibility wrapper
+# SlidingWindowDDSketch — thin shim over sketch.SlidingWindowDDSketch
 # ---------------------------------------------------------------------------
 
 class SlidingWindowDDSketch:
     """Quantile sketch over a sliding time window.
-
-    Maintains *N* sub-sketches, each covering a fixed time granularity
-    (default 1 second).  The oldest sub-sketch is dropped when it falls
-    outside the window, and new sub-sketches are created automatically as
-    time advances.
-
-    Each sub-sketch is a :class:`DDSketch` (the compat wrapper), which
-    in turn delegates to the official ``ddsketch`` library.
 
     Parameters
     ----------
@@ -263,11 +231,10 @@ class SlidingWindowDDSketch:
         Total width of the sliding window in seconds (default 60).
     sub_sketch_granularity : float
         Duration each sub-sketch covers in seconds (default 1).
-        The number of sub-sketches is ``window_seconds / sub_sketch_granularity``.
     alpha : float
-        Relative error passed to each underlying ``DDSketch``.
+        Relative error passed to each underlying DDSketch.
     max_buckets : int
-        Bucket cap passed to each underlying ``DDSketch``.
+        Bucket cap passed to each underlying DDSketch.
     min_value : float
         Minimum representable value for each sub-sketch.
     max_value : float
@@ -302,12 +269,8 @@ class SlidingWindowDDSketch:
         self._sketches: Dict[float, DDSketch] = {}  # start_ts -> sub-sketch
         self._latest_time: Optional[float] = None
 
-        # Merged-sketch cache: quantile() can be called up to 4 times per
-        # event in the hot path.  Rebuilding a merged sketch from ~60
-        # sub-sketches each time is expensive (O(sub_sketches * bins)).
-        # Cache the merged result for 200ms so all quantile calls within
-        # one event-processing cycle share a single merge.
-        self._cached_quantiles: dict[float, float] = {}
+        # Merged-sketch cache (200ms TTL) to avoid re-merging on hot-path.
+        self._cached_quantiles: dict = {}
         self._cache_ts: float = 0.0
         self._cache_ttl_s: float = 0.2
 
@@ -337,7 +300,6 @@ class SlidingWindowDDSketch:
         expired = [ts for ts in self._sketches if ts < cutoff]
         for ts in expired:
             del self._sketches[ts]
-        # Expired sub-sketches invalidate the merged-sketch cache.
         if expired:
             self._cache_ts = 0.0
 
@@ -348,22 +310,18 @@ class SlidingWindowDDSketch:
 
         If *timestamp* is ``None``, ``time.time()`` is used.  Values with a
         timestamp older than the current window are silently dropped.
-        Negative values are silently dropped (delegated to the underlying
-        ``DDSketch.add``).
+        Negative values are silently dropped (delegated to DDSketch.add).
         """
         if timestamp is None:
             timestamp = time.time()
 
-        # Initialise the window on first insertion.
         if self._latest_time is None:
             self._latest_time = timestamp
 
-        # Extend the window forward if the timestamp is ahead.
         if timestamp > self._latest_time:
             self._latest_time = timestamp
             self._prune()
 
-        # Drop values that arrived too late for the current window.
         if timestamp < self._latest_time - self.window_seconds:
             return
 
@@ -372,7 +330,6 @@ class SlidingWindowDDSketch:
             self._sketches[start_ts] = self._make_sub_sketch()
 
         self._sketches[start_ts].add(value)
-        # New data invalidates the merged-sketch cache.
         self._cache_ts = 0.0
 
     def add_many(
@@ -385,11 +342,7 @@ class SlidingWindowDDSketch:
     # --- window management --------------------------------------------------
 
     def advance(self, current_time: float) -> None:
-        """Rotate the window so *current_time* becomes the leading edge.
-
-        Sub-sketches whose start time is before
-        ``current_time - window_seconds`` are dropped.
-        """
+        """Rotate the window so *current_time* becomes the leading edge."""
         if self._latest_time is None or current_time > self._latest_time:
             self._latest_time = current_time
         self._prune()
@@ -400,21 +353,14 @@ class SlidingWindowDDSketch:
         """Return the estimated *q*-quantile across all active sub-sketches.
 
         Returns 0.0 when no data is present in the window.
-
-        Uses a 200ms merged-sketch cache because this method can be called
-        up to 4 times per event in the hot path (L_eff update + 3x metrics
-        quantile queries).  Re-merging ~60 sub-sketches each time is
-        expensive; the cache amortises that cost over a single processing
-        cycle.
+        Uses a 200ms merged-sketch cache to amortise merge cost.
         """
         if not self._sketches:
             return 0.0
 
-        # Fast path: return cached quantile if still fresh.
         if q in self._cached_quantiles and time.time() - self._cache_ts < self._cache_ttl_s:
             return self._cached_quantiles[q]
 
-        # Slow path: rebuild merged sketch and precompute common quantiles.
         sketches = list(self._sketches.values())
         merged = sketches[0].copy()
         for sk in sketches[1:]:
@@ -422,7 +368,6 @@ class SlidingWindowDDSketch:
 
         COMMON_QS = (0.50, 0.95, 0.99, 0.999)
         self._cached_quantiles = {cq: merged.quantile(cq) for cq in COMMON_QS}
-        # Also cache the requested q in case it is not one of the common set.
         self._cached_quantiles[q] = merged.quantile(q)
         self._cache_ts = time.time()
 
@@ -459,7 +404,7 @@ class SlidingWindowDDSketch:
         }
 
     @classmethod
-    def from_dict(cls, d: dict) -> SlidingWindowDDSketch:
+    def from_dict(cls, d: dict) -> "SlidingWindowDDSketch":
         """Deserialize from a dict previously produced by ``to_dict``."""
         window = cls(
             window_seconds=d["window_seconds"],

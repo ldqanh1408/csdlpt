@@ -1,0 +1,4 @@
+refactor-coordinator-1  | RaftCoordinator: kazoo not installed; falling back to simulated HTTP ZK election
+refactor-coordinator-1  | [coordinator] gRPC server listening on :8050
+refactor-coordinator-1  | [alerting] PagerDuty not configured, alerts logged to stderr
+refactor-coordinator-1  | [coordinator] listening on :8000, W_global=-inf
