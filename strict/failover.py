@@ -126,6 +126,16 @@ class FailoverManager:
                 self._partition_owner[pid] = worker_id
                 if pid not in self._original_owner:
                     self._original_owner[pid] = worker_id
+                # Confirm reassignment: if this worker is the expected new owner
+                # and the partition is still REASSIGNING, mark it ASSIGNED.
+                if (self._partition_state.get(pid) == PartitionState.REASSIGNING
+                        and self._pending_reassignments.get(pid) == worker_id):
+                    self._partition_state[pid] = PartitionState.ASSIGNED
+                    self._pending_reassignments.pop(pid, None)
+                    logger.info(
+                        "Reassignment confirmed: partition %d now ASSIGNED to %s",
+                        pid, worker_id,
+                    )
 
     def detect_failures(self) -> list[str]:
         now = time.time()

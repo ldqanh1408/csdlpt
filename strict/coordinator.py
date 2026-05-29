@@ -91,7 +91,9 @@ class StrictCoordinator:
         if meta is not None:
             self.term = meta.get("term", 0)
             self.W_global = meta.get("W_global", float("-inf"))
-            self.W_global_prev = self.W_global
+            # Reset W_global_prev to -inf so fresh heartbeats can advance
+            # the watermark without being blocked by the stale persisted value.
+            self.W_global_prev = float("-inf")
 
     def set_failover_manager(self, fm: object) -> None:
         """Inject a FailoverManager so broadcast() can include partition_types
@@ -318,7 +320,9 @@ class StrictCoordinator:
                     state = json.load(f)
                 self.term = state["term"]
                 self.W_global = state["W_global"]
-                self.W_global_prev = self.W_global
+                # Reset W_global_prev to -inf so fresh heartbeats can advance
+                # the watermark without being blocked by the stale persisted value.
+                self.W_global_prev = float("-inf")
                 for k_str, v in state.get("partitions", {}).items():
                     pid = int(k_str)
                     self.partitions[pid] = PartitionInfo(

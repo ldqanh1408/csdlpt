@@ -1034,8 +1034,17 @@ def run_aggregator(args):
         agg = AggregatorHA(agg_base, lock_path=lock_path, heartbeat_path=heartbeat_path)
         agg.start()
         _agg_ha = agg  # keep reference for shutdown
-    except Exception:
-        logging.warning("AggregatorHA: file lock failed, running in standby mode")
+    except ImportError as e:
+        logging.warning("AggregatorHA: missing dependency (%s), running in standalone mode", e)
+        agg = agg_base
+        _agg_ha = None
+    except (IOError, OSError) as e:
+        logging.warning("AggregatorHA: file lock failed (%s), running in standby mode", e)
+        agg = agg_base
+        _agg_ha = None
+    except Exception as e:
+        logging.warning("AggregatorHA: init failed (%s: %s), running in standalone mode",
+                        type(e).__name__, e)
         agg = agg_base
         _agg_ha = None
 
@@ -1571,6 +1580,8 @@ def _run_strict_worker(node_id, parts, args):
                         if active_pids != current_assigned:
                             print(f"[worker-strict:{node_id}] DYNAMIC REBALANCE: partition assignment changed from {sorted(current_assigned)} to {sorted(active_pids)}", file=sys.stderr, flush=True)
                             kafka_consumer.update_assignment(list(active_pids))
+                            if hasattr(worker, "sync_active_partitions"):
+                                worker.sync_active_partitions(list(active_pids))
                 except Exception:
                     pass
     threading.Thread(target=wglobal_fetch_loop, daemon=True).start()
@@ -2401,7 +2412,7 @@ def run_ingestor(args):
     max_event_time_sent: float = 0.0
     # In replay mode the CSV can be heavily out of order. Keep the watermark
     # below all real event timestamps until EOF, then jump it forward to flush.
-    min_event_time_sent: float = 0.0
+    min_event_time_sent: float = float('inf')
     max_event_time_per_part: dict[int, float] = {}
     punctuation_mode = os.environ.get("PUNCTUATION_MODE", "data-driven")
     # Log level for tracing event flow through the pipeline
@@ -2462,48 +2473,75 @@ def run_ingestor(args):
     def send_punctuation():
         """Emit per-partition punctuation tokens.
 
-        In data-driven mode (default for CSV/simulation):
-          - While ingesting: T_commit = min_event_time_sent keeps the watermark
-            behind ALL events, guaranteeing 100% completeness regardless of
-            CSV time span. Windows accumulate but don't close prematurely.
-          - After EOF: T_commit = max_event_time_sent + delta_base_s flushes
-            all accumulated windows at once, simulating a clean shutdown.
+        Three modes, set via PUNCTUATION_MODE env var:
 
-        In wall-clock mode: T_commit = now - 10s (real-time streaming).
+        data-driven (default) — guaranteed 100% completeness for CSV replay.
+          T_commit = min_event_time_sent keeps the watermark behind ALL events
+          during ingestion, then jumps to max_event_time_sent + delta + window
+          at EOF to flush every window.  Memory: open_windows ≈ span / window_size.
+
+        max-event-time — progressive window closing for large streaming datasets.
+          Each partition's T_commit = max_event_time_per_part[pid], so no
+          cross-partition contamination.  May mark old events late on datasets
+          whose event-time span exceeds delta_base + window_size.
+
+        wall-clock — real-time streaming: T_commit = now - delta_base_s.
         """
         is_empty = events_sent_since_punctuation[0] == 0
         events_sent_since_punctuation[0] = 0
 
-        if punctuation_mode == "wall-clock":
-            T_commit = time.time() - 10.0
-        elif punctuation_mode == "max-event-time":
-            # Driven by max_event_time_sent for sorted datasets to progress watermark dynamically
-            if not eof_reached[0] and max_event_time_sent > 0:
-                T_commit = max_event_time_sent
-            elif eof_reached[0] and max_event_time_sent > 0:
-                T_commit = max_event_time_sent + float(os.environ.get("DELTA_BASE_S", "10.0"))
-            else:
-                T_commit = time.time()
-        else:
-            # Data-driven (default/min-event-time): anchor watermark at the oldest event so nothing is
-            # ever late. After EOF, jump to max_et + delta_base to close all windows in one shot.
-            if not eof_reached[0] and min_event_time_sent != float("inf"):
-                # Ingesting phase: hold watermark behind all events
-                T_commit = min_event_time_sent
-            elif eof_reached[0] and max_event_time_sent > 0:
-                # EOF phase: flush all windows
-                T_commit = max_event_time_sent + float(os.environ.get("DELTA_BASE_S", "10.0"))
-            else:
-                T_commit = time.time()
+        delta_s = float(os.environ.get("DELTA_BASE_S", "10.0"))
+        win_s   = float(os.environ.get("WINDOW_SIZE_S", "5.0"))
 
-        print(f"[ingestor] punctuation T_commit={T_commit:.3f} "
+        # ── decide per-partition vs global T_commit ──────────────────────
+        if punctuation_mode == "wall-clock":
+            global_T_commit = time.time() - delta_s
+            per_partition   = False
+
+        elif punctuation_mode == "max-event-time":
+            # Per-partition max_et — watermark per partition independent
+            per_partition   = True
+            global_T_commit = None  # each pid uses its own max_et below
+
+        else:  # "data-driven" or "min-event-time" (both guarantee 100% completeness)
+            per_partition = False
+            if not eof_reached[0]:
+                # Ingesting: watermark = -inf so ALL events are on_time.
+                # The CSV can be heavily shuffled (e.g. 62-day span, 99.9% out-of-order).
+                # Using min_event_time_sent would cause late events when an earlier
+                # timestamp arrives after punctuations have already advanced the watermark.
+                # -inf guarantees zero late events; windows stay open until EOF.
+                global_T_commit = float("-inf")
+            elif eof_reached[0] and max_event_time_sent > 0:
+                # EOF flush: max_et + delta + window → all windows close at once
+                global_T_commit = max_event_time_sent + delta_s + win_s
+            else:
+                global_T_commit = time.time()
+
+        print(f"[ingestor] punctuation T_commit={'per-partition' if per_partition else f'{global_T_commit:.3f}'} "
               f"min_et={min_event_time_sent:.3f} max_et={max_event_time_sent:.3f} "
               f"eof={eof_reached[0]} mode={punctuation_mode} is_empty={is_empty}",
               file=sys.stderr)
 
+        # Flush all buffered events to the broker BEFORE sending punctuation.
+        # Without this, async events (sync=False) may still be in the producer's
+        # internal buffer and arrive at the worker AFTER punctuation, causing them
+        # to be incorrectly marked as late (ordering inversion within partition).
+        if kafka_producer is not None:
+            kafka_producer.flush()
+
         for pid, host in node_for_partition.items():
             try:
-                pid_T_commit = T_commit
+                if per_partition:
+                    pid_et = max_event_time_per_part.get(pid, 0.0)
+                    if not eof_reached[0] and pid_et > 0:
+                        pid_T_commit = pid_et
+                    elif eof_reached[0] and pid_et > 0:
+                        pid_T_commit = pid_et + delta_s + win_s
+                    else:
+                        pid_T_commit = time.time()
+                else:
+                    pid_T_commit = global_T_commit
                 if kafka_producer is not None:
                     kafka_producer.send("events", {
                         "is_punctuation": True,
@@ -2566,11 +2604,21 @@ def run_ingestor(args):
                             kafka_producer.flush()
                         continue
                 else:
-                    # EOF reached, just send punctuations on idle loop
+                    # EOF reached — flush punctuations a limited number of times
+                    # to drain all windows, then stop the loop.
                     time.sleep(0.1)
-                    if mode == "strict" and (time.time() - last_punctuation[0]) > punctuation_interval:
+                    if (time.time() - last_punctuation[0]) > punctuation_interval:
+                        if eof_reached[0] and not hasattr(loop, "_eof_punct_count"):
+                            loop._eof_punct_count = 0  # type: ignore[attr-defined]
+                        loop._eof_punct_count = getattr(loop, "_eof_punct_count", 0) + 1  # type: ignore[attr-defined]
                         send_punctuation()
                         last_punctuation[0] = time.time()
+                        # After 5 EOF flushes, stop the loop (windows should be drained)
+                        _max_eof_punct = int(os.environ.get("INGESTOR_EOF_PUNCT_MAX", "5"))
+                        if loop._eof_punct_count >= _max_eof_punct:  # type: ignore[attr-defined]
+                            print(f"[ingestor] EOF flush complete ({loop._eof_punct_count} punctuations sent), "
+                                  f"stopping ingest loop", file=sys.stderr)
+                            stop.set()
                     continue
             else:
                 ev = events[idx % len(events)]
@@ -2776,6 +2824,30 @@ if __name__ == "__main__":
         format="%(asctime)s [%(levelname)s] %(name)s: %(message)s",
         handlers=[logging.StreamHandler(sys.stderr)]
     )
+
+    # Suppress verbose third-party library internal debug logs.
+    # kafka-python floods at DEBUG with raw fetch-record bytes, which is
+    # rarely useful. Keep WARNING unless the user explicitly sets TRACE.
+    _trace = _log_level == "TRACE"
+    _third_party_level = logging.DEBUG if _trace else logging.WARNING
+    for _noisy_logger in (
+        "kafka",
+        "kafka.conn",
+        "kafka.client",
+        "kafka.protocol",
+        "kafka.consumer",
+        "kafka.coordinator",
+        "kafka.consumer.fetcher",
+        "kafka.consumer.group",
+        "kafka.protocol.parser",
+        "urllib3",
+        "urllib3.connectionpool",
+        "requests",
+        "botocore",
+        "boto3",
+        "s3transfer",
+    ):
+        logging.getLogger(_noisy_logger).setLevel(_third_party_level)
 
     _args = parse_args()
     _fn = ROLE_DISPATCH.get(_args.role)

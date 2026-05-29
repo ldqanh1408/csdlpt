@@ -1,6 +1,19 @@
 # Scaled-down deployment for the refactor project
 # Single-machine simulation of the full distributed architecture.
 # No real Kafka/ZK/MinIO needed - uses in-memory/file-based alternatives.
+#
+# ═══════════════════════════════════════════════════════════════════════════════
+# USAGE:
+#   Strict mode:   MODE=strict DATASET_FILE=access.log/access_sample.csv docker compose --profile strict up
+#   Heuristic mode: MODE=heuristic docker compose --profile heuristic up
+#   Hybrid mode:   MODE=hybrid docker compose --profile hybrid up
+#
+# IMPORTANT: Set MODE= consistently. Workers and ingestor default to "strict"
+# if MODE is not set, causing a mode mismatch when using --profile heuristic.
+#
+# On startup, /app/entrypoint.sh cleans old checkpoint data in /data/
+# automatically. Set CLEAN_CHECKPOINT=false to skip cleanup (crash recovery).
+# ═══════════════════════════════════════════════════════════════════════════════
 
 # Shared logging config: capture full stdout/stderr with bounded, rotated files
 # so verbose (debug/trace) output stays available for testing without filling disk.

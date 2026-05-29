@@ -85,7 +85,10 @@ def _compose_file() -> str:
 
 
 def _workers() -> dict:
-    return WORKERS_SIM if _is_sim() else WORKERS_FULL
+    if _is_sim():
+        mode = st.session_state.get("mode", "strict")
+        return {k: v for k, v in WORKERS_SIM.items() if v.get("profile") == mode}
+    return WORKERS_FULL
 
 
 def _infra() -> dict:
@@ -113,6 +116,7 @@ def init_state():
         "metrics_history": [],
         "start_time": None,
         "last_metrics": None,
+        "container_statuses": {},
         "run_results": {},
         "log_level": "info",
         "punctuation_mode": "data-driven",
@@ -309,8 +313,9 @@ def fetch_all_metrics(mode: str) -> dict:
         urls_to_fetch[f"w_s_{name}"] = (f"http://localhost:{port}/state", 1.5)
 
     # 2. Coordinators
-    for cname, cport in _coordinators().items():
-        urls_to_fetch[f"c_{cname}"] = (f"http://localhost:{cport}/state", 1.5)
+    if mode in ("strict", "hybrid"):
+        for cname, cport in _coordinators().items():
+            urls_to_fetch[f"c_{cname}"] = (f"http://localhost:{cport}/state", 1.5)
 
     # 3. Aggregator
     if mode in ("heuristic", "hybrid"):
@@ -394,21 +399,34 @@ def aggregate_worker_metrics(metrics: dict) -> dict:
         """Extract latency fields from a partition or engine metrics dict."""
         if not isinstance(d, dict):
             return
-        p50 = d.get("proc_latency_p50_us", 0.0)
-        p95 = d.get("proc_latency_p95_us", 0.0)
-        p99 = d.get("proc_latency_p99_us", 0.0)
-        if p50: proc_p50_vals.append(p50)
-        if p95: proc_p95_vals.append(p95)
-        if p99: proc_p99_vals.append(p99)
-        sp50 = d.get("sketch_quantile_p50_ms", 0.0)
-        sp95 = d.get("sketch_quantile_p95_ms", 0.0)
-        sp99 = d.get("sketch_quantile_p99_ms", 0.0)
-        if sp50: sketch_p50_vals.append(sp50)
-        if sp95: sketch_p95_vals.append(sp95)
-        if sp99: sketch_p99_vals.append(sp99)
-        wl = d.get("watermark_lag_s")
-        if wl and wl > 0:
+
+        def _get_float(key: str) -> float:
+            val = d.get(key)
+            if val is None:
+                return 0.0
+            try:
+                return float(val)
+            except (TypeError, ValueError):
+                return 0.0
+
+        p50 = _get_float("proc_latency_p50_us")
+        p95 = _get_float("proc_latency_p95_us")
+        p99 = _get_float("proc_latency_p99_us")
+        if p50 > 0: proc_p50_vals.append(p50)
+        if p95 > 0: proc_p95_vals.append(p95)
+        if p99 > 0: proc_p99_vals.append(p99)
+
+        sp50 = _get_float("sketch_quantile_p50_ms")
+        sp95 = _get_float("sketch_quantile_p95_ms")
+        sp99 = _get_float("sketch_quantile_p99_ms")
+        if sp50 > 0: sketch_p50_vals.append(sp50)
+        if sp95 > 0: sketch_p95_vals.append(sp95)
+        if sp99 > 0: sketch_p99_vals.append(sp99)
+
+        wl = _get_float("watermark_lag_s")
+        if wl > 0:
             wm_lag_vals.append(wl)
+
         for field, target in (
             ("poll_decode_latency_p95_us", poll_decode_p95_vals),
             ("dedup_latency_p95_us", dedup_p95_vals),
@@ -416,8 +434,8 @@ def aggregate_worker_metrics(metrics: dict) -> dict:
             ("sketch_update_latency_p95_us", sketch_update_p95_vals),
             ("sketch_query_latency_p95_us", sketch_query_p95_vals),
         ):
-            val = d.get(field, 0.0)
-            if val:
+            val = _get_float(field)
+            if val > 0:
                 target.append(val)
 
     for wname, wdata in metrics.get("workers", {}).items():
@@ -722,10 +740,10 @@ def render_sidebar():
     c1, c2 = st.sidebar.columns(2)
     with c1:
         start = st.button("Start", disabled=st.session_state.running,
-                          use_container_width=True, type="primary")
+                          width="stretch", type="primary")
     with c2:
         stop = st.button("Stop", disabled=not st.session_state.running,
-                         use_container_width=True)
+                         width="stretch")
 
     if start and not st.session_state.running:
         with st.sidebar.status("Building & starting...", expanded=True) as s:
@@ -757,7 +775,7 @@ def render_sidebar():
             s.update(label="Stopped", state="complete")
 
     st.sidebar.markdown("---")
-    st.sidebar.caption("Metrics update on demand — use the **Refresh data** button on the Dashboard / Sim Stats tabs.")
+    st.sidebar.caption("🟢 **Real-time Auto-refresh enabled.** Stats update every 3 seconds while running.")
 
     # Service status
     if st.session_state.running:
@@ -981,6 +999,7 @@ def render_dashboard(mode: str, metrics: dict):
         st.markdown("#### Trends")
         df = pd.DataFrame(history)
         df["time_s"] = df["elapsed_s"].round(0)
+        df = df.groupby("time_s").mean().reset_index()
 
         ch1, ch2 = st.columns(2)
         with ch1:
@@ -1333,7 +1352,7 @@ def render_logs():
         st.session_state.log_auto_scroll = st.checkbox(
             "Auto-refresh", value=st.session_state.log_auto_scroll,
         )
-        if st.button("Refresh Now", use_container_width=True):
+        if st.button("Refresh Now", width="stretch"):
             st.rerun()
 
     if st.session_state.running:
@@ -1426,8 +1445,51 @@ def render_raw(metrics: dict):
 # Node Control & Fault Injection
 # ---------------------------------------------------------------------------
 
+def fetch_all_container_statuses(mode: str) -> dict[str, str]:
+    """Fetch the status of all containers in a single docker compose ps call.
+    Returns a dict mapping docker service name to status ('running', 'stopped', 'unknown').
+    """
+    statuses = {}
+    cmd = _compose_base() + [
+        "--profile", "strict",
+        "--profile", "heuristic",
+        "--profile", "hybrid",
+        "ps", "--format", "json"
+    ]
+    try:
+        r = subprocess.run(cmd, capture_output=True, text=True, encoding="utf-8",
+                           errors="replace", cwd=str(DEPLOY_DIR), timeout=8)
+        if r.returncode == 0 and r.stdout.strip():
+            lines = r.stdout.strip().split("\n")
+            for line in lines:
+                try:
+                    data = json.loads(line)
+                    service = data.get("Service")
+                    if not service:
+                        name = data.get("Name", "")
+                        if name.startswith("refactor-"):
+                            service = name[len("refactor-"):]
+                    if service:
+                        state = data.get("State", data.get("Status", "")).lower()
+                        if "up" in state or "running" in state:
+                            statuses[service] = "running"
+                        elif "exit" in state or "stop" in state:
+                            statuses[service] = "stopped"
+                        else:
+                            statuses[service] = "unknown"
+                except Exception:
+                    pass
+    except Exception:
+        pass
+    return statuses
+
+
 def get_container_status_docker(service: str) -> str:
-    """Check the container status using docker compose ps."""
+    """Check the container status using cached status map or fallback to docker compose ps."""
+    cache = st.session_state.get("container_statuses")
+    if cache is not None and service in cache:
+        return cache[service]
+
     cmd = _compose_base() + ["ps", "--format", "json", service]
     try:
         r = subprocess.run(cmd, capture_output=True, text=True, encoding="utf-8",
@@ -1450,25 +1512,24 @@ def get_container_status_docker(service: str) -> str:
 
 
 def check_node_status(service: str, port: int = None) -> str:
-    """Combined health status using port health check and Docker state fallback."""
+    """Combined health status using Docker state lookup and network check fallback."""
+    # 1. Check Docker state first (fast cache lookup)
+    docker_status = get_container_status_docker(service)
+    if docker_status == "stopped":
+        return "stopped"
+
+    # 2. If it is running in Docker, verify with network health check
     infra_key = _infra_key(service)
     if infra_key is not None:
         if check_infra_health(infra_key):
             return "running"
-        docker_status = get_container_status_docker(service)
-        if docker_status != "unknown":
-            return docker_status
-        return "stopped"
+        return docker_status if docker_status != "unknown" else "stopped"
 
     if port:
         if is_healthy(port):
             return "running"
 
-    docker_status = get_container_status_docker(service)
-    if docker_status != "unknown":
-        return docker_status
-
-    return "stopped"
+    return docker_status if docker_status != "unknown" else "stopped"
 
 
 def _container_id(service: str) -> str:
@@ -1632,12 +1693,12 @@ def render_quick_fault_injection(mode: str):
 
     b_kill, b_recover, b_refresh = st.columns(3)
     if b_kill.button("💥 Kill node", key="nc_quick_kill", type="primary",
-                     disabled=(status != "running"), use_container_width=True):
+                     disabled=(status != "running"), width="stretch"):
         _exec_node_action("kill", target["service"], target["display"])
     if b_recover.button("♻️ Recover node", key="nc_quick_recover",
-                        disabled=(status == "running"), use_container_width=True):
+                        disabled=(status == "running"), width="stretch"):
         _exec_node_action("start", target["service"], target["display"])
-    if b_refresh.button("🔄 Refresh status", key="nc_quick_refresh", use_container_width=True):
+    if b_refresh.button("🔄 Refresh status", key="nc_quick_refresh", width="stretch"):
         st.rerun()
 
     st.caption("Kill a worker → watch the Dashboard tab react → Recover it. "
@@ -1662,9 +1723,9 @@ def render_node_control_row(service_name: str, display_name: str, port: int = No
 
     col3.caption(f"{role} (:{port})" if port else role)
 
-    start_btn = col4.button("Start", key=f"start_{service_name}", disabled=(not controls_enabled) or (status == "running"), use_container_width=True)
-    stop_btn = col5.button("Stop", key=f"stop_{service_name}", disabled=(not controls_enabled) or (status == "stopped"), use_container_width=True)
-    kill_btn = col6.button("Kill", key=f"kill_{service_name}", disabled=(not controls_enabled) or (status == "stopped"), type="secondary", use_container_width=True)
+    start_btn = col4.button("Start", key=f"start_{service_name}", disabled=(not controls_enabled) or (status == "running"), width="stretch")
+    stop_btn = col5.button("Stop", key=f"stop_{service_name}", disabled=(not controls_enabled) or (status == "stopped"), width="stretch")
+    kill_btn = col6.button("Kill", key=f"kill_{service_name}", disabled=(not controls_enabled) or (status == "stopped"), type="secondary", width="stretch")
 
     if start_btn:
         _exec_node_action("start", service_name, display_name)
@@ -1747,6 +1808,8 @@ def main():
     </style>""", unsafe_allow_html=True)
 
     init_state()
+    if st.session_state.running and not st.session_state.container_statuses:
+        st.session_state.container_statuses = fetch_all_container_statuses(st.session_state.mode)
     render_sidebar()
 
     mode = st.session_state.mode
@@ -1755,72 +1818,76 @@ def main():
     # No page-level auto-refresh. Each live-metrics tab is an isolated fragment
     # with its own "Refresh data" button, so a refresh re-renders ONLY that data
     # block — never the sidebar, tabs, or control panels.
-    def _render_refresh_bar(key: str):
-        c1, c2 = st.columns([1, 3])
-        # The button click triggers a fragment-scoped rerun; no handler needed —
-        # _refresh_metrics() below re-fetches when the fragment re-runs.
-        c1.button("🔄 Refresh data", key=key, use_container_width=True, type="primary")
-        c2.caption(f"Last updated {datetime.now().strftime('%H:%M:%S')} · click **Refresh data** to update")
+    def _render_refresh_bar(key: str = None):
+        st.caption(f"🟢 **Real-time Auto-refresh (every 3s) active** · Last update: {datetime.now().strftime('%H:%M:%S')}")
 
     def _refresh_metrics() -> dict:
-        """Fetch live metrics once and append a history sample. Returns metrics."""
-        metrics = {}
+        """Fetch live metrics once and append a history sample. Throttled to max once per 2 seconds."""
+        metrics = st.session_state.get("last_metrics") or {}
         if st.session_state.running:
-            metrics = fetch_all_metrics(mode)
-            st.session_state.last_metrics = metrics
-            
-            # Coordination tracking: detect changes and log to console
-            if metrics.get("coordinator"):
-                coord_data = metrics["coordinator"]
-                leader = metrics.get("coordinator_name")
-                term = coord_data.get("term", 0)
+            now = time.time()
+            last_fetch = st.session_state.get("last_fetch_time", 0.0)
+            if now - last_fetch >= 2.0:
+                metrics = fetch_all_metrics(mode) or {}
+                st.session_state.last_metrics = metrics
+                st.session_state.last_fetch_time = now
+                st.session_state.container_statuses = fetch_all_container_statuses(mode)
                 
-                # Check leader change
-                prev_leader = st.session_state.get("last_leader")
-                if prev_leader is not None and prev_leader != leader:
-                    print(f"[dashboard] COORDINATOR LEADER CHANGE DETECTED: {prev_leader} -> {leader} (term={term})", flush=True)
-                st.session_state.last_leader = leader
+                # Coordination tracking: detect changes and log to console
+                if metrics.get("coordinator"):
+                    coord_data = metrics["coordinator"]
+                    leader = metrics.get("coordinator_name")
+                    term = coord_data.get("term", 0)
+                    
+                    # Check leader change
+                    prev_leader = st.session_state.get("last_leader")
+                    if prev_leader is not None and prev_leader != leader:
+                        print(f"[dashboard] COORDINATOR LEADER CHANGE DETECTED: {prev_leader} -> {leader} (term={term})", flush=True)
+                    st.session_state.last_leader = leader
 
-                # Check active workers change
-                active_workers = coord_data.get("active_workers", 0)
-                prev_active = st.session_state.get("last_active_workers")
-                if prev_active is not None and prev_active != active_workers:
-                    print(f"[dashboard] ACTIVE WORKERS COUNT CHANGED: {prev_active} -> {active_workers}", flush=True)
-                st.session_state.last_active_workers = active_workers
+                    # Check active workers change
+                    active_workers = coord_data.get("active_workers", 0)
+                    prev_active = st.session_state.get("last_active_workers")
+                    if prev_active is not None and prev_active != active_workers:
+                        print(f"[dashboard] ACTIVE WORKERS COUNT CHANGED: {prev_active} -> {active_workers}", flush=True)
+                    st.session_state.last_active_workers = active_workers
 
-                # Check partition reassignments (rebalancing)
-                if "recovery_info" in coord_data:
-                    recovery_info = coord_data["recovery_info"]
-                    prev_recovery_info = st.session_state.get("last_recovery_info", {})
-                    if recovery_info != prev_recovery_info:
-                        for pid_str, info in recovery_info.items():
-                            pid = int(pid_str)
-                            prev_info = prev_recovery_info.get(pid_str)
-                            if prev_info != info:
-                                print(f"[dashboard] COORDINATION PARTITION REASSIGNMENT: "
-                                      f"partition={pid} original_owner={info.get('original_owner')} "
-                                      f"current_owner={info.get('current_owner')} "
-                                      f"reassigned_at={format_timestamp(info.get('reassigned_at'))}", flush=True)
-                        st.session_state.last_recovery_info = recovery_info
+                    # Check partition reassignments (rebalancing)
+                    if "recovery_info" in coord_data:
+                        recovery_info = coord_data["recovery_info"]
+                        prev_recovery_info = st.session_state.get("last_recovery_info", {})
+                        if recovery_info != prev_recovery_info:
+                            for pid_str, info in recovery_info.items():
+                                pid = int(pid_str)
+                                prev_info = prev_recovery_info.get(pid_str)
+                                if prev_info != info:
+                                    print(f"[dashboard] COORDINATION PARTITION REASSIGNMENT: "
+                                          f"partition={pid} original_owner={info.get('original_owner')} "
+                                          f"current_owner={info.get('current_owner')} "
+                                          f"reassigned_at={format_timestamp(info.get('reassigned_at'))}", flush=True)
+                            st.session_state.last_recovery_info = recovery_info
 
-            if metrics.get("workers"):
-                agg = aggregate_worker_metrics(metrics)
-                elapsed = time.time() - (st.session_state.start_time or time.time())
-                st.session_state.metrics_history.append({
-                    "elapsed_s": elapsed,
-                    "completeness": agg["data_completeness_pct"],
-                    "total_received": agg["total_received"],
-                    "on_time": agg["on_time"],
-                    "late_dropped": agg["late_dropped"],
-                    "late_rate": agg["late_arrival_rate_pct"],
-                    "proc_p95_us": agg.get("proc_lat_p95_us", 0.0),
-                    "proc_p99_us": agg.get("proc_lat_p99_us", 0.0),
-                    "wm_lag_max_s": agg.get("wm_lag_max_s", 0.0),
-                    "event_lag_p95_ms": agg.get("sketch_p95_ms", 0.0),
-                })
-                if len(st.session_state.metrics_history) > MAX_HISTORY:
-                    st.session_state.metrics_history = st.session_state.metrics_history[-MAX_HISTORY:]
-        return metrics
+                if metrics.get("workers"):
+                    agg = aggregate_worker_metrics(metrics)
+                    elapsed = time.time() - (st.session_state.start_time or time.time())
+                    st.session_state.metrics_history.append({
+                        "elapsed_s": elapsed,
+                        "completeness": agg["data_completeness_pct"],
+                        "total_received": agg["total_received"],
+                        "on_time": agg["on_time"],
+                        "late_dropped": agg["late_dropped"],
+                        "late_rate": agg["late_arrival_rate_pct"],
+                        "proc_p95_us": agg.get("proc_lat_p95_us", 0.0),
+                        "proc_p99_us": agg.get("proc_lat_p99_us", 0.0),
+                        "wm_lag_max_s": agg.get("wm_lag_max_s", 0.0),
+                        "event_lag_p95_ms": agg.get("sketch_p95_ms", 0.0),
+                    })
+                    if len(st.session_state.metrics_history) > MAX_HISTORY:
+                        st.session_state.metrics_history = st.session_state.metrics_history[-MAX_HISTORY:]
+            else:
+                # Use cached metrics if queried within the throttle window
+                metrics = st.session_state.last_metrics or {}
+        return metrics or {}
 
     # Build the tab bar once. Node Control sits right after Dashboard and carries
     # a distinct icon so the kill/recover controls are easy to find.
@@ -1838,9 +1905,9 @@ def main():
     tabs = st.tabs(tab_names)
     tab_idx = {name: i for i, name in enumerate(tab_names)}
 
-    # Tab: Dashboard — isolated fragment; refreshes only on the Refresh button.
+    # Tab: Dashboard — isolated fragment; auto-refreshes every 3 seconds when running.
     with tabs[tab_idx[TAB_DASH]]:
-        @st.fragment
+        @st.fragment(run_every=3.0 if st.session_state.running else None)
         def _dashboard_fragment():
             if st.session_state.running:
                 st.info("🛑 To **kill / recover a node**, open the **Node Control · Kill / Recover** tab above.")
@@ -1900,10 +1967,10 @@ def main():
 """)
         _dashboard_fragment()
 
-    # Tab: Sim Stats — isolated fragment; refreshes only on the Refresh button.
+    # Tab: Sim Stats — isolated fragment; auto-refreshes.
     if is_sim:
         with tabs[tab_idx[TAB_SIM]]:
-            @st.fragment
+            @st.fragment(run_every=3.0 if st.session_state.running else None)
             def _sim_fragment():
                 if st.session_state.running:
                     _render_refresh_bar("sim_refresh")
@@ -1916,13 +1983,21 @@ def main():
                     st.info("Start the simulation to see replay statistics.")
             _sim_fragment()
 
-    # Tab: Node Control — static so the Kill / Stop / Start buttons stay stable.
+    # Tab: Node Control — isolated fragment; auto-refreshes.
     with tabs[tab_idx[TAB_NODE]]:
-        render_node_control(mode)
+        @st.fragment(run_every=3.0 if st.session_state.running else None)
+        def _node_control_fragment():
+            # Trigger a silent metrics fetch to update the events display
+            _ = _refresh_metrics()
+            render_node_control(mode)
+        _node_control_fragment()
 
-    # Tab: Logs — static (has its own manual refresh button).
+    # Tab: Logs — isolated fragment; auto-refreshes if checked.
     with tabs[tab_idx[TAB_LOGS]]:
-        render_logs()
+        @st.fragment(run_every=3.0 if (st.session_state.running and st.session_state.get("log_auto_scroll", False)) else None)
+        def _logs_fragment():
+            render_logs()
+        _logs_fragment()
 
     # Tab: Compare — static.
     with tabs[tab_idx[TAB_CMP]]:

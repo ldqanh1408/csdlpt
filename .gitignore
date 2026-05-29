@@ -1,5 +1,32 @@
-dataset/
+# ── Project-Specific Git Ignore ────────────────────────────────────────
+# OS/IDE/editor/Python cache patterns → ~/.gitignore_global
+# Chỉ giữ pattern đặc thù của project này.
 
-# Deployment runtime state
+# Python packaging (dự án flat-layout)
+*.egg-info/
+dist/
+build/
+
+# Project dataset & runtime state
+dataset/
 dlq/
+.simdata/
+
+# Application checkpoints & RocksDB
+deploy/checkpoint/
+deploy/checkpoint-*/
+**/checkpoint/
+*rocksdb*
+
+# Test logs & deploy artifacts
+deploy/test_logs/
 deploy/grafana/data/
+*.log
+_st_err.log
+_st_out.log
+.deploy_cache/
+
+# Environment (keep .env.example in repo)
+.env
+.env.*
+!.env.example

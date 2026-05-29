@@ -5,3 +5,4 @@ prometheus-client>=0.20.0
 kafka-python>=2.0.0
 protobuf>=3.20.0
 grpcio>=1.50.0
+kazoo>=2.9.0

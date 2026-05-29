@@ -95,7 +95,69 @@ class StrictWatermarkEngine:
         if self._store is None and db_path is not None:
             self._store = RocksStore(db_path)
         if self._store is not None:
-            self._restore_from_store()
+            has_metadata = False
+            try:
+                has_metadata = self._store.get(f"{_PFX_META}checkpoint") is not None
+            except Exception:
+                pass
+
+            if has_metadata:
+                self._restore_from_store()
+            else:
+                # No RocksDB metadata (e.g. fresh database directory because of takeover/rebalance).
+                # Load fallback from checkpoint.json.
+                path = os.path.join(checkpoint_dir, "checkpoint.json")
+                if os.path.exists(path):
+                    logger.info("StrictWatermarkEngine: No RocksDB metadata found. Falling back to JSON checkpoint at %s", path)
+                    try:
+                        with open(path) as f:
+                            snap = json.load(f)
+                        self.last_T_commit = snap.get("last_T_commit", float("-inf"))
+                        self.local_watermark = snap.get("local_watermark", float("-inf"))
+                        self.max_event_time = snap.get("max_event_time", float("-inf"))
+                        self.watermark = snap.get("watermark", float("-inf"))
+                        self.kafka_committed_offset = snap.get("kafka_committed_offset", 0)
+                        self.kafka_current_offset = self.kafka_committed_offset
+                        self.partition_id = snap.get("partition_id", 0)
+                        
+                        # Open windows
+                        open_wins = snap.get("open_windows", {})
+                        for k, v in open_wins.items():
+                            ws = float(k)
+                            ws_state = WindowState(
+                                count=v.get("count", 0),
+                                status_500=v.get("status_500", 0)
+                            )
+                            self.open_windows[ws] = ws_state
+                            self._persist_open_window(ws)
+                        
+                        # Seen IDs
+                        seen_ids = snap.get("seen_ids", [])
+                        ckpt_time = snap.get("last_checkpoint_time", time.time())
+                        for eid in seen_ids:
+                            self._seen_ids_ttl[eid] = ckpt_time
+                            self._persist_seen_id(eid)
+                            
+                        self._last_checkpoint_time = ckpt_time
+                        
+                        # Save metadata to store
+                        meta = {
+                            "last_T_commit": self.last_T_commit,
+                            "local_watermark": self.local_watermark,
+                            "max_event_time": self.max_event_time,
+                            "watermark": self.watermark,
+                            "last_checkpoint_time": self._last_checkpoint_time,
+                            "rocksdb_checkpoint_path": None,
+                            "partition_id": self.partition_id,
+                            "active_windows": [str(w) for w in sorted(self.open_windows.keys())],
+                            "sst_files_manifest": [],
+                            "term_at_checkpoint": self.raft_term,
+                        }
+                        self._store.put(f"{_PFX_META}checkpoint", meta)
+                        self._store.flush()
+                    except Exception as e:
+                        logger.error("StrictWatermarkEngine: Failed to restore state from JSON checkpoint: %s", e)
+
             if os.environ.get("ENABLE_TWO_PHASE_EVICTION", "true").lower() in ("1", "true", "yes", "on"):
                 self._recover_eviction_states()
 
@@ -286,6 +348,7 @@ class StrictWatermarkEngine:
         if token.T_commit > self.last_T_commit:
             self.last_T_commit = token.T_commit
             self.local_watermark = token.T_commit - self.delta_base
+            self._advance_watermark()
         else:
             self.metrics.non_monotonic_punctuation += 1
 
@@ -331,12 +394,24 @@ class StrictWatermarkEngine:
         entries are purged when T_event < W_global - 60s — i.e. only after the
         global watermark has safely passed the event's time + the dedup window.
 
+        In data-driven mode with -inf watermark during ingestion, falls back to
+        max_event_time as the reference point for TTL calculation, preventing
+        unbounded memory growth from the seen-IDs cache.
+
         RocksDB bulk cleanup uses efficient clear_prefix every 5 minutes
         (replacing the per-key-delete sweep for better compaction performance).
         The in-memory dict is the authoritative source; RocksDB is for crash
         recovery only, so bulk clearing is safe.
         """
-        cutoff = self.watermark - self._dedup_ttl_s
+        if self.watermark == float("-inf"):
+            # Data-driven mode during ingestion: watermark not yet advanced.
+            # Use max_event_time as reference — events older than
+            # max_et - 60s are safe to purge from the dedup cache.
+            if self.max_event_time == float("-inf"):
+                return  # No events processed yet
+            cutoff = self.max_event_time - self._dedup_ttl_s
+        else:
+            cutoff = self.watermark - self._dedup_ttl_s
 
         # Fast in-memory sweep — compare stored T_event against watermark-based cutoff
         expired = [eid for eid, ts in list(self._seen_ids_ttl.items()) if ts < cutoff]

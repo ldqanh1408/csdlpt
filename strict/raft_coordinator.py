@@ -403,10 +403,15 @@ class RaftCoordinator:
 
         # Leader is the coordinator with lowest numeric ID among reachable
         def _parse_id(cid: str) -> int:
-            try:
-                return int(cid)
-            except ValueError:
-                return 99999
+            import re
+            host = cid.split(":")[0]
+            m = re.search(r'\d+', host)
+            if m:
+                return int(m.group(0))
+            m = re.search(r'\d+', cid)
+            if m:
+                return int(m.group(0))
+            return 99999
 
         reachable_sorted = sorted(reachable, key=_parse_id)
         new_leader = reachable_sorted[0]

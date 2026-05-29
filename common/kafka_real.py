@@ -116,17 +116,23 @@ class KafkaConsumer:
 
     def pause(self, partitions: list[int]) -> None:
         topic = self._subscribed_topics[0] if self._subscribed_topics else "events"
-        tps = [TopicPartition(topic, pid) for pid in partitions]
+        to_pause = [pid for pid in partitions if pid not in self._paused_partitions]
+        if not to_pause:
+            return
+        tps = [TopicPartition(topic, pid) for pid in to_pause]
         logger.info("RealKafkaConsumer: pausing partitions %s", tps)
         self.consumer.pause(*tps)
-        self._paused_partitions.update(partitions)
+        self._paused_partitions.update(to_pause)
 
     def resume(self, partitions: list[int]) -> None:
         topic = self._subscribed_topics[0] if self._subscribed_topics else "events"
-        tps = [TopicPartition(topic, pid) for pid in partitions]
+        to_resume = [pid for pid in partitions if pid in self._paused_partitions]
+        if not to_resume:
+            return
+        tps = [TopicPartition(topic, pid) for pid in to_resume]
         logger.info("RealKafkaConsumer: resuming partitions %s", tps)
         self.consumer.resume(*tps)
-        self._paused_partitions.difference_update(partitions)
+        self._paused_partitions.difference_update(to_resume)
 
     def seek(self, partition: int, offset: int) -> None:
         topic = self._subscribed_topics[0] if self._subscribed_topics else "events"
@@ -168,6 +174,7 @@ class KafkaConsumer:
 
     def update_assignment(self, pids: list[int]) -> None:
         self._assigned_partitions = list(pids)
+        self._paused_partitions.intersection_update(pids)
         topic = self._subscribed_topics[0] if self._subscribed_topics else "events"
         tps = [TopicPartition(topic, pid) for pid in pids]
         logger.info("RealKafkaConsumer: dynamically re-assigning partitions=%s", tps)

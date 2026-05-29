@@ -16,6 +16,11 @@ RUN pip install --no-cache-dir -r /app/requirements.txt
 # (source was moved out of refactor/ folder into project root)
 COPY . /app/refactor/
 
+# Entrypoint: cleans stale checkpoint data from previous runs
+COPY deploy/entrypoint.sh /app/entrypoint.sh
+RUN chmod +x /app/entrypoint.sh
+ENTRYPOINT ["/app/entrypoint.sh"]
+
 # Health check endpoint (overridden per service in docker-compose)
 HEALTHCHECK --interval=3s --timeout=2s --retries=5 \
   CMD curl -sf http://localhost:8000/health || exit 1

@@ -172,6 +172,28 @@ class StrictWorker:
             if pid not in self.partition_ids:
                 self.partition_ids.append(pid)
 
+    def sync_active_partitions(self, active_pids: list[int]) -> None:
+        """Close and remove engines for partitions that are no longer assigned to this worker."""
+        with self._dynamic_partition_lock:
+            to_remove = [pid for pid in list(self.engines.keys()) if pid not in active_pids]
+            for pid in to_remove:
+                print(f"[worker-strict:{self.worker_id}] Closing and removing engine for inactive partition {pid}", flush=True)
+                eng = self.engines.pop(pid, None)
+                if eng is not None:
+                    try:
+                        if hasattr(eng, "_store") and eng._store is not None:
+                            eng._store.close()
+                    except Exception as e:
+                        print(f"[worker-strict:{self.worker_id}] Error closing store for partition {pid}: {e}", flush=True)
+                self.buffers.pop(pid, None)
+                self._partition_locks.pop(pid, None)
+                self.max_event_times.pop(pid, None)
+                self._last_event_time.pop(pid, None)
+                self._backpressure_active.pop(pid, None)
+                self._pending_count.pop(pid, None)
+                if pid in self.partition_ids:
+                    self.partition_ids.remove(pid)
+
     def validate_command(self, term: int, command_id: str) -> bool:
         if term < self.known_term:
             return False  # stale term
