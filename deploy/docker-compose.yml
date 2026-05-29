@@ -2,6 +2,15 @@
 # Single-machine simulation of the full distributed architecture.
 # No real Kafka/ZK/MinIO needed - uses in-memory/file-based alternatives.
 
+# Shared logging config: capture full stdout/stderr with bounded, rotated files
+# so verbose (debug/trace) output stays available for testing without filling disk.
+# Override volume per-container via LOG_LEVEL (default: debug).
+x-logging: &default-logging
+  driver: "json-file"
+  options:
+    max-size: "20m"
+    max-file: "5"
+
 services:
   # ── HA Coordinator cluster (3 instances) ──────────────────────────
 
@@ -22,7 +31,7 @@ services:
       WINDOW_SIZE_S: "5.0"
       CHECKPOINT_DIR: /data/checkpoint
       PAGERDUTY_ROUTING_KEY: ""
-      LOG_LEVEL: "${LOG_LEVEL:-info}"
+      LOG_LEVEL: "${LOG_LEVEL:-debug}"
       RAFT_PEERS: "coordinator-1:8000,coordinator-2:8000,coordinator-3:8000"
       KAFKA_ENABLE: "true"
       KAFKA_ENABLE_REAL: "true"
@@ -33,8 +42,9 @@ services:
       - "9000:8000"
       - "9050:8050"
     volumes:
-      - refactor_data:/data
+      - ./checkpoint/coordinator-1:/data
     restart: unless-stopped
+    logging: *default-logging
     depends_on:
       - zookeeper
       - kafka
@@ -58,6 +68,8 @@ services:
     ports:
       - "9003:8000"
       - "9053:8050"
+    volumes:
+      - ./checkpoint/coordinator-2:/data
     environment:
       PYTHONUNBUFFERED: "1"
       ROLE: coordinator
@@ -67,7 +79,7 @@ services:
       WINDOW_SIZE_S: "5.0"
       CHECKPOINT_DIR: /data/checkpoint-2
       PAGERDUTY_ROUTING_KEY: ""
-      LOG_LEVEL: "${LOG_LEVEL:-info}"
+      LOG_LEVEL: "${LOG_LEVEL:-debug}"
       RAFT_PEERS: "coordinator-1:8000,coordinator-2:8000,coordinator-3:8000"
       KAFKA_ENABLE: "true"
       KAFKA_ENABLE_REAL: "true"
@@ -81,6 +93,8 @@ services:
     ports:
       - "9004:8000"
       - "9054:8050"
+    volumes:
+      - ./checkpoint/coordinator-3:/data
     environment:
       PYTHONUNBUFFERED: "1"
       ROLE: coordinator
@@ -90,7 +104,7 @@ services:
       WINDOW_SIZE_S: "5.0"
       CHECKPOINT_DIR: /data/checkpoint-3
       PAGERDUTY_ROUTING_KEY: ""
-      LOG_LEVEL: "${LOG_LEVEL:-info}"
+      LOG_LEVEL: "${LOG_LEVEL:-debug}"
       RAFT_PEERS: "coordinator-1:8000,coordinator-2:8000,coordinator-3:8000"
       KAFKA_ENABLE: "true"
       KAFKA_ENABLE_REAL: "true"
@@ -110,6 +124,7 @@ services:
     environment:
       PYTHONUNBUFFERED: "1"
       CHECKPOINT_DIR: /data/checkpoint-aggregator
+      LOG_LEVEL: "${LOG_LEVEL:-debug}"
       ROLE: aggregator
       MODE: heuristic
       WINDOW_SIZE_S: "5.0"
@@ -123,9 +138,10 @@ services:
     ports:
       - "9007:8000"
     volumes:
-      - refactor_data:/data
+      - ./checkpoint/aggregator:/data
     profiles: ["heuristic", "hybrid"]
     restart: unless-stopped
+    logging: *default-logging
     depends_on:
       - zookeeper
       - kafka
@@ -153,6 +169,7 @@ services:
     environment:
       PYTHONUNBUFFERED: "1"
       CHECKPOINT_DIR: /data/checkpoint-aggregator-standby
+      LOG_LEVEL: "${LOG_LEVEL:-debug}"
       ROLE: aggregator
       MODE: heuristic
       WINDOW_SIZE_S: "5.0"
@@ -167,10 +184,11 @@ services:
     ports:
       - "9005:8000"
     volumes:
-      - refactor_data:/data
+      - ./checkpoint/aggregator-standby:/data
       - aggregator_lock:/lock
     profiles: ["heuristic", "hybrid"]
     restart: unless-stopped
+    logging: *default-logging
     depends_on:
       - zookeeper
       - kafka
@@ -207,7 +225,7 @@ services:
       AGGREGATOR_STANDBY_URL: http://aggregator-standby:8000
       PARTITIONS: "0,1,2"
       WINDOW_SIZE_S: "5.0"
-      LOG_LEVEL: "${LOG_LEVEL:-info}"
+      LOG_LEVEL: "${LOG_LEVEL:-debug}"
       PUNCTUATION_MODE: "${PUNCTUATION_MODE:-data-driven}"
       HEURISTIC_ALPHA: "${HEURISTIC_ALPHA:-0.01}"
       HEURISTIC_P_NORMAL: "${HEURISTIC_P_NORMAL:-0.99}"
@@ -227,8 +245,9 @@ services:
     ports:
       - "9101:8000"
     volumes:
-      - refactor_data_node0:/data
+      - ./checkpoint/shared:/data
     restart: unless-stopped
+    logging: *default-logging
     depends_on:
       kafka:
         condition: service_started
@@ -254,7 +273,7 @@ services:
       AGGREGATOR_STANDBY_URL: http://aggregator-standby:8000
       PARTITIONS: "3,4,5"
       WINDOW_SIZE_S: "5.0"
-      LOG_LEVEL: "${LOG_LEVEL:-info}"
+      LOG_LEVEL: "${LOG_LEVEL:-debug}"
       PUNCTUATION_MODE: "${PUNCTUATION_MODE:-data-driven}"
       HEURISTIC_ALPHA: "${HEURISTIC_ALPHA:-0.01}"
       HEURISTIC_P_NORMAL: "${HEURISTIC_P_NORMAL:-0.99}"
@@ -274,7 +293,7 @@ services:
     ports:
       - "9102:8000"
     volumes:
-      - refactor_data_node1:/data
+      - ./checkpoint/shared:/data
 
   node2:
     <<: *node-base
@@ -289,7 +308,7 @@ services:
       AGGREGATOR_STANDBY_URL: http://aggregator-standby:8000
       PARTITIONS: "6,7,8"
       WINDOW_SIZE_S: "5.0"
-      LOG_LEVEL: "${LOG_LEVEL:-info}"
+      LOG_LEVEL: "${LOG_LEVEL:-debug}"
       PUNCTUATION_MODE: "${PUNCTUATION_MODE:-data-driven}"
       HEURISTIC_ALPHA: "${HEURISTIC_ALPHA:-0.01}"
       HEURISTIC_P_NORMAL: "${HEURISTIC_P_NORMAL:-0.99}"
@@ -309,7 +328,7 @@ services:
     ports:
       - "9103:8000"
     volumes:
-      - refactor_data_node2:/data
+      - ./checkpoint/shared:/data
 
   node3:
     <<: *node-base
@@ -324,7 +343,7 @@ services:
       AGGREGATOR_STANDBY_URL: http://aggregator-standby:8000
       PARTITIONS: "9,10,11"
       WINDOW_SIZE_S: "5.0"
-      LOG_LEVEL: "${LOG_LEVEL:-info}"
+      LOG_LEVEL: "${LOG_LEVEL:-debug}"
       PUNCTUATION_MODE: "${PUNCTUATION_MODE:-data-driven}"
       HEURISTIC_ALPHA: "${HEURISTIC_ALPHA:-0.01}"
       HEURISTIC_P_NORMAL: "${HEURISTIC_P_NORMAL:-0.99}"
@@ -344,7 +363,7 @@ services:
     ports:
       - "9104:8000"
     volumes:
-      - refactor_data_node3:/data
+      - ./checkpoint/shared:/data
 
   # ── Ingestor ──────────────────────────────────────────────────────
 
@@ -363,7 +382,7 @@ services:
       COORDINATOR_URL: http://coordinator-1:8000
       AGGREGATOR_URL: http://aggregator:8000
       MODE: "${MODE:-strict}"
-      LOG_LEVEL: "${LOG_LEVEL:-info}"
+      LOG_LEVEL: "${LOG_LEVEL:-debug}"
       PUNCTUATION_MODE: "${PUNCTUATION_MODE:-data-driven}"
       INGESTOR_SLEEP_S: "${INGESTOR_SLEEP_S:-0.0}"
       KAFKA_ENABLE: "true"
@@ -374,6 +393,7 @@ services:
     volumes:
       - ../dataset:/data:ro
     restart: unless-stopped
+    logging: *default-logging
     depends_on:
       - node0
       - node1
@@ -407,6 +427,7 @@ services:
       ZOOKEEPER_CLIENT_PORT: 2181
       ZOOKEEPER_TICK_TIME: 2000
     restart: unless-stopped
+    logging: *default-logging
 
   # ── Kafka ─────────────────────────────────────────────────────────
 
@@ -428,6 +449,7 @@ services:
       KAFKA_NUM_PARTITIONS: 12
       KAFKA_OFFSETS_TOPIC_REPLICATION_FACTOR: 1
     restart: unless-stopped
+    logging: *default-logging
 
   # ── Prometheus ────────────────────────────────────────────────────
 
@@ -446,6 +468,7 @@ services:
       - ./prometheus-rules.yml:/etc/prometheus/prometheus-rules.yml:ro
       - prometheus_data:/prometheus
     restart: unless-stopped
+    logging: *default-logging
     depends_on:
       - kafka
 
@@ -464,6 +487,7 @@ services:
       - grafana_data:/var/lib/grafana
       - ./grafana-dashboard.json:/etc/grafana/provisioning/dashboards/csdlpt.json:ro
     restart: unless-stopped
+    logging: *default-logging
     depends_on:
       - prometheus
 
@@ -483,6 +507,7 @@ services:
     volumes:
       - minio_data:/data
     restart: unless-stopped
+    logging: *default-logging
     healthcheck:
       test: ["CMD", "bash", "-c", "echo > /dev/tcp/localhost/9000 2>/dev/null"]
       interval: 5s
@@ -492,11 +517,6 @@ services:
 # ── Volumes ─────────────────────────────────────────────────────────
 
 volumes:
-  refactor_data:
-  refactor_data_node0:
-  refactor_data_node1:
-  refactor_data_node2:
-  refactor_data_node3:
   prometheus_data:
   grafana_data:
   minio_data:

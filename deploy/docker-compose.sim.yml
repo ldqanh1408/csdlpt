@@ -6,6 +6,14 @@
 #   Heuristic mode: docker compose -f docker-compose.sim.yml --profile heuristic up --build
 #   Stop:           docker compose -f docker-compose.sim.yml --profile <mode> down -v
 
+# Shared logging: bounded, rotated json-file logs so verbose (debug) output is
+# retained for testing without growing unbounded.
+x-logging: &default-logging
+  driver: "json-file"
+  options:
+    max-size: "20m"
+    max-file: "5"
+
 services:
   # ================================================================
   #  STRICT MODE - Punctuation-based watermark (0% data loss target)
@@ -20,6 +28,7 @@ services:
     command: ["python3", "-m", "refactor.run", "--role", "coordinator", "--mode", "strict"]
     environment:
       PYTHONUNBUFFERED: "1"
+      LOG_LEVEL: "${LOG_LEVEL:-debug}"
       MODE: strict
       PORT: "8000"
       DELTA_BASE_S: "10.0"
@@ -33,6 +42,7 @@ services:
       - sim_strict_coord:/data
     profiles: ["strict"]
     restart: unless-stopped
+    logging: *default-logging
     healthcheck:
       test: ["CMD", "curl", "-sf", "http://localhost:8000/health"]
       interval: 3s
@@ -48,6 +58,7 @@ services:
     command: ["python3", "-m", "refactor.run", "--role", "worker", "--mode", "strict"]
     environment:
       PYTHONUNBUFFERED: "1"
+      LOG_LEVEL: "${LOG_LEVEL:-debug}"
       MODE: strict
       PORT: "8000"
       NODE_ID: "0"
@@ -65,6 +76,7 @@ services:
       - sim_strict_worker:/data
     profiles: ["strict"]
     restart: unless-stopped
+    logging: *default-logging
     depends_on:
       strict-coordinator:
         condition: service_healthy
@@ -83,6 +95,7 @@ services:
     command: ["python3", "-m", "refactor.run", "--role", "ingestor", "--mode", "strict"]
     environment:
       PYTHONUNBUFFERED: "1"
+      LOG_LEVEL: "${LOG_LEVEL:-debug}"
       MODE: strict
       NODE_HOSTS: "strict-worker:8000"
       COORDINATOR_URL: http://strict-coordinator:8000
@@ -95,6 +108,7 @@ services:
       - ../dataset:/data:ro
     profiles: ["strict"]
     restart: unless-stopped
+    logging: *default-logging
     depends_on:
       strict-worker:
         condition: service_healthy
@@ -112,6 +126,7 @@ services:
     command: ["python3", "-m", "refactor.run", "--role", "aggregator", "--mode", "heuristic"]
     environment:
       PYTHONUNBUFFERED: "1"
+      LOG_LEVEL: "${LOG_LEVEL:-debug}"
       MODE: heuristic
       PORT: "8000"
       CHECKPOINT_DIR: /data/checkpoint
@@ -122,6 +137,7 @@ services:
       - sim_heuristic_agg:/data
     profiles: ["heuristic"]
     restart: unless-stopped
+    logging: *default-logging
     healthcheck:
       test: ["CMD", "curl", "-sf", "http://localhost:8000/health"]
       interval: 3s
@@ -137,6 +153,7 @@ services:
     command: ["python3", "-m", "refactor.run", "--role", "worker", "--mode", "heuristic"]
     environment:
       PYTHONUNBUFFERED: "1"
+      LOG_LEVEL: "${LOG_LEVEL:-debug}"
       MODE: heuristic
       PORT: "8000"
       NODE_ID: "0"
@@ -152,6 +169,7 @@ services:
       - sim_heuristic_worker:/data
     profiles: ["heuristic"]
     restart: unless-stopped
+    logging: *default-logging
     depends_on:
       heuristic-aggregator:
         condition: service_healthy
@@ -170,6 +188,7 @@ services:
     command: ["python3", "-m", "refactor.run", "--role", "ingestor", "--mode", "heuristic"]
     environment:
       PYTHONUNBUFFERED: "1"
+      LOG_LEVEL: "${LOG_LEVEL:-debug}"
       MODE: heuristic
       NODE_HOSTS: "heuristic-worker:8000"
       AGGREGATOR_URL: http://heuristic-aggregator:8000
@@ -182,6 +201,7 @@ services:
       - ../dataset:/data:ro
     profiles: ["heuristic"]
     restart: unless-stopped
+    logging: *default-logging
     depends_on:
       heuristic-worker:
         condition: service_healthy

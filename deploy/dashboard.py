@@ -757,9 +757,7 @@ def render_sidebar():
             s.update(label="Stopped", state="complete")
 
     st.sidebar.markdown("---")
-    st.session_state.auto_refresh = st.sidebar.toggle(
-        "Auto-refresh (3s)", value=st.session_state.auto_refresh,
-    )
+    st.sidebar.caption("Metrics update on demand — use the **Refresh data** button on the Dashboard / Sim Stats tabs.")
 
     # Service status
     if st.session_state.running:
@@ -1473,11 +1471,46 @@ def check_node_status(service: str, port: int = None) -> str:
     return "stopped"
 
 
+def _container_id(service: str) -> str:
+    """Return the container id for a compose service, or '' if not found."""
+    cmd = _compose_base() + ["ps", "-aq", service]
+    try:
+        r = subprocess.run(cmd, capture_output=True, text=True, encoding="utf-8",
+                           errors="replace", cwd=str(DEPLOY_DIR), timeout=5)
+        if r.returncode == 0:
+            return r.stdout.strip().split("\n")[0].strip()
+    except Exception:
+        pass
+    return ""
+
+
+def _set_restart_policy(service: str, policy: str) -> None:
+    """Override a container's restart policy (e.g. 'no' or 'unless-stopped').
+
+    Required for fault injection: the compose services declare
+    `restart: unless-stopped`, so a plain `docker kill` would be auto-revived by
+    the daemon within ~1s. Setting the policy to 'no' before killing keeps the
+    node down until it is manually restarted.
+    """
+    cid = _container_id(service)
+    if not cid:
+        return
+    try:
+        subprocess.run(["docker", "update", "--restart", policy, cid],
+                       capture_output=True, text=True, encoding="utf-8",
+                       errors="replace", timeout=15)
+    except Exception:
+        pass
+
+
 def compose_start_service(service: str) -> tuple[bool, str]:
     cmd = _compose_base() + ["start", service]
     try:
         r = subprocess.run(cmd, capture_output=True, text=True, encoding="utf-8",
                            errors="replace", cwd=str(DEPLOY_DIR), timeout=30)
+        # Restore auto-restart so the node behaves normally after a manual restart.
+        if r.returncode == 0:
+            _set_restart_policy(service, "unless-stopped")
         return r.returncode == 0, r.stdout + r.stderr
     except Exception as e:
         return False, str(e)
@@ -1494,6 +1527,9 @@ def compose_stop_service(service: str) -> tuple[bool, str]:
 
 
 def compose_kill_service(service: str) -> tuple[bool, str]:
+    # Disable auto-restart first; otherwise `restart: unless-stopped` makes the
+    # daemon immediately revive the killed container, defeating fault injection.
+    _set_restart_policy(service, "no")
     cmd = _compose_base() + ["kill", service]
     try:
         r = subprocess.run(cmd, capture_output=True, text=True, encoding="utf-8",
@@ -1503,52 +1539,164 @@ def compose_kill_service(service: str) -> tuple[bool, str]:
         return False, str(e)
 
 
+def _node_control_groups(mode: str) -> list[tuple[str, list[dict]]]:
+    """Single source of truth for the controllable services in the current
+    deploy/watermark mode. Returns [(group_header, [node, ...]), ...] where each
+    node is {service, display, port, role}."""
+    def n(service, display, port, role):
+        return {"service": service, "display": display, "port": port, "role": role}
+
+    if _is_sim():
+        if mode == "strict":
+            return [("Simulation Cluster", [
+                n("strict-coordinator", "Strict Coordinator", 9000, "Coordinator / Raft Leader"),
+                n("strict-worker", "Strict Worker", 9101, "Worker / Partitions 0..11"),
+                n("strict-ingestor", "Strict Ingestor", 9200, "Ingestor"),
+            ])]
+        return [("Simulation Cluster", [
+            n("heuristic-aggregator", "Heuristic Aggregator", 9017, "Aggregator"),
+            n("heuristic-worker", "Heuristic Worker", 9111, "Worker / Partitions 0..11"),
+            n("heuristic-ingestor", "Heuristic Ingestor", 9210, "Ingestor"),
+        ])]
+
+    if mode == "strict":
+        core = ("Core Cluster", [
+            n("coordinator-1", "Coordinator 1", 9000, "Coordinator Leader / Term"),
+            n("coordinator-2", "Coordinator 2", 9003, "Coordinator Peer"),
+            n("coordinator-3", "Coordinator 3", 9004, "Coordinator Peer"),
+        ])
+    else:
+        core = ("Core Cluster", [
+            n("aggregator", "Aggregator Primary", 9007, "Aggregator Leader"),
+            n("aggregator-standby", "Aggregator Standby", 9005, "Aggregator Standby"),
+        ])
+    return [
+        core,
+        ("Workers", [
+            n("node0", "Node 0 (Worker)", 9101, "Worker (Partitions 0,1,2)"),
+            n("node1", "Node 1 (Worker)", 9102, "Worker (Partitions 3,4,5)"),
+            n("node2", "Node 2 (Worker)", 9103, "Worker (Partitions 6,7,8)"),
+            n("node3", "Node 3 (Worker)", 9104, "Worker (Partitions 9,10,11)"),
+        ]),
+        ("Ingestion Layer", [
+            n("ingestor", "Ingestor Service", None, "Dataset Ingestion"),
+        ]),
+        ("Infrastructure", [
+            n("kafka", "Kafka Broker", 29092, "Message Queue"),
+            n("zookeeper", "ZooKeeper", 2181, "Coordination Ensemble"),
+            n("prometheus", "Prometheus", 9090, "Metrics Server"),
+            n("grafana", "Grafana", 3000, "Visualization Server"),
+            n("minio", "MinIO Object Storage", 9002, "Tiered Storage Store"),
+        ]),
+    ]
+
+
+# action -> (compose fn, gerund label, past-tense label, icon)
+_NODE_ACTIONS = {
+    "kill": (compose_kill_service, "Killing", "Killed", "💥"),
+    "start": (compose_start_service, "Starting", "Started", "🟢"),
+    "stop": (compose_stop_service, "Stopping", "Stopped", "🔴"),
+}
+
+
+def _exec_node_action(action: str, service: str, display: str):
+    """Run a kill/start/stop against a service and refresh the page on success."""
+    print(f"[dashboard] EXECUTING NODE ACTION: action={action} service={service} display={display}", flush=True)
+    fn, gerund, past, icon = _NODE_ACTIONS[action]
+    with st.spinner(f"{gerund} {display}..."):
+        ok, err = fn(service)
+    if ok:
+        print(f"[dashboard] NODE ACTION SUCCESS: {past} {display}!", flush=True)
+        st.toast(f"{past} {display}!", icon=icon)
+        time.sleep(1)
+        st.rerun()
+    else:
+        print(f"[dashboard] NODE ACTION FAILED: {action} {display}! Error: {err}", flush=True)
+        st.error(f"Failed to {action} {display}: {err}")
+
+
+def render_quick_fault_injection(mode: str):
+    """Prominent one-click Kill / Recover panel for the selected node."""
+    flat = [node for _, nodes in _node_control_groups(mode) for node in nodes]
+    labels = [f"{x['display']}  ·  {x['role']}" for x in flat]
+
+    st.markdown("#### ⚡ Quick Fault Injection")
+    sel = st.selectbox("Target node", labels, key="nc_quick_sel")
+    target = flat[labels.index(sel)]
+    status = check_node_status(target["service"], target["port"])
+
+    badge = "🟢 :green[Running]" if status == "running" else (
+        "🔴 :red[Stopped]" if status == "stopped" else "⚪ :gray[Unknown]")
+    st.markdown(f"**{target['display']}** — {badge}"
+                + (f"  (:{target['port']})" if target["port"] else ""))
+
+    b_kill, b_recover, b_refresh = st.columns(3)
+    if b_kill.button("💥 Kill node", key="nc_quick_kill", type="primary",
+                     disabled=(status != "running"), use_container_width=True):
+        _exec_node_action("kill", target["service"], target["display"])
+    if b_recover.button("♻️ Recover node", key="nc_quick_recover",
+                        disabled=(status == "running"), use_container_width=True):
+        _exec_node_action("start", target["service"], target["display"])
+    if b_refresh.button("🔄 Refresh status", key="nc_quick_refresh", use_container_width=True):
+        st.rerun()
+
+    st.caption("Kill a worker → watch the Dashboard tab react → Recover it. "
+               "Killed nodes stay down (restart policy disabled) until you recover them.")
+
+
 def render_node_control_row(service_name: str, display_name: str, port: int = None, role: str = ""):
-    status = check_node_status(service_name, port)
+    # Only probe Docker for live status when the cluster is up; otherwise skip
+    # the (slow) subprocess calls and show the controls in a disabled preview.
+    controls_enabled = bool(st.session_state.get("running", False))
+    status = check_node_status(service_name, port) if controls_enabled else "unknown"
 
     col1, col2, col3, col4, col5, col6 = st.columns([2, 1.5, 2.5, 1, 1, 1])
     col1.markdown(f"**{display_name}**")
 
     if status == "running":
         col2.markdown("🟢 :green[Running]")
-    else:
+    elif status == "stopped":
         col2.markdown("🔴 :red[Stopped]")
+    else:
+        col2.markdown("⚪ :gray[—]")
 
     col3.caption(f"{role} (:{port})" if port else role)
 
-    start_btn = col4.button("Start", key=f"start_{service_name}", disabled=(status == "running"), use_container_width=True)
-    stop_btn = col5.button("Stop", key=f"stop_{service_name}", disabled=(status == "stopped"), use_container_width=True)
-    kill_btn = col6.button("Kill", key=f"kill_{service_name}", disabled=(status == "stopped"), type="secondary", use_container_width=True)
+    start_btn = col4.button("Start", key=f"start_{service_name}", disabled=(not controls_enabled) or (status == "running"), use_container_width=True)
+    stop_btn = col5.button("Stop", key=f"stop_{service_name}", disabled=(not controls_enabled) or (status == "stopped"), use_container_width=True)
+    kill_btn = col6.button("Kill", key=f"kill_{service_name}", disabled=(not controls_enabled) or (status == "stopped"), type="secondary", use_container_width=True)
 
     if start_btn:
-        with st.spinner(f"Starting {service_name}..."):
-            ok, err = compose_start_service(service_name)
-            if ok:
-                st.toast(f"Started {display_name} successfully!", icon="🟢")
-                time.sleep(1)
-                st.rerun()
-            else:
-                st.error(f"Failed to start {display_name}: {err}")
-
+        _exec_node_action("start", service_name, display_name)
     if stop_btn:
-        with st.spinner(f"Stopping {service_name}..."):
-            ok, err = compose_stop_service(service_name)
-            if ok:
-                st.toast(f"Stopped {display_name} successfully!", icon="🔴")
-                time.sleep(1)
-                st.rerun()
-            else:
-                st.error(f"Failed to stop {display_name}: {err}")
-
+        _exec_node_action("stop", service_name, display_name)
     if kill_btn:
-        with st.spinner(f"Killing {service_name}..."):
-            ok, err = compose_kill_service(service_name)
-            if ok:
-                st.toast(f"Killed {display_name} successfully!", icon="💥")
-                time.sleep(1)
-                st.rerun()
-            else:
-                st.error(f"Failed to kill {display_name}: {err}")
+        _exec_node_action("kill", service_name, display_name)
+
+
+def render_failover_events_section():
+    metrics = st.session_state.get("last_metrics") or {}
+    coord = metrics.get("coordinator", {})
+    failover = coord.get("failover", {})
+    events = failover.get("events", [])
+    
+    st.markdown("#### 📜 Recent Coordination & Failover Events")
+    if not events:
+        st.info("No failover events recorded yet.")
+        return
+        
+    event_rows = []
+    for ev in reversed(events):
+        t_str = datetime.fromtimestamp(ev["time"]).strftime("%H:%M:%S")
+        parts_str = ", ".join(str(p) for p in ev["partitions"]) if ev["partitions"] else "—"
+        event_rows.append({
+            "Time": t_str,
+            "Event": ev["event"].upper(),
+            "Worker": ev["worker"],
+            "Partitions": parts_str,
+            "Details": ev["details"],
+        })
+    st.dataframe(pd.DataFrame(event_rows), use_container_width=True, hide_index=True)
 
 
 def render_node_control(mode: str):
@@ -1556,49 +1704,21 @@ def render_node_control(mode: str):
     st.markdown("Abruptly kill, gracefully stop, or start individual system services to verify fault-tolerance.")
 
     if not st.session_state.running:
-        st.info("Start the system from the sidebar to enable node control.")
-        return
-
-    is_sim = _is_sim()
-
-    if is_sim:
-        st.markdown("#### Simulation Cluster")
-        if mode == "strict":
-            render_node_control_row("strict-coordinator", "Strict Coordinator", 9000, "Coordinator / Raft Leader")
-            render_node_control_row("strict-worker", "Strict Worker", 9101, "Worker / Partitions 0..11")
-            render_node_control_row("strict-ingestor", "Strict Ingestor", 9200, "Ingestor")
-        else:
-            render_node_control_row("heuristic-aggregator", "Heuristic Aggregator", 9017, "Aggregator")
-            render_node_control_row("heuristic-worker", "Heuristic Worker", 9111, "Worker / Partitions 0..11")
-            render_node_control_row("heuristic-ingestor", "Heuristic Ingestor", 9210, "Ingestor")
+        st.warning("⚠️ Press **Start** in the sidebar to launch the cluster first. "
+                   "The Kill / Recover buttons activate once containers are running.")
     else:
-        st.markdown("#### Core Cluster")
-        if mode == "strict":
-            render_node_control_row("coordinator-1", "Coordinator 1", 9000, "Coordinator Leader / Term")
-            render_node_control_row("coordinator-2", "Coordinator 2", 9003, "Coordinator Peer")
-            render_node_control_row("coordinator-3", "Coordinator 3", 9004, "Coordinator Peer")
-        else:
-            render_node_control_row("aggregator", "Aggregator Primary", 9007, "Aggregator Leader")
-            render_node_control_row("aggregator-standby", "Aggregator Standby", 9005, "Aggregator Standby")
+        render_quick_fault_injection(mode)
+        st.divider()
+        render_failover_events_section()
+        st.divider()
+        st.caption("Status is read on demand (this tab does not auto-refresh, so buttons stay stable).")
 
-        st.markdown("---")
-        st.markdown("#### Workers")
-        render_node_control_row("node0", "Node 0 (Worker)", 9101, "Worker (Partitions 0,1,2)")
-        render_node_control_row("node1", "Node 1 (Worker)", 9102, "Worker (Partitions 3,4,5)")
-        render_node_control_row("node2", "Node 2 (Worker)", 9103, "Worker (Partitions 6,7,8)")
-        render_node_control_row("node3", "Node 3 (Worker)", 9104, "Worker (Partitions 9,10,11)")
-
-        st.markdown("---")
-        st.markdown("#### Ingestion Layer")
-        render_node_control_row("ingestor", "Ingestor Service", None, "Dataset Ingestion")
-
-        st.markdown("---")
-        st.markdown("#### Infrastructure")
-        render_node_control_row("kafka", "Kafka Broker", 29092, "Message Queue")
-        render_node_control_row("zookeeper", "ZooKeeper", 2181, "Coordination Ensemble")
-        render_node_control_row("prometheus", "Prometheus", 9090, "Metrics Server")
-        render_node_control_row("grafana", "Grafana", 3000, "Visualization Server")
-        render_node_control_row("minio", "MinIO Object Storage", 9002, "Tiered Storage Store")
+    with st.expander("All services (advanced per-node controls)", expanded=not st.session_state.running):
+        for header, nodes in _node_control_groups(mode):
+            st.markdown(f"#### {header}")
+            for nd in nodes:
+                render_node_control_row(nd["service"], nd["display"], nd["port"], nd["role"])
+            st.markdown("---")
 
 
 # -----------------------------------------------------------------------------------------------------------
@@ -1632,16 +1752,56 @@ def main():
     mode = st.session_state.mode
     is_sim = _is_sim()
 
-    # Determine auto-refresh interval for the fragment
-    run_interval = REFRESH_INTERVAL_S if (st.session_state.running and st.session_state.auto_refresh) else None
+    # No page-level auto-refresh. Each live-metrics tab is an isolated fragment
+    # with its own "Refresh data" button, so a refresh re-renders ONLY that data
+    # block — never the sidebar, tabs, or control panels.
+    def _render_refresh_bar(key: str):
+        c1, c2 = st.columns([1, 3])
+        # The button click triggers a fragment-scoped rerun; no handler needed —
+        # _refresh_metrics() below re-fetches when the fragment re-runs.
+        c1.button("🔄 Refresh data", key=key, use_container_width=True, type="primary")
+        c2.caption(f"Last updated {datetime.now().strftime('%H:%M:%S')} · click **Refresh data** to update")
 
-    @st.fragment(run_every=run_interval)
-    def render_content_fragment(mode: str, is_sim: bool):
-        # Fetch live metrics
+    def _refresh_metrics() -> dict:
+        """Fetch live metrics once and append a history sample. Returns metrics."""
         metrics = {}
         if st.session_state.running:
             metrics = fetch_all_metrics(mode)
             st.session_state.last_metrics = metrics
+            
+            # Coordination tracking: detect changes and log to console
+            if metrics.get("coordinator"):
+                coord_data = metrics["coordinator"]
+                leader = metrics.get("coordinator_name")
+                term = coord_data.get("term", 0)
+                
+                # Check leader change
+                prev_leader = st.session_state.get("last_leader")
+                if prev_leader is not None and prev_leader != leader:
+                    print(f"[dashboard] COORDINATOR LEADER CHANGE DETECTED: {prev_leader} -> {leader} (term={term})", flush=True)
+                st.session_state.last_leader = leader
+
+                # Check active workers change
+                active_workers = coord_data.get("active_workers", 0)
+                prev_active = st.session_state.get("last_active_workers")
+                if prev_active is not None and prev_active != active_workers:
+                    print(f"[dashboard] ACTIVE WORKERS COUNT CHANGED: {prev_active} -> {active_workers}", flush=True)
+                st.session_state.last_active_workers = active_workers
+
+                # Check partition reassignments (rebalancing)
+                if "recovery_info" in coord_data:
+                    recovery_info = coord_data["recovery_info"]
+                    prev_recovery_info = st.session_state.get("last_recovery_info", {})
+                    if recovery_info != prev_recovery_info:
+                        for pid_str, info in recovery_info.items():
+                            pid = int(pid_str)
+                            prev_info = prev_recovery_info.get(pid_str)
+                            if prev_info != info:
+                                print(f"[dashboard] COORDINATION PARTITION REASSIGNMENT: "
+                                      f"partition={pid} original_owner={info.get('original_owner')} "
+                                      f"current_owner={info.get('current_owner')} "
+                                      f"reassigned_at={format_timestamp(info.get('reassigned_at'))}", flush=True)
+                        st.session_state.last_recovery_info = recovery_info
 
             if metrics.get("workers"):
                 agg = aggregate_worker_metrics(metrics)
@@ -1660,20 +1820,32 @@ def main():
                 })
                 if len(st.session_state.metrics_history) > MAX_HISTORY:
                     st.session_state.metrics_history = st.session_state.metrics_history[-MAX_HISTORY:]
+        return metrics
 
-        # Define tabs list dynamically: Dashboard, Sim Stats (if is_sim), Node Control (if running), Logs, Compare, Raw JSON
-        tab_names = ["Dashboard"]
-        if is_sim:
-            tab_names.append("Sim Stats")
-        if st.session_state.running:
-            tab_names.append("Node Control")
-        tab_names.extend(["Logs", "Compare", "Raw JSON"])
+    # Build the tab bar once. Node Control sits right after Dashboard and carries
+    # a distinct icon so the kill/recover controls are easy to find.
+    TAB_DASH = "📊 Dashboard"
+    TAB_NODE = "🛑 Node Control · Kill / Recover"
+    TAB_SIM = "🧪 Sim Stats"
+    TAB_LOGS = "📜 Logs"
+    TAB_CMP = "⚖️ Compare"
+    TAB_RAW = "🧩 Raw JSON"
 
-        tabs = st.tabs(tab_names)
-        current_tab_idx = 0
+    tab_names = [TAB_DASH, TAB_NODE]
+    if is_sim:
+        tab_names.append(TAB_SIM)
+    tab_names.extend([TAB_LOGS, TAB_CMP, TAB_RAW])
+    tabs = st.tabs(tab_names)
+    tab_idx = {name: i for i, name in enumerate(tab_names)}
 
-        # Tab: Dashboard
-        with tabs[current_tab_idx]:
+    # Tab: Dashboard — isolated fragment; refreshes only on the Refresh button.
+    with tabs[tab_idx[TAB_DASH]]:
+        @st.fragment
+        def _dashboard_fragment():
+            if st.session_state.running:
+                st.info("🛑 To **kill / recover a node**, open the **Node Control · Kill / Recover** tab above.")
+                _render_refresh_bar("dash_refresh")
+            metrics = _refresh_metrics()
             if st.session_state.running and metrics.get("workers"):
                 render_dashboard(mode, metrics)
             elif st.session_state.running:
@@ -1691,7 +1863,8 @@ def main():
 2. Choose a **dataset** CSV file
 3. Click **Start** to build & launch the simulation containers
 4. Watch live metrics on the Dashboard tab, dataset replay progress on Sim Stats
-5. Click **Stop** when done — results are saved for comparison
+5. **Kill / recover any node** in the **🛑 Node Control · Kill / Recover** tab to test fault-tolerance
+6. Click **Stop** when done — results are saved for comparison
 
 **Modes:**
 - **Strict**: Punctuation-based watermark via coordinator. 0% data loss, ~15s latency.
@@ -1708,8 +1881,9 @@ def main():
 2. Choose a **dataset** CSV file
 3. Configure **Log Level** and **Punctuation Mode** (see below)
 4. Click **Start** to build & launch all Docker containers
-5. Watch aggregated metrics from all 4 workers auto-refresh
-6. Click **Stop** when done — results are saved for comparison
+5. Watch aggregated metrics from all 4 workers (click **Refresh data** to update)
+6. **Kill / recover any node** in the **🛑 Node Control · Kill / Recover** tab to test fault-tolerance
+7. Click **Stop** when done — results are saved for comparison
 
 **Pipeline Settings:**
 - **Log Level**: `info` (5s summary) | `debug`/`trace` (per-event flow through each container)
@@ -1724,41 +1898,39 @@ def main():
 - [Prometheus](http://localhost:9090) — Raw metrics queries
 - [MinIO Console](http://localhost:9001) — Tiered storage (minioadmin/minioadmin)
 """)
-        current_tab_idx += 1
+        _dashboard_fragment()
 
-        # Tab: Sim Stats
-        if is_sim:
-            with tabs[current_tab_idx]:
+    # Tab: Sim Stats — isolated fragment; refreshes only on the Refresh button.
+    if is_sim:
+        with tabs[tab_idx[TAB_SIM]]:
+            @st.fragment
+            def _sim_fragment():
+                if st.session_state.running:
+                    _render_refresh_bar("sim_refresh")
+                metrics = _refresh_metrics() if st.session_state.running else {}
                 if st.session_state.running and metrics.get("workers"):
                     render_sim_stats(mode, metrics)
                 elif st.session_state.running:
                     st.info("Waiting for partition data...")
                 else:
                     st.info("Start the simulation to see replay statistics.")
-            current_tab_idx += 1
+            _sim_fragment()
 
-        # Tab: Node Control
-        if st.session_state.running:
-            with tabs[current_tab_idx]:
-                render_node_control(mode)
-            current_tab_idx += 1
+    # Tab: Node Control — static so the Kill / Stop / Start buttons stay stable.
+    with tabs[tab_idx[TAB_NODE]]:
+        render_node_control(mode)
 
-        # Tab: Logs
-        with tabs[current_tab_idx]:
-            render_logs()
-        current_tab_idx += 1
+    # Tab: Logs — static (has its own manual refresh button).
+    with tabs[tab_idx[TAB_LOGS]]:
+        render_logs()
 
-        # Tab: Compare
-        with tabs[current_tab_idx]:
-            render_comparison()
-        current_tab_idx += 1
+    # Tab: Compare — static.
+    with tabs[tab_idx[TAB_CMP]]:
+        render_comparison()
 
-        # Tab: Raw JSON
-        with tabs[current_tab_idx]:
-            render_raw(metrics)
-
-    # Call the fragment rendering
-    render_content_fragment(mode, is_sim)
+    # Tab: Raw JSON — static snapshot of the last fetched metrics.
+    with tabs[tab_idx[TAB_RAW]]:
+        render_raw(st.session_state.get("last_metrics") or {})
 
 
 if __name__ == "__main__":

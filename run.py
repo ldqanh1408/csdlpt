@@ -961,6 +961,21 @@ def run_coordinator(args):
                 fm._store.flush()
     threading.Thread(target=save_loop, daemon=True).start()
 
+    # Failover monitoring loop: proactively detect worker failures and trigger rebalancing
+    def failover_monitoring_loop():
+        while not stop.is_set():
+            time.sleep(1.0)
+            if fm is not None:
+                try:
+                    failed = fm.detect_failures()
+                    if failed:
+                        reassigned = fm.reassign_failed_partitions()
+                        if reassigned:
+                            print(f"[coordinator] FAILOVER DETECTED: failed={failed} reassigned={reassigned}", file=sys.stderr, flush=True)
+                except Exception as e:
+                    print(f"[coordinator] Failover detection loop error: {e}", file=sys.stderr, flush=True)
+    threading.Thread(target=failover_monitoring_loop, daemon=True).start()
+
     # §11 Proactive 200ms broadcast loop: push W_global + partition state
     def proactive_broadcast_loop():
         while not stop.is_set():
@@ -1503,25 +1518,25 @@ def _run_strict_worker(node_id, parts, args):
         while not stop.is_set():
             time.sleep(0.5)
             state_data = None
-            if grpc is not None:
-                try:
-                    stub = get_grpc_stub(coord_state["url"])
-                    if stub is not None:
-                        reply = stub.GetGlobalState(csdlpt_pb2.StateRequest(worker_id=node_id), timeout=2)
-                        state_data = {
-                            "W_global": reply.W_global,
-                            "term": reply.term,
-                            "partition_types": {str(k): v for k, v in reply.partition_types.items()},
-                        }
-                except Exception:
-                    pass
-            if state_data is None:
-                try:
-                    req = urllib.request.Request(coord_state["url"] + "/state")
-                    with urllib.request.urlopen(req, timeout=2) as resp:
-                        state_data = json.loads(resp.read())
-                except Exception:
-                    pass
+            # Always try HTTP /state first to get the full JSON state including recovery_info
+            try:
+                req = urllib.request.Request(coord_state["url"] + "/state")
+                with urllib.request.urlopen(req, timeout=2) as resp:
+                    state_data = json.loads(resp.read())
+            except Exception:
+                # If HTTP fails, fall back to gRPC if available
+                if grpc is not None:
+                    try:
+                        stub = get_grpc_stub(coord_state["url"])
+                        if stub is not None:
+                            reply = stub.GetGlobalState(csdlpt_pb2.StateRequest(worker_id=node_id), timeout=2)
+                            state_data = {
+                                "W_global": reply.W_global,
+                                "term": reply.term,
+                                "partition_types": {str(k): v for k, v in reply.partition_types.items()},
+                            }
+                    except Exception:
+                        pass
             if state_data is not None:
                 try:
                     W_global = float(state_data.get("W_global", float("-inf")))
@@ -1536,8 +1551,26 @@ def _run_strict_worker(node_id, parts, args):
                                 PartitionEvictionType.RECOVERY
                                 if ptype_str == "recovery"
                                 else PartitionEvictionType.NORMAL
-                            )
+                             )
                             diff_eviction.set_partition_type(pid, ptype)
+
+                    # Dynamic partition reassignment update
+                    if kafka_consumer is not None and hasattr(kafka_consumer, "update_assignment"):
+                        recovery_info = state_data.get("recovery_info", {})
+                        active_pids = set(parts)  # original partitions configured for this node
+                        for pid_str, info in recovery_info.items():
+                            pid = int(pid_str)
+                            curr_owner = info.get("current_owner")
+                            orig_owner = info.get("original_owner")
+                            if curr_owner == node_id:
+                                active_pids.add(pid)
+                            elif orig_owner == node_id:
+                                active_pids.discard(pid)
+                        
+                        current_assigned = set(kafka_consumer.assigned_partitions())
+                        if active_pids != current_assigned:
+                            print(f"[worker-strict:{node_id}] DYNAMIC REBALANCE: partition assignment changed from {sorted(current_assigned)} to {sorted(active_pids)}", file=sys.stderr, flush=True)
+                            kafka_consumer.update_assignment(list(active_pids))
                 except Exception:
                     pass
     threading.Thread(target=wglobal_fetch_loop, daemon=True).start()
@@ -1616,7 +1649,14 @@ def _run_heuristic_worker(node_id, parts, args):
                 continue
             pid = ev.get("partition_id", parts[0])
             if pid not in engines:
-                continue
+                from heuristic.engine import HeuristicWatermarkEngine
+                engines[pid] = HeuristicWatermarkEngine(
+                    partition_id=pid, worker_id=node_id,
+                    db_path=f"{ckpt_dir}/rocksdb-heuristic-{node_id}-p{pid}",
+                    tiered_storage=tiered_storage,
+                    checkpoint_dir=ckpt_dir,
+                )
+                downstream_emitter.schedule_final_reconciliation(stop, engines[pid])
             le = LogEvent(
                 event_id=str(ev.get("event_id", f"ev-{time.time_ns()}")),
                 event_time=float(ev.get("event_time", time.time())),
@@ -1648,7 +1688,7 @@ def _run_heuristic_worker(node_id, parts, args):
             total_non_mono = 0
             total_dlq = 0
             total_sketch = 0
-            for pid, eng in self.engines.items():
+            for pid, eng in list(self.engines.items()):
                 es = eng.summary()
                 result["partitions"][pid] = es
                 total_recv += es.get("total_received", 0)
@@ -1674,18 +1714,18 @@ def _run_heuristic_worker(node_id, parts, args):
 
         def broadcast(self):
             result = {"node_id": self.node_id, "partitions": {}}
-            for pid, eng in self.engines.items():
+            for pid, eng in list(self.engines.items()):
                 result["partitions"][pid] = {"W_h": eng.W_h, "L_eff": eng.L_eff}
             return result
 
         def checkpoint(self):
             """Persist engine metadata to RocksDB across all partitions."""
-            for eng in self.engines.values():
+            for eng in list(self.engines.values()):
                 eng.checkpoint()
 
         def flush(self):
             """Flush open windows and save cold-start baseline for graceful shutdown."""
-            for pid, eng in self.engines.items():
+            for pid, eng in list(self.engines.items()):
                 eng.flush()
                 # Gap 3: save_baseline on graceful shutdown
                 if self.tiered_storage is not None:
@@ -1697,7 +1737,7 @@ def _run_heuristic_worker(node_id, parts, args):
 
         def close(self):
             """Close all engine RocksDB stores."""
-            for eng in self.engines.values():
+            for eng in list(self.engines.values()):
                 eng.close()
 
     proxy = HeuristicWorkerProxy(engines, node_id, tiered_storage=tiered_storage,
@@ -1726,7 +1766,7 @@ def _run_heuristic_worker(node_id, parts, args):
     _start_alerting_thread(mon_mgr, stop)
 
     # Gap 2: 24h FINAL reconciliation — one scheduler per engine partition
-    for pid, eng in engines.items():
+    for pid, eng in list(engines.items()):
         downstream_emitter.schedule_final_reconciliation(stop, eng)
 
     # Kafka consumer poll loop for heuristic worker
@@ -1744,7 +1784,17 @@ def _run_heuristic_worker(node_id, parts, args):
                         continue
                     polled = kafka_consumer.poll(timeout_ms=500, max_messages=100)
                     for pid, msgs in polled.items():
-                        if pid not in engines or bp.is_paused(pid):
+                        if pid not in engines:
+                            # Dynamically initialize heuristic engine
+                            from heuristic.engine import HeuristicWatermarkEngine
+                            engines[pid] = HeuristicWatermarkEngine(
+                                partition_id=pid, worker_id=node_id,
+                                db_path=f"{ckpt_dir}/rocksdb-heuristic-{node_id}-p{pid}",
+                                tiered_storage=tiered_storage,
+                                checkpoint_dir=ckpt_dir,
+                            )
+                            downstream_emitter.schedule_final_reconciliation(stop, engines[pid])
+                        if bp.is_paused(pid):
                             continue
                         eng = engines[pid]
                         for msg in msgs:
@@ -2718,6 +2768,15 @@ ROLE_DISPATCH = {
 
 
 if __name__ == "__main__":
+    # Configure standard logging format and level
+    _log_level = os.environ.get("LOG_LEVEL", "INFO").upper()
+    _numeric_level = getattr(logging, _log_level, logging.INFO)
+    logging.basicConfig(
+        level=_numeric_level,
+        format="%(asctime)s [%(levelname)s] %(name)s: %(message)s",
+        handlers=[logging.StreamHandler(sys.stderr)]
+    )
+
     _args = parse_args()
     _fn = ROLE_DISPATCH.get(_args.role)
     if _fn is None:

@@ -166,6 +166,13 @@ class KafkaConsumer:
     def assigned_partitions(self) -> list[int]:
         return list(self._assigned_partitions)
 
+    def update_assignment(self, pids: list[int]) -> None:
+        self._assigned_partitions = list(pids)
+        topic = self._subscribed_topics[0] if self._subscribed_topics else "events"
+        tps = [TopicPartition(topic, pid) for pid in pids]
+        logger.info("RealKafkaConsumer: dynamically re-assigning partitions=%s", tps)
+        self.consumer.assign(tps)
+
     def close(self) -> None:
         logger.info("RealKafkaConsumer: closing consumer connection")
         try:

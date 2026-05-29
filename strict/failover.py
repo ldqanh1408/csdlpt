@@ -520,8 +520,12 @@ class FailoverManager:
         ``checkpoint_path`` so the receiving worker knows what offset to seek to.
         """
         with self._lock:
+            orig = self._original_owner.get(partition_id, "unknown")
+            curr = self._partition_owner.get(partition_id, "unknown")
             return {
-                "original_worker": self._original_owner.get(partition_id, "unknown"),
+                "original_worker": orig,
+                "original_owner": orig,
+                "current_owner": curr,
                 "last_offset": self._partition_offsets.get(partition_id, 0),
                 "checkpoint_path": f"/data/checkpoint/partition-{partition_id}/checkpoint.json",
             }
@@ -581,6 +585,10 @@ class FailoverManager:
         self._event_log.append(record)
         if len(self._event_log) > 200:
             self._event_log = self._event_log[-100:]
+        msg = f"[failover] EVENT: {event.value} | worker={worker_id} | partitions={partition_ids} | details={details}"
+        logger.warning(msg)
+        import sys
+        print(msg, file=sys.stderr, flush=True)
 
     def recent_events(self, count: int = 20) -> list[dict]:
         with self._lock:

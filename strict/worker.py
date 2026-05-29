@@ -89,7 +89,7 @@ class StrictWorker:
         kafka_audit_topic: str = "audit_results",
     ):
         self.worker_id = worker_id
-        self.partition_ids = partition_ids
+        self.partition_ids = []
         self.engines: dict[int, StrictWatermarkEngine] = {}
         self.buffers: dict[int, BoundedPriorityQueue] = {}
         self._partition_locks: dict[int, threading.RLock] = {}
@@ -115,31 +115,53 @@ class StrictWorker:
         self.known_term: int = 0
         self.seen_commands: set[str] = set()
 
-        from strict.output_manager import OutputManager
-        from common.rocks_store import RocksStore
+        # Save config for dynamic partition addition
+        self.window_size_s = window_size_s
+        self.delta_base_s = delta_base_s
+        self.tiered_storage = tiered_storage
+        self.db_path = db_path
+        self.output_mode = output_mode
+        self.kafka_producer = kafka_producer
+        self.kafka_results_topic = kafka_results_topic
+        self.diff_eviction = diff_eviction
+        self.kafka_audit_producer = kafka_audit_producer
+        self.kafka_audit_topic = kafka_audit_topic
+        self._dynamic_partition_lock = threading.Lock()
 
+        # Initialize partitions
         for pid in partition_ids:
-            engine_db = (db_path + f"-p{pid}") if db_path else None
+            self.ensure_partition(pid)
+
+    def ensure_partition(self, pid: int) -> None:
+        if pid in self.engines:
+            return
+        with self._dynamic_partition_lock:
+            if pid in self.engines:
+                return
+            from strict.output_manager import OutputManager
+            from common.rocks_store import RocksStore
+
+            engine_db = (self.db_path + f"-p{pid}") if self.db_path else None
             engine_store = RocksStore(engine_db) if engine_db else None
-            om = OutputManager(mode=output_mode, kafka_producer=kafka_producer,
-                               kafka_topic=kafka_results_topic,
-                               audit_producer=kafka_audit_producer,
-                               audit_topic=kafka_audit_topic,
+            om = OutputManager(mode=self.output_mode, kafka_producer=self.kafka_producer,
+                               kafka_topic=self.kafka_results_topic,
+                               audit_producer=self.kafka_audit_producer,
+                               audit_topic=self.kafka_audit_topic,
                                store=engine_store)
             eng = StrictWatermarkEngine(
-                window_size_s=window_size_s,
-                delta_base_s=delta_base_s,
+                window_size_s=self.window_size_s,
+                delta_base_s=self.delta_base_s,
                 max_queue=self.hard_queue_limit,
                 checkpoint_dir=os.path.join(
                     os.environ.get("CHECKPOINT_DIR", "/data/checkpoint"),
                     f"partition_{pid}"),
-                tiered_storage=tiered_storage,
+                tiered_storage=self.tiered_storage,
                 db_path=engine_db,
                 output_manager=om,
-                diff_eviction=diff_eviction,
+                diff_eviction=self.diff_eviction,
                 store=engine_store,
             )
-            eng.partition_id = pid  # §9.3: deterministic window_id requires correct partition_id
+            eng.partition_id = pid
             self.engines[pid] = eng
             self.buffers[pid] = BoundedPriorityQueue(maxsize=self.hard_queue_limit)
             self._partition_locks[pid] = threading.RLock()
@@ -147,6 +169,8 @@ class StrictWorker:
             self._last_event_time[pid] = time.time()
             self._backpressure_active[pid] = False
             self._pending_count[pid] = 0
+            if pid not in self.partition_ids:
+                self.partition_ids.append(pid)
 
     def validate_command(self, term: int, command_id: str) -> bool:
         if term < self.known_term:
@@ -156,20 +180,22 @@ class StrictWorker:
         self.known_term = max(self.known_term, term)
         if command_id:
             self.seen_commands.add(command_id)
+        if len(self.seen_commands) > 1000:
+            self.seen_commands.clear()
         return True
 
     def on_punctuation(self, token: PunctuationToken) -> None:
-        if token.partition_id in self.engines:
-            with self._partition_locks[token.partition_id]:
-                self.engines[token.partition_id].on_punctuation(token)
+        pid = token.partition_id
+        if pid in self.engines:
+            with self._partition_locks[pid]:
+                self.engines[pid].on_punctuation(token)
 
     # ---- Idleness detection ----
     def is_idle(self, partition_id: int) -> bool:
         """Return True if no event received for this partition within IDLE_TIMEOUT_S."""
-        last = self._last_event_time.get(partition_id)
-        if last is None:
-            return False
-        return time.time() - last > IDLE_TIMEOUT_S
+        if partition_id not in self._last_event_time:
+            return True
+        return (time.time() - self._last_event_time[partition_id]) > IDLE_TIMEOUT_S
 
     def idle_partitions(self) -> list[int]:
         """Return list of partition IDs currently considered idle."""
@@ -177,7 +203,7 @@ class StrictWorker:
 
     def process(self, event: LogEvent, partition_id: int) -> float | None:
         if partition_id not in self.engines:
-            return None
+            self.ensure_partition(partition_id)
 
         with self._partition_locks[partition_id]:
             buf = self.buffers[partition_id]
