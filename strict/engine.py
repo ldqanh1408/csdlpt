@@ -70,6 +70,7 @@ class StrictWatermarkEngine:
         # Kafka offset tracking per partition (spec §6.3)
         self.kafka_committed_offset: int = 0
         self.kafka_current_offset: int = 0
+        self.punctuation_total: int = 0
 
         self.open_windows: dict[float, WindowState] = defaultdict(WindowState)
         self.closed_windows: dict[float, WindowResult] = {}
@@ -345,6 +346,7 @@ class StrictWatermarkEngine:
             return False
 
     def on_punctuation(self, token: PunctuationToken) -> None:
+        self.punctuation_total += 1
         if token.T_commit > self.last_T_commit:
             self.last_T_commit = token.T_commit
             self.local_watermark = token.T_commit - self.delta_base
@@ -767,9 +769,22 @@ class StrictWatermarkEngine:
             idx = min(int(len(sorted_v) * percentile), len(sorted_v) - 1)
             return round(sorted_v[idx] / 1000.0, 2)
 
+        # Eviction state detection
+        ev_state = 0
+        win_id = f"w_{self.partition_id}_none"
+        if self.tiered_storage and getattr(self.tiered_storage, "eviction", None):
+            closed_win_ids = [self.tumbling.window_id(self.partition_id, w) for w in self.closed_windows]
+            if closed_win_ids:
+                win_id = closed_win_ids[-1]
+                st = self.tiered_storage.eviction.get_state(win_id)
+                if st:
+                    val = st.value if hasattr(st, "value") else str(st)
+                    ev_state = {"closed": 0, "uploading": 1, "uploaded": 2, "purged": 3}.get(val, 0)
+
         result = {
             "mode": "strict",
             "watermark": self.watermark,
+            "local_watermark": self.local_watermark,  # useful to show local watermark in detail
             "delta_base_s": self.delta_base,
             "open_windows": open_count,
             "closed_windows": closed_count,
@@ -793,6 +808,15 @@ class StrictWatermarkEngine:
             "state_write_latency_p50_us": _lat_us(self.metrics.T_state_write_ns, 0.50),
             "state_write_latency_p95_us": _lat_us(self.metrics.T_state_write_ns, 0.95),
             "state_write_latency_p99_us": _lat_us(self.metrics.T_state_write_ns, 0.99),
+            # Gap 3 metrics
+            "active_partitions": getattr(self, "active_partitions", 1),
+            "clock_skew_ms": getattr(self, "clock_skew_ms", 0.0),
+            "punctuation_total": self.punctuation_total,
+            "eviction_state": ev_state,
+            "window_id": win_id,
+            "ingestor_id": f"ingestor_{self.partition_id}",
+            "ingestor_health_rtt_ms": 0.0,
+            "ingestor_network_rtt_seconds": 0.0,
         }
         if self.tiered_storage:
             result["tier_storage"] = self.tiered_storage.get_storage_stats()

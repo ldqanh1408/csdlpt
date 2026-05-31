@@ -40,7 +40,7 @@ services:
       ROLE: coordinator
       MODE: strict
       COORDINATOR_ID: "coordinator-1:8000"
-      DELTA_BASE_S: "10.0"
+      DELTA_BASE_S: "${DELTA_BASE_S:-10.0}"
       WINDOW_SIZE_S: "5.0"
       CHECKPOINT_DIR: /data/checkpoint
       PAGERDUTY_ROUTING_KEY: ""
@@ -88,7 +88,7 @@ services:
       ROLE: coordinator
       MODE: strict
       COORDINATOR_ID: "coordinator-2:8000"
-      DELTA_BASE_S: "10.0"
+      DELTA_BASE_S: "${DELTA_BASE_S:-10.0}"
       WINDOW_SIZE_S: "5.0"
       CHECKPOINT_DIR: /data/checkpoint-2
       PAGERDUTY_ROUTING_KEY: ""
@@ -113,7 +113,7 @@ services:
       ROLE: coordinator
       MODE: strict
       COORDINATOR_ID: "coordinator-3:8000"
-      DELTA_BASE_S: "10.0"
+      DELTA_BASE_S: "${DELTA_BASE_S:-10.0}"
       WINDOW_SIZE_S: "5.0"
       CHECKPOINT_DIR: /data/checkpoint-3
       PAGERDUTY_ROUTING_KEY: ""
@@ -238,6 +238,7 @@ services:
       AGGREGATOR_STANDBY_URL: http://aggregator-standby:8000
       PARTITIONS: "0,1,2"
       WINDOW_SIZE_S: "5.0"
+      DELTA_BASE_S: "${DELTA_BASE_S:-10.0}"
       LOG_LEVEL: "${LOG_LEVEL:-debug}"
       PUNCTUATION_MODE: "${PUNCTUATION_MODE:-data-driven}"
       HEURISTIC_ALPHA: "${HEURISTIC_ALPHA:-0.01}"
@@ -258,6 +259,11 @@ services:
     ports:
       - "9101:8000"
     volumes:
+      # Shared Tier-2 (Warm State) volume across all workers, per design §6.2:
+      # a surviving node mounts the failed node's /data/checkpoint/partition_k/
+      # to restore state on failover. entrypoint.sh cleans ONLY this node's own
+      # partitions (by NODE_ID + PARTITIONS), so a single-node restart never
+      # wipes the RocksDB dirs the other live workers have open.
       - ./checkpoint/shared:/data
     restart: unless-stopped
     logging: *default-logging
@@ -286,6 +292,7 @@ services:
       AGGREGATOR_STANDBY_URL: http://aggregator-standby:8000
       PARTITIONS: "3,4,5"
       WINDOW_SIZE_S: "5.0"
+      DELTA_BASE_S: "${DELTA_BASE_S:-10.0}"
       LOG_LEVEL: "${LOG_LEVEL:-debug}"
       PUNCTUATION_MODE: "${PUNCTUATION_MODE:-data-driven}"
       HEURISTIC_ALPHA: "${HEURISTIC_ALPHA:-0.01}"
@@ -321,6 +328,7 @@ services:
       AGGREGATOR_STANDBY_URL: http://aggregator-standby:8000
       PARTITIONS: "6,7,8"
       WINDOW_SIZE_S: "5.0"
+      DELTA_BASE_S: "${DELTA_BASE_S:-10.0}"
       LOG_LEVEL: "${LOG_LEVEL:-debug}"
       PUNCTUATION_MODE: "${PUNCTUATION_MODE:-data-driven}"
       HEURISTIC_ALPHA: "${HEURISTIC_ALPHA:-0.01}"
@@ -356,6 +364,7 @@ services:
       AGGREGATOR_STANDBY_URL: http://aggregator-standby:8000
       PARTITIONS: "9,10,11"
       WINDOW_SIZE_S: "5.0"
+      DELTA_BASE_S: "${DELTA_BASE_S:-10.0}"
       LOG_LEVEL: "${LOG_LEVEL:-debug}"
       PUNCTUATION_MODE: "${PUNCTUATION_MODE:-data-driven}"
       HEURISTIC_ALPHA: "${HEURISTIC_ALPHA:-0.01}"
@@ -398,6 +407,9 @@ services:
       LOG_LEVEL: "${LOG_LEVEL:-debug}"
       PUNCTUATION_MODE: "${PUNCTUATION_MODE:-data-driven}"
       INGESTOR_SLEEP_S: "${INGESTOR_SLEEP_S:-0.0}"
+      INGESTOR_REPLAY: "${INGESTOR_REPLAY:-}"
+      REPLAY_SPEED: "${REPLAY_SPEED:-20}"
+      PUNCTUATION_INTERVAL_S: "${PUNCTUATION_INTERVAL_S:-1.0}"
       KAFKA_ENABLE: "true"
       KAFKA_ENABLE_REAL: "true"
       KAFKA_BROKER_URL: "kafka:9092"

@@ -55,6 +55,84 @@ class TestChaosWorkerKill:
         summary = fm.failback_summary()
         assert summary["in_progress"] == 0
 
+    def test_decoupled_liveness_vs_progress(self):
+        from strict.failover import FailoverManager
+        fm = FailoverManager(heartbeat_timeout_s=0.1)
+        fm.register_worker("w1", [0, 1])
+        # Ping updates last_heartbeat
+        time.sleep(0.05)
+        # Mock WorkerPing update:
+        with fm._lock:
+            fm._workers["w1"].last_heartbeat = time.time()
+        time.sleep(0.05)
+        # detect_failures should NOT find w1 failed because the last_heartbeat was refreshed
+        failed = fm.detect_failures()
+        assert "w1" not in failed
+
+    def test_active_idle_classification(self):
+        from strict.coordinator import StrictCoordinator
+        from common.types import WorkerHeartbeat
+        coord = StrictCoordinator()
+        
+        # Report progress where partition 0 is active and partition 1 is idle
+        hb = WorkerHeartbeat(
+            worker_id="w1",
+            partitions={0: 100.0, 1: 50.0},
+            idle_partitions=[1],
+        )
+        coord.receive_heartbeat(hb)
+        
+        # Partition 1 should be marked is_temporary_idle
+        assert coord.partitions[1].is_temporary_idle is True
+        assert coord.partitions[0].is_temporary_idle is False
+        
+        # Global watermark should be computed as min of non-idle active partitions
+        # Which is 100.0 (from partition 0), since partition 1 is idle and excluded
+        assert coord.W_global == 100.0
+
+    def test_minio_compression_and_reuse(self):
+        from common.tiered_storage import TieredStorageManager
+        import tempfile
+        ts = TieredStorageManager("localhost:9000", "minio", "minio123", "test-bucket")
+        
+        # Even if minio client is None (disabled in test env), let's mock it to test compression
+        class DummyMinio:
+            def __init__(self):
+                self.store = {}
+            def put_object(self, bucket, key, data, length, headers=None):
+                self.store[key] = data.read()
+                class Result:
+                    etag = "mock-etag"
+                return Result()
+            def get_object(self, bucket, key):
+                class Response:
+                    def __init__(self, data):
+                        self.data = data
+                    def read(self):
+                        return self.data
+                    def close(self):
+                        pass
+                    def release_conn(self):
+                        pass
+                return Response(self.store[key])
+        
+        ts.client = DummyMinio()
+        ts.bucket = "test-bucket"
+        
+        test_data = {"window_start": 100, "window_end": 105, "count": 42}
+        
+        # Sync upload window
+        ts.upload_window("win-1", test_data, partition_id=0, sync=True)
+        
+        # Ensure it was compressed: starts with gzip magic bytes b'\x1f\x8b'
+        key = ts._object_key("win-1", 0)
+        raw_data = ts.client.store[key]
+        assert raw_data.startswith(b'\x1f\x8b')
+        
+        # Download and verify it decompresses and returns correct data
+        restored = ts.download_window("win-1", partition_id=0)
+        assert restored == test_data
+
 
 class TestChaosBackpressure:
     def test_backpressure_flood(self):

@@ -1,11 +1,49 @@
+refactor-node1  | [entrypoint] Cleaning old checkpoint data in /data/ ...
+refactor-node1  | [entrypoint] Checkpoint cleanup complete.
+refactor-node1  | 2026-05-30 03:49:46,486 [ERROR] kafka.conn: <BrokerConnection client_id=topic-init, node_id=bootstrap-0 host=kafka:9092 <connecting> [IPv4 ('172.18.0.4', 9092)]>: Connect attempt returned error 111. Disconnecting.
+refactor-node1  | 2026-05-30 03:49:46,486 [ERROR] kafka.conn: <BrokerConnection client_id=topic-init, node_id=bootstrap-0 host=kafka:9092 <connecting> [IPv4 ('172.18.0.4', 9092)]>: Closing connection. KafkaConnectionError: 111 ECONNREFUSED
+refactor-node1  | 2026-05-30 03:49:46,486 [WARNING] kafka.client: No node available during check_version; sleeping 0.05 secs
+refactor-node1  | 2026-05-30 03:49:46,539 [ERROR] kafka.conn: <BrokerConnection client_id=topic-init, node_id=bootstrap-0 host=kafka:9092 <connecting> [IPv4 ('172.18.0.4', 9092)]>: Connect attempt returned error 111. Disconnecting.
+refactor-node1  | 2026-05-30 03:49:46,539 [ERROR] kafka.conn: <BrokerConnection client_id=topic-init, node_id=bootstrap-0 host=kafka:9092 <connecting> [IPv4 ('172.18.0.4', 9092)]>: Closing connection. KafkaConnectionError: 111 ECONNREFUSED
+refactor-node1  | 2026-05-30 03:49:46,539 [WARNING] kafka.client: No node available during check_version; sleeping 0.08 secs
+refactor-node1  | 2026-05-30 03:49:46,624 [ERROR] kafka.conn: <BrokerConnection client_id=topic-init, node_id=bootstrap-0 host=kafka:9092 <connecting> [IPv4 ('172.18.0.4', 9092)]>: Connect attempt returned error 111. Disconnecting.
+refactor-node1  | 2026-05-30 03:49:46,624 [ERROR] kafka.conn: <BrokerConnection client_id=topic-init, node_id=bootstrap-0 host=kafka:9092 <connecting> [IPv4 ('172.18.0.4', 9092)]>: Closing connection. KafkaConnectionError: 111 ECONNREFUSED
+refactor-node1  | 2026-05-30 03:49:46,624 [WARNING] kafka.client: No node available during check_version; sleeping 0.17 secs
+refactor-node1  | 2026-05-30 03:49:46,791 [ERROR] kafka.conn: <BrokerConnection client_id=topic-init, node_id=bootstrap-0 host=kafka:9092 <connecting> [IPv4 ('172.18.0.4', 9092)]>: Connect attempt returned error 111. Disconnecting.
+refactor-node1  | 2026-05-30 03:49:46,791 [ERROR] kafka.conn: <BrokerConnection client_id=topic-init, node_id=bootstrap-0 host=kafka:9092 <connecting> [IPv4 ('172.18.0.4', 9092)]>: Closing connection. KafkaConnectionError: 111 ECONNREFUSED
+refactor-node1  | 2026-05-30 03:49:46,791 [WARNING] kafka.client: No node available during check_version; sleeping 0.42 secs
+refactor-node1  | 2026-05-30 03:49:47,214 [ERROR] kafka.conn: <BrokerConnection client_id=topic-init, node_id=bootstrap-0 host=kafka:9092 <connecting> [IPv4 ('172.18.0.4', 9092)]>: Connect attempt returned error 111. Disconnecting.
+refactor-node1  | 2026-05-30 03:49:47,214 [ERROR] kafka.conn: <BrokerConnection client_id=topic-init, node_id=bootstrap-0 host=kafka:9092 <connecting> [IPv4 ('172.18.0.4', 9092)]>: Closing connection. KafkaConnectionError: 111 ECONNREFUSED
+refactor-node1  | 2026-05-30 03:49:47,214 [WARNING] kafka.client: No node available during check_version; sleeping 0.73 secs
+refactor-node1  | 2026-05-30 03:49:47,948 [ERROR] kafka.conn: <BrokerConnection client_id=topic-init, node_id=bootstrap-0 host=kafka:9092 <connecting> [IPv4 ('172.18.0.4', 9092)]>: Connect attempt returned error 111. Disconnecting.
+refactor-node1  | 2026-05-30 03:49:47,948 [ERROR] kafka.conn: <BrokerConnection client_id=topic-init, node_id=bootstrap-0 host=kafka:9092 <connecting> [IPv4 ('172.18.0.4', 9092)]>: Closing connection. KafkaConnectionError: 111 ECONNREFUSED
+refactor-node1  | 2026-05-30 03:49:47,948 [WARNING] kafka.client: No node available during check_version; sleeping 0.53 secs
+refactor-node1  | 2026-05-30 03:49:49,486 [ERROR] kafka.conn: <BrokerConnection client_id=topic-init, node_id=bootstrap-0 host=kafka:9092 <connecting> [IPv4 ('172.18.0.4', 9092)]>: Connect attempt returned error 111. Disconnecting.
+refactor-node1  | 2026-05-30 03:49:49,486 [ERROR] kafka.conn: <BrokerConnection client_id=topic-init, node_id=bootstrap-0 host=kafka:9092 <connecting> [IPv4 ('172.18.0.4', 9092)]>: Closing connection. KafkaConnectionError: 111 ECONNREFUSED
+refactor-node1  | 2026-05-30 03:49:49,487 [WARNING] kafka.client: No node available during check_version; sleeping 0.05 secs
+refactor-node1  | 2026-05-30 03:49:49,538 [ERROR] kafka.conn: <BrokerConnection client_id=topic-init, node_id=bootstrap-0 host=kafka:9092 <connecting> [IPv4 ('172.18.0.4', 9092)]>: Connect attempt returned error 111. Disconnecting.
+refactor-node1  | 2026-05-30 03:49:49,538 [ERROR] kafka.conn: <BrokerConnection client_id=topic-init, node_id=bootstrap-0 host=kafka:9092 <connecting> [IPv4 ('172.18.0.4', 9092)]>: Closing connection. KafkaConnectionError: 111 ECONNREFUSED
+refactor-node1  | 2026-05-30 03:49:49,538 [WARNING] kafka.client: No node available during check_version; sleeping 0.09 secs
+refactor-node1  | 2026-05-30 03:49:49,632 [ERROR] kafka.conn: <BrokerConnection client_id=topic-init, node_id=bootstrap-0 host=kafka:9092 <connecting> [IPv4 ('172.18.0.4', 9092)]>: Connect attempt returned error 111. Disconnecting.
+refactor-node1  | 2026-05-30 03:49:49,632 [ERROR] kafka.conn: <BrokerConnection client_id=topic-init, node_id=bootstrap-0 host=kafka:9092 <connecting> [IPv4 ('172.18.0.4', 9092)]>: Closing connection. KafkaConnectionError: 111 ECONNREFUSED
+refactor-node1  | 2026-05-30 03:49:49,632 [WARNING] kafka.client: No node available during check_version; sleeping 0.21 secs
+refactor-node1  | 2026-05-30 03:49:49,844 [ERROR] kafka.conn: <BrokerConnection client_id=topic-init, node_id=bootstrap-0 host=kafka:9092 <connecting> [IPv4 ('172.18.0.4', 9092)]>: Connect attempt returned error 111. Disconnecting.
+refactor-node1  | 2026-05-30 03:49:49,845 [ERROR] kafka.conn: <BrokerConnection client_id=topic-init, node_id=bootstrap-0 host=kafka:9092 <connecting> [IPv4 ('172.18.0.4', 9092)]>: Closing connection. KafkaConnectionError: 111 ECONNREFUSED
+refactor-node1  | 2026-05-30 03:49:49,845 [WARNING] kafka.client: No node available during check_version; sleeping 0.42 secs
+refactor-node1  | 2026-05-30 03:49:50,323 [WARNING] kafka.cluster: No broker metadata found in MetadataResponse -- ignoring.
+refactor-node1  | 2026-05-30 03:49:50,326 [WARNING] kafka.admin.client: Controller ID not available, got -1
+refactor-node1  | 2026-05-30 03:49:51,336 [INFO] kafka_real: RealKafkaConsumer: initializing with bootstrap_servers=['kafka:9092'], group_id=strict-workers
+refactor-node1  | 2026-05-30 03:49:51,341 [INFO] kafka_real: RealKafkaConsumer: assigning partition layout=[TopicPartition(topic='events', partition=3), TopicPartition(topic='events', partition=4), TopicPartition(topic='events', partition=5)]
 refactor-node1  | [worker-strict:1] Kafka consumer assigned=[3, 4, 5]
+refactor-node1  | 2026-05-30 03:49:51,342 [INFO] kafka_real: RealKafkaProducer: initializing with bootstrap_servers=['kafka:9092'], acks=all
+refactor-node1  | 2026-05-30 03:49:51,346 [INFO] kafka_real: RealKafkaProducer: initializing with bootstrap_servers=['kafka:9092'], acks=all
 refactor-node1  | [alerting] PagerDuty not configured, alerts logged to stderr
 refactor-node1  | [worker-strict:1] listening on :8000, partitions=[3, 4, 5]
-refactor-node1  | [worker-strict:1] received=3 on_time=3 late=0 dupes=0 bp_drops=0 completeness=100.0% late_rate=0.0% open_windows=3 closed_windows=0 buf=[p3=48q p4=22q p5=2q] watermarks=[p3:W=-inf p4:W=-inf p5:W=-inf]
-refactor-node1  | [worker-strict:1] received=75 on_time=75 late=0 dupes=0 bp_drops=0 completeness=100.0% late_rate=0.0% open_windows=16 closed_windows=0 buf=[p3=0q p4=0q p5=0q] watermarks=[p3:W=1779983449.0 p4:W=1779983449.0 p5:W=1779983449.0]
-refactor-node1  | [worker-strict:1] received=75 on_time=75 late=0 dupes=0 bp_drops=0 completeness=100.0% late_rate=0.0% open_windows=16 closed_windows=0 buf=[p3=0q p4=0q p5=0q] watermarks=[p3:W=1779983449.0 p4:W=1779983449.0 p5:W=1779983449.0]
-refactor-node1  | [worker-strict:1] received=75 on_time=75 late=0 dupes=0 bp_drops=0 completeness=100.0% late_rate=0.0% open_windows=16 closed_windows=0 buf=[p3=0q p4=0q p5=0q] watermarks=[p3:W=1779983449.0 p4:W=1779983449.0 p5:W=1779983449.0]
-refactor-node1  | [worker-strict:1] received=75 on_time=75 late=0 dupes=0 bp_drops=0 completeness=100.0% late_rate=0.0% open_windows=16 closed_windows=0 buf=[p3=0q p4=0q p5=0q] watermarks=[p3:W=1779983449.0 p4:W=1779983449.0 p5:W=1779983449.0]
-refactor-node1  | [worker-strict:1] received=75 on_time=75 late=0 dupes=0 bp_drops=0 completeness=100.0% late_rate=0.0% open_windows=16 closed_windows=0 buf=[p3=0q p4=0q p5=0q] watermarks=[p3:W=1779983449.0 p4:W=1779983449.0 p5:W=1779983449.0]
-refactor-node1  | [worker-strict:1] received=75 on_time=75 late=0 dupes=0 bp_drops=0 completeness=100.0% late_rate=0.0% open_windows=16 closed_windows=0 buf=[p3=0q p4=0q p5=0q] watermarks=[p3:W=1779983449.0 p4:W=1779983449.0 p5:W=1779983449.0]
-refactor-node1  | [worker-strict:1] received=75 on_time=75 late=0 dupes=0 bp_drops=0 completeness=100.0% late_rate=0.0% open_windows=16 closed_windows=0 buf=[p3=0q p4=0q p5=0q] watermarks=[p3:W=1779983449.0 p4:W=1779983449.0 p5:W=1779983449.0]
+refactor-node1  | [worker-strict:1] received=30 on_time=30 late=0 dupes=0 bp_drops=0 completeness=100.0% late_rate=0.0% open_windows=10 closed_windows=0 buf=[p3=0q p4=0q p5=0q] watermarks=[p3:W=-inf p4:W=-inf p5:W=-inf]
+refactor-node1  | [worker-strict:1] received=30 on_time=30 late=0 dupes=0 bp_drops=0 completeness=100.0% late_rate=0.0% open_windows=0 closed_windows=0 buf=[p3=0q p4=0q p5=0q] watermarks=[p3:W=1780113033.4 p4:W=1780113033.4 p5:W=1780113033.4]
+refactor-node1  | [worker-strict:1] received=30 on_time=30 late=0 dupes=0 bp_drops=0 completeness=100.0% late_rate=0.0% open_windows=0 closed_windows=0 buf=[p3=0q p4=0q p5=0q] watermarks=[p3:W=1780113033.4 p4:W=1780113033.4 p5:W=1780113033.4]
+refactor-node1  | [worker-strict:1] received=30 on_time=30 late=0 dupes=0 bp_drops=0 completeness=100.0% late_rate=0.0% open_windows=0 closed_windows=0 buf=[p3=0q p4=0q p5=0q] watermarks=[p3:W=1780113033.4 p4:W=1780113033.4 p5:W=1780113033.4]
+refactor-node1  | [worker-strict:1] received=30 on_time=30 late=0 dupes=0 bp_drops=0 completeness=100.0% late_rate=0.0% open_windows=0 closed_windows=0 buf=[p3=0q p4=0q p5=0q] watermarks=[p3:W=1780113033.4 p4:W=1780113033.4 p5:W=1780113033.4]
+refactor-node1  | [worker-strict:1] received=30 on_time=30 late=0 dupes=0 bp_drops=0 completeness=100.0% late_rate=0.0% open_windows=0 closed_windows=0 buf=[p3=0q p4=0q p5=0q] watermarks=[p3:W=1780113033.4 p4:W=1780113033.4 p5:W=1780113033.4]
+refactor-node1  | [worker-strict:1] received=30 on_time=30 late=0 dupes=0 bp_drops=0 completeness=100.0% late_rate=0.0% open_windows=0 closed_windows=0 buf=[p3=0q p4=0q p5=0q] watermarks=[p3:W=1780113033.4 p4:W=1780113033.4 p5:W=1780113033.4]
+refactor-node1  | [worker-strict:1] received=30 on_time=30 late=0 dupes=0 bp_drops=0 completeness=100.0% late_rate=0.0% open_windows=0 closed_windows=0 buf=[p3=0q p4=0q p5=0q] watermarks=[p3:W=1780113033.4 p4:W=1780113033.4 p5:W=1780113033.4]

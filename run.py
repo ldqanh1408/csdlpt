@@ -325,6 +325,7 @@ class HealthHandler(BaseHTTPRequestHandler):
                 # also keep `last_T_commit`/`partitions` for back-compat with
                 # any older clients (the receive_heartbeat parameter name
                 # happens to be `last_T_commit` for historical reasons).
+                rtt = max(0.0, time.time() - float(data.get("timestamp", time.time()))) * 1000.0
                 hm.receive_heartbeat(
                     ingestor_id=data.get("ingestor_id", ""),
                     partitions=data.get("partitions_assigned",
@@ -333,6 +334,7 @@ class HealthHandler(BaseHTTPRequestHandler):
                                                  data.get("last_T_commit", 0.0))),
                     ingestor_clock=float(data.get("ingestor_clock", time.time())),
                     offsets=data.get("offsets", {}),
+                    network_rtt_ms=rtt,
                 )
                 self._json(200, {"ok": True})
             else:
@@ -723,6 +725,8 @@ def run_coordinator(args):
             partitions={int(k): float(v) for k, v in data.get("partitions", {}).items()},
             max_event_time=data.get("max_event_time", 0.0),
             timestamp=data.get("timestamp", time.time()),
+            fencing_token=data.get("fencing_token", 0),
+            idle_partitions=list(data.get("idle_partitions", [])),
         )
         old_wg = coord.W_global
         coord.receive_heartbeat(hb)
@@ -764,12 +768,14 @@ def run_coordinator(args):
             _coord_last_hb_log[0] = now
             _coord_last_wglobal[0] = wg
         if "ingestor_id" in data:
+            rtt = max(0.0, time.time() - float(data.get("timestamp", time.time()))) * 1000.0
             health_mon.receive_heartbeat(
                 ingestor_id=data.get("ingestor_id", "unknown"),
                 partitions=data.get("partitions_assigned", []),
                 last_T_commit=float(data.get("T_commit", data.get("max_event_time", 0.0))),
                 ingestor_clock=float(data.get("ingestor_clock", time.time())),
                 offsets=data.get("offsets", {}),
+                network_rtt_ms=rtt,
             )
         # Failover: heartbeat with kafka offsets + detection + reassignment
         if fm is not None:
@@ -859,6 +865,9 @@ def run_coordinator(args):
                     partitions={int(k): float(v) for k, v in request.partitions.items()},
                     max_event_time=request.max_event_time,
                     timestamp=request.timestamp,
+                    fencing_token=request.fencing_token,
+                    idle_partitions=list(request.idle_partitions),
+                    backpressure_partitions={int(k): bool(v) for k, v in request.backpressure_partitions.items()} if request.backpressure_partitions else {},
                 )
                 self.coord.receive_heartbeat(hb)
                 _coord_hb_count[0] += 1
@@ -881,14 +890,29 @@ def run_coordinator(args):
                     except Exception:
                         pass
                 return csdlpt_pb2.EmptyReply(ok=True)
+
+            def WorkerPing(self, request, context):
+                from common.types import WorkerStatus
+                if self.fm is not None:
+                    with self.fm._lock:
+                        if request.worker_id not in self.fm._workers:
+                            # If not registered yet, we can register them with empty partition list
+                            self.fm.register_worker(request.worker_id, [])
+                        wr = self.fm._workers[request.worker_id]
+                        wr.last_heartbeat = time.time()
+                        wr.status = WorkerStatus.ACTIVE
+                        wr.failure_count = 0
+                return csdlpt_pb2.EmptyReply(ok=True)
                 
             def IngestorHeartbeat(self, request, context):
+                rtt = max(0.0, time.time() - request.timestamp) * 1000.0
                 self.health_mon.receive_heartbeat(
                     ingestor_id=request.ingestor_id,
                     partitions=list(request.partitions_assigned),
                     last_T_commit=request.T_commit,
                     ingestor_clock=request.ingestor_clock,
                     offsets={int(k): int(v) for k, v in request.offsets.items()},
+                    network_rtt_ms=rtt,
                 )
                 return csdlpt_pb2.EmptyReply(ok=True)
                 
@@ -963,15 +987,38 @@ def run_coordinator(args):
 
     # Failover monitoring loop: proactively detect worker failures and trigger rebalancing
     def failover_monitoring_loop():
+        from common.types import WorkerStatus
         while not stop.is_set():
             time.sleep(1.0)
             if fm is not None:
                 try:
+                    # 1. Proactive failover detection
                     failed = fm.detect_failures()
                     if failed:
                         reassigned = fm.reassign_failed_partitions()
                         if reassigned:
                             print(f"[coordinator] FAILOVER DETECTED: failed={failed} reassigned={reassigned}", file=sys.stderr, flush=True)
+                    
+                    # 2. Proactive automatic failback of recovered workers
+                    with fm._lock:
+                        for wid, wr in fm._workers.items():
+                            if wr.status in (WorkerStatus.ACTIVE, WorkerStatus.STALE):
+                                needs_failback = False
+                                for pid, current_owner in fm._partition_owner.items():
+                                    if fm._original_owner.get(pid) == wid and current_owner != wid:
+                                        if pid not in fm._failback_states:
+                                            needs_failback = True
+                                            break
+                                if needs_failback:
+                                    print(f"[coordinator] Triggering failback for recovered worker {wid}", file=sys.stderr, flush=True)
+                                    fm.start_failback(wid)
+                    
+                    # 3. Proactive failback step advancement
+                    with fm._lock:
+                        pids_in_failback = list(fm._failback_states.keys())
+                        for pid in pids_in_failback:
+                            res = fm.advance_failback(pid)
+                            print(f"[coordinator] Advancing failback for partition {pid}: {res.get('previous_step')} -> {res.get('current_step')}", file=sys.stderr, flush=True)
                 except Exception as e:
                     print(f"[coordinator] Failover detection loop error: {e}", file=sys.stderr, flush=True)
     threading.Thread(target=failover_monitoring_loop, daemon=True).start()
@@ -992,6 +1039,55 @@ def run_coordinator(args):
             time.sleep(5.0)
             _update_monitoring_from_component(mon_mgr, state)
     threading.Thread(target=monitoring_loop, daemon=True).start()
+
+    kafka_broker_url = args.kafka_broker_url
+    if not kafka_broker_url:
+        kafka_broker_url = os.environ.get("KAFKA_BROKER_URL", f"http://localhost:{args.kafka_port}")
+    if kafka_broker_url or args.enable_kafka:
+        def ingestor_heartbeat_consumer_loop():
+            time.sleep(2.0)
+            if os.environ.get("KAFKA_REAL", "0") == "1":
+                from common.kafka_real import KafkaConsumer
+            else:
+                from common.kafka_sim import KafkaConsumer
+            try:
+                consumer = KafkaConsumer(
+                    broker_url=kafka_broker_url,
+                    group_id=f"coordinator-ingestor-monitor-{coordinator_id or 'default'}"
+                )
+                consumer.subscribe(["ingestor-heartbeats"])
+                print(f"[coordinator] Subscribed to ingestor-heartbeats via Kafka ({kafka_broker_url})", file=sys.stderr)
+                while not stop.is_set():
+                    poll_result = consumer.poll(timeout_ms=1000)
+                    if not poll_result:
+                        time.sleep(0.5)
+                        continue
+                    for partition_id, msgs in poll_result.items():
+                        for msg in msgs:
+                            val = msg.get("value")
+                            if isinstance(val, str):
+                                try:
+                                    val = json.loads(val)
+                                except Exception:
+                                    pass
+                            elif isinstance(val, bytes):
+                                try:
+                                    val = json.loads(val.decode())
+                                except Exception:
+                                    pass
+                            if isinstance(val, dict):
+                                rtt = max(0.0, time.time() - float(val.get("timestamp", time.time()))) * 1000.0
+                                health_mon.receive_heartbeat(
+                                    ingestor_id=val.get("ingestor_id", "ingestor-main"),
+                                    partitions=list(val.get("partitions_assigned", [])),
+                                    last_T_commit=val.get("T_commit", 0.0),
+                                    ingestor_clock=val.get("ingestor_clock", 0.0),
+                                    offsets={int(k): int(v) for k, v in val.get("offsets", {}).items()},
+                                    network_rtt_ms=rtt,
+                                )
+            except Exception as e:
+                print(f"[coordinator] error in ingestor heartbeat Kafka consumer: {e}", file=sys.stderr)
+        threading.Thread(target=ingestor_heartbeat_consumer_loop, daemon=True).start()
 
     print(f"[coordinator] listening on :{port}, W_global={coord.W_global}")
     
@@ -1438,8 +1534,33 @@ def _run_strict_worker(node_id, parts, args):
     def heartbeat_loop():
         import dataclasses
         import urllib.request
+        last_ping_time = 0.0
         while not stop.is_set():
             time.sleep(0.2)
+            now = time.time()
+            if now - last_ping_time >= 1.0:
+                ping_sent = False
+                try:
+                    if grpc is not None:
+                        stub = get_grpc_stub(coord_state["url"])
+                        if stub is not None:
+                            stub.WorkerPing(csdlpt_pb2.WorkerPingMsg(worker_id=node_id, timestamp=now), timeout=1)
+                            ping_sent = True
+                except Exception:
+                    pass
+                if not ping_sent and coordinator_peers:
+                    for peer in coordinator_peers:
+                        try:
+                            stub = get_grpc_stub(peer)
+                            if stub is not None:
+                                stub.WorkerPing(csdlpt_pb2.WorkerPingMsg(worker_id=node_id, timestamp=now), timeout=1)
+                                ping_sent = True
+                                break
+                        except Exception:
+                            continue
+                if ping_sent:
+                    last_ping_time = now
+
             hb = None
             try:
                 hb = worker.heartbeat()
@@ -1700,6 +1821,7 @@ def _run_heuristic_worker(node_id, parts, args):
             total_dlq = 0
             total_sketch = 0
             for pid, eng in list(self.engines.items()):
+                eng.active_partitions = len(self.engines)
                 es = eng.summary()
                 result["partitions"][pid] = es
                 total_recv += es.get("total_received", 0)
@@ -1721,6 +1843,34 @@ def _run_heuristic_worker(node_id, parts, args):
             result["late_arrival_rate_pct"] = round(100.0 * total_late / max(total_recv, 1), 3)
             result["dlq_backlog"] = total_dlq
             result["sketch_total_count"] = total_sketch
+
+            # Resource stats
+            ram_used = 0
+            ram_total = 0
+            try:
+                import psutil
+                vm = psutil.virtual_memory()
+                ram_used = vm.used
+                ram_total = vm.total
+            except ImportError:
+                pass
+
+            import shutil
+            disk_used = 0
+            disk_total = 0
+            try:
+                usage = shutil.disk_usage("/")
+                disk_used = usage.used
+                disk_total = usage.total
+            except Exception:
+                pass
+
+            result["resources"] = {
+                "ram_used_bytes": ram_used,
+                "ram_total_bytes": ram_total,
+                "disk_used_bytes": disk_used,
+                "disk_total_bytes": disk_total,
+            }
             return result
 
         def broadcast(self):
@@ -1891,6 +2041,8 @@ def _run_heuristic_worker(node_id, parts, args):
         while not stop.is_set():
             time.sleep(0.2)
             for pid, eng in engines.items():
+                if eng.W_h == float("-inf") or eng.is_idle():
+                    continue
                 sent = False
                 if grpc is not None:
                     try:
@@ -1905,8 +2057,8 @@ def _run_heuristic_worker(node_id, parts, args):
                                 timeout=1
                             )
                             sent = True
-                    except Exception:
-                        pass
+                    except Exception as e:
+                        logging.error(f"[worker-{mode}:{node_id}] gRPC SendWorkerWatermark to {aggregator_url} failed: {e}")
                     if aggregator_standby_url != aggregator_url:
                         try:
                             stub = get_grpc_aggregator_stub(aggregator_standby_url)
@@ -1919,8 +2071,8 @@ def _run_heuristic_worker(node_id, parts, args):
                                     ),
                                     timeout=1
                                 )
-                        except Exception:
-                            pass
+                        except Exception as e:
+                            logging.error(f"[worker-{mode}:{node_id}] gRPC SendWorkerWatermark to standby {aggregator_standby_url} failed: {e}")
                 if not sent:
                     payload = json.dumps({
                         "worker_id": node_id,
@@ -1935,8 +2087,9 @@ def _run_heuristic_worker(node_id, parts, args):
                             data=payload, headers=headers,
                         )
                         urllib.request.urlopen(req, timeout=1)
-                    except Exception:
-                        pass
+                        sent = True
+                    except Exception as e:
+                        logging.error(f"[worker-{mode}:{node_id}] HTTP POST to {aggregator_url}/punctuation failed: {e}")
                     # Push to standby aggregator (best-effort, fire-and-forget)
                     if aggregator_standby_url != aggregator_url:
                         try:
@@ -1945,8 +2098,8 @@ def _run_heuristic_worker(node_id, parts, args):
                                 data=payload, headers=headers,
                             )
                             urllib.request.urlopen(req, timeout=1)
-                        except Exception:
-                            pass
+                        except Exception as e:
+                            logging.error(f"[worker-{mode}:{node_id}] HTTP POST to standby {aggregator_standby_url}/punctuation failed: {e}")
     threading.Thread(target=report_loop, daemon=True).start()
 
 
@@ -2349,9 +2502,20 @@ def run_ingestor(args):
             csv_first_time = csv_time
         offset = csv_time - csv_first_time
         event_time = csv_wall_base + offset
-        sim_lag = float(os.environ.get("SIMULATED_LAG_S", "2.0"))
-        next_arr = max(last_simulated_arrival_time[0] + 0.001, event_time + sim_lag)
-        last_simulated_arrival_time[0] = next_arr
+        # Real arrival-time from CSV `arrival` column (e.g. NYC-taxi converter):
+        # lateness = arrival - time (both in the same compressed timeline). The
+        # event then "arrives" out-of-order vs event_time. Falls back to the
+        # synthetic event_time + SIMULATED_LAG_S when no `arrival` column exists.
+        csv_arrival = row.get('arrival', None)
+        if csv_arrival not in (None, ''):
+            lateness = float(csv_arrival) - csv_time
+            if lateness < 0:
+                lateness = 0.0
+            next_arr = event_time + lateness
+        else:
+            sim_lag = float(os.environ.get("SIMULATED_LAG_S", "2.0"))
+            next_arr = max(last_simulated_arrival_time[0] + 0.001, event_time + sim_lag)
+            last_simulated_arrival_time[0] = next_arr
         csv_row_counter[0] += 1
         return {
             "event_id": f"csv-{csv_row_counter[0]}",
@@ -2392,7 +2556,7 @@ def run_ingestor(args):
     ingested = [0]
     ingested_total = [0]
     last_punctuation = [time.time()]
-    punctuation_interval = 1.0
+    punctuation_interval = float(os.environ.get("PUNCTUATION_INTERVAL_S", "1.0"))
     events_sent_since_punctuation = [0]
     last_log_offsets: dict[int, int] = {}
     eof_reached = [False]  # shared with send_punctuation for EOF flush
@@ -2592,6 +2756,13 @@ def run_ingestor(args):
         idx = 0
         eof = False
         last_report = time.time()
+        # Arrival-paced replay: hold each event until its (compressed) arrival-time
+        # has elapsed, then send → genuine out-of-order arrival vs event-time.
+        replay_mode = os.environ.get("INGESTOR_REPLAY", "").strip().lower() == "arrival"
+        replay_speed = max(float(os.environ.get("REPLAY_SPEED", "20")), 1e-3)
+        replay_start = time.time()
+        if replay_mode:
+            print(f"[ingestor] arrival-paced replay ON (speed={replay_speed}x)", file=sys.stderr)
         while not stop.is_set():
             if csv_reader is not None:
                 if not eof:
@@ -2626,6 +2797,13 @@ def run_ingestor(args):
                 ev["arrival_time"] = ev.get("event_time", time.time()) + 2.0
             pid = ev.get("partition_id", 0)
 
+            # Hold until this event's arrival-time (compressed, scaled by speed).
+            if replay_mode and csv_reader is not None:
+                target = replay_start + (ev.get("arrival_time", 0.0) - csv_wall_base) / replay_speed
+                _now = time.time()
+                if target > _now:
+                    time.sleep(min(target - _now, 5.0))
+
             to_send = []
             if migration_step == "drop_legacy":
                 to_send.append(create_v2_event(ev))
@@ -2648,9 +2826,10 @@ def run_ingestor(args):
             last_log_offsets[pid] = idx
             idx += 1
             
-            sleep_s = float(os.environ.get("INGESTOR_SLEEP_S", "0.01"))
-            if sleep_s > 0:
-                time.sleep(sleep_s)
+            if not replay_mode:
+                sleep_s = float(os.environ.get("INGESTOR_SLEEP_S", "0.01"))
+                if sleep_s > 0:
+                    time.sleep(sleep_s)
 
             if mode == "strict" and (time.time() - last_punctuation[0]) > punctuation_interval:
                 send_punctuation()
@@ -2679,8 +2858,6 @@ def run_ingestor(args):
         import urllib.request as _req
         while not stop.is_set():
             time.sleep(5.0)
-            if not coordinator_url:
-                continue
             partitions_assigned = list(last_log_offsets.keys())
             T_commit = time.time() - 10.0
             timestamp = time.time()
@@ -2688,24 +2865,42 @@ def run_ingestor(args):
             ingestor_clock = time.time()
             offsets = dict(last_log_offsets)
             
-            sent = False
-            if grpc is not None:
+            kafka_sent = False
+            if kafka_producer is not None:
                 try:
-                    stub = get_grpc_stub(coordinator_url)
-                    if stub is not None:
-                        msg = csdlpt_pb2.IngestorHeartbeatMsg(
-                            ingestor_id="ingestor-main",
-                            T_commit=T_commit,
-                            timestamp=timestamp,
-                            partitions_assigned=partitions_assigned,
-                            last_log_offset=last_log_offset,
-                            ingestor_clock=ingestor_clock,
-                            offsets=offsets,
-                        )
-                        stub.IngestorHeartbeat(msg, timeout=2)
-                        sent = True
-                except Exception:
-                    pass
+                    hb_payload = {
+                        "ingestor_id": "ingestor-main",
+                        "T_commit": T_commit,
+                        "timestamp": timestamp,
+                        "partitions_assigned": partitions_assigned,
+                        "last_log_offset": last_log_offset,
+                        "ingestor_clock": ingestor_clock,
+                        "offsets": offsets,
+                    }
+                    kafka_producer.send("ingestor-heartbeats", hb_payload)
+                    kafka_sent = True
+                except Exception as e:
+                    print(f"[ingestor] failed to send heartbeat via Kafka: {e}", file=sys.stderr)
+            
+            sent = kafka_sent
+            if not sent and coordinator_url:
+                if grpc is not None:
+                    try:
+                        stub = get_grpc_stub(coordinator_url)
+                        if stub is not None:
+                            msg = csdlpt_pb2.IngestorHeartbeatMsg(
+                                ingestor_id="ingestor-main",
+                                T_commit=T_commit,
+                                timestamp=timestamp,
+                                partitions_assigned=partitions_assigned,
+                                last_log_offset=last_log_offset,
+                                ingestor_clock=ingestor_clock,
+                                offsets=offsets,
+                            )
+                            stub.IngestorHeartbeat(msg, timeout=2)
+                            sent = True
+                    except Exception:
+                        pass
             
             if not sent:
                 try:

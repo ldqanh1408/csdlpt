@@ -3,7 +3,7 @@
 import grpc
 import warnings
 
-from common import csdlpt_pb2 as refactor_dot_common_dot_csdlpt__pb2
+from common import csdlpt_pb2 as common_dot_csdlpt__pb2
 
 GRPC_GENERATED_VERSION = '1.80.0'
 GRPC_VERSION = grpc.__version__
@@ -18,7 +18,7 @@ except ImportError:
 if _version_not_supported:
     raise RuntimeError(
         f'The grpc package installed is at version {GRPC_VERSION},'
-        + ' but the generated code in refactor/common/csdlpt_pb2_grpc.py depends on'
+        + ' but the generated code in common/csdlpt_pb2_grpc.py depends on'
         + f' grpcio>={GRPC_GENERATED_VERSION}.'
         + f' Please upgrade your grpc module to grpcio>={GRPC_GENERATED_VERSION}'
         + f' or downgrade your generated code using grpcio-tools<={GRPC_VERSION}.'
@@ -36,38 +36,43 @@ class CoordinatorServiceStub(object):
         """
         self.WorkerHeartbeat = channel.unary_unary(
                 '/csdlpt.CoordinatorService/WorkerHeartbeat',
-                request_serializer=refactor_dot_common_dot_csdlpt__pb2.WorkerHeartbeatMsg.SerializeToString,
-                response_deserializer=refactor_dot_common_dot_csdlpt__pb2.EmptyReply.FromString,
+                request_serializer=common_dot_csdlpt__pb2.WorkerHeartbeatMsg.SerializeToString,
+                response_deserializer=common_dot_csdlpt__pb2.EmptyReply.FromString,
+                _registered_method=True)
+        self.WorkerPing = channel.unary_unary(
+                '/csdlpt.CoordinatorService/WorkerPing',
+                request_serializer=common_dot_csdlpt__pb2.WorkerPingMsg.SerializeToString,
+                response_deserializer=common_dot_csdlpt__pb2.EmptyReply.FromString,
                 _registered_method=True)
         self.IngestorHeartbeat = channel.unary_unary(
                 '/csdlpt.CoordinatorService/IngestorHeartbeat',
-                request_serializer=refactor_dot_common_dot_csdlpt__pb2.IngestorHeartbeatMsg.SerializeToString,
-                response_deserializer=refactor_dot_common_dot_csdlpt__pb2.EmptyReply.FromString,
+                request_serializer=common_dot_csdlpt__pb2.IngestorHeartbeatMsg.SerializeToString,
+                response_deserializer=common_dot_csdlpt__pb2.EmptyReply.FromString,
                 _registered_method=True)
         self.GetGlobalState = channel.unary_unary(
                 '/csdlpt.CoordinatorService/GetGlobalState',
-                request_serializer=refactor_dot_common_dot_csdlpt__pb2.StateRequest.SerializeToString,
-                response_deserializer=refactor_dot_common_dot_csdlpt__pb2.StateReply.FromString,
+                request_serializer=common_dot_csdlpt__pb2.StateRequest.SerializeToString,
+                response_deserializer=common_dot_csdlpt__pb2.StateReply.FromString,
                 _registered_method=True)
         self.RaftVote = channel.unary_unary(
                 '/csdlpt.CoordinatorService/RaftVote',
-                request_serializer=refactor_dot_common_dot_csdlpt__pb2.RaftVoteMsg.SerializeToString,
-                response_deserializer=refactor_dot_common_dot_csdlpt__pb2.RaftVoteReply.FromString,
+                request_serializer=common_dot_csdlpt__pb2.RaftVoteMsg.SerializeToString,
+                response_deserializer=common_dot_csdlpt__pb2.RaftVoteReply.FromString,
                 _registered_method=True)
         self.RaftState = channel.unary_unary(
                 '/csdlpt.CoordinatorService/RaftState',
-                request_serializer=refactor_dot_common_dot_csdlpt__pb2.RaftStateMsg.SerializeToString,
-                response_deserializer=refactor_dot_common_dot_csdlpt__pb2.EmptyReply.FromString,
+                request_serializer=common_dot_csdlpt__pb2.RaftStateMsg.SerializeToString,
+                response_deserializer=common_dot_csdlpt__pb2.EmptyReply.FromString,
                 _registered_method=True)
         self.ZkVote = channel.unary_unary(
                 '/csdlpt.CoordinatorService/ZkVote',
-                request_serializer=refactor_dot_common_dot_csdlpt__pb2.ZkVoteMsg.SerializeToString,
-                response_deserializer=refactor_dot_common_dot_csdlpt__pb2.ZkVoteReply.FromString,
+                request_serializer=common_dot_csdlpt__pb2.ZkVoteMsg.SerializeToString,
+                response_deserializer=common_dot_csdlpt__pb2.ZkVoteReply.FromString,
                 _registered_method=True)
         self.ZkState = channel.unary_unary(
                 '/csdlpt.CoordinatorService/ZkState',
-                request_serializer=refactor_dot_common_dot_csdlpt__pb2.ZkStateMsg.SerializeToString,
-                response_deserializer=refactor_dot_common_dot_csdlpt__pb2.EmptyReply.FromString,
+                request_serializer=common_dot_csdlpt__pb2.ZkStateMsg.SerializeToString,
+                response_deserializer=common_dot_csdlpt__pb2.EmptyReply.FromString,
                 _registered_method=True)
 
 
@@ -76,6 +81,13 @@ class CoordinatorServiceServicer(object):
 
     def WorkerHeartbeat(self, request, context):
         """Worker -> Coordinator heartbeat
+        """
+        context.set_code(grpc.StatusCode.UNIMPLEMENTED)
+        context.set_details('Method not implemented!')
+        raise NotImplementedError('Method not implemented!')
+
+    def WorkerPing(self, request, context):
+        """Worker -> Coordinator ping for Liveness
         """
         context.set_code(grpc.StatusCode.UNIMPLEMENTED)
         context.set_details('Method not implemented!')
@@ -128,38 +140,43 @@ def add_CoordinatorServiceServicer_to_server(servicer, server):
     rpc_method_handlers = {
             'WorkerHeartbeat': grpc.unary_unary_rpc_method_handler(
                     servicer.WorkerHeartbeat,
-                    request_deserializer=refactor_dot_common_dot_csdlpt__pb2.WorkerHeartbeatMsg.FromString,
-                    response_serializer=refactor_dot_common_dot_csdlpt__pb2.EmptyReply.SerializeToString,
+                    request_deserializer=common_dot_csdlpt__pb2.WorkerHeartbeatMsg.FromString,
+                    response_serializer=common_dot_csdlpt__pb2.EmptyReply.SerializeToString,
+            ),
+            'WorkerPing': grpc.unary_unary_rpc_method_handler(
+                    servicer.WorkerPing,
+                    request_deserializer=common_dot_csdlpt__pb2.WorkerPingMsg.FromString,
+                    response_serializer=common_dot_csdlpt__pb2.EmptyReply.SerializeToString,
             ),
             'IngestorHeartbeat': grpc.unary_unary_rpc_method_handler(
                     servicer.IngestorHeartbeat,
-                    request_deserializer=refactor_dot_common_dot_csdlpt__pb2.IngestorHeartbeatMsg.FromString,
-                    response_serializer=refactor_dot_common_dot_csdlpt__pb2.EmptyReply.SerializeToString,
+                    request_deserializer=common_dot_csdlpt__pb2.IngestorHeartbeatMsg.FromString,
+                    response_serializer=common_dot_csdlpt__pb2.EmptyReply.SerializeToString,
             ),
             'GetGlobalState': grpc.unary_unary_rpc_method_handler(
                     servicer.GetGlobalState,
-                    request_deserializer=refactor_dot_common_dot_csdlpt__pb2.StateRequest.FromString,
-                    response_serializer=refactor_dot_common_dot_csdlpt__pb2.StateReply.SerializeToString,
+                    request_deserializer=common_dot_csdlpt__pb2.StateRequest.FromString,
+                    response_serializer=common_dot_csdlpt__pb2.StateReply.SerializeToString,
             ),
             'RaftVote': grpc.unary_unary_rpc_method_handler(
                     servicer.RaftVote,
-                    request_deserializer=refactor_dot_common_dot_csdlpt__pb2.RaftVoteMsg.FromString,
-                    response_serializer=refactor_dot_common_dot_csdlpt__pb2.RaftVoteReply.SerializeToString,
+                    request_deserializer=common_dot_csdlpt__pb2.RaftVoteMsg.FromString,
+                    response_serializer=common_dot_csdlpt__pb2.RaftVoteReply.SerializeToString,
             ),
             'RaftState': grpc.unary_unary_rpc_method_handler(
                     servicer.RaftState,
-                    request_deserializer=refactor_dot_common_dot_csdlpt__pb2.RaftStateMsg.FromString,
-                    response_serializer=refactor_dot_common_dot_csdlpt__pb2.EmptyReply.SerializeToString,
+                    request_deserializer=common_dot_csdlpt__pb2.RaftStateMsg.FromString,
+                    response_serializer=common_dot_csdlpt__pb2.EmptyReply.SerializeToString,
             ),
             'ZkVote': grpc.unary_unary_rpc_method_handler(
                     servicer.ZkVote,
-                    request_deserializer=refactor_dot_common_dot_csdlpt__pb2.ZkVoteMsg.FromString,
-                    response_serializer=refactor_dot_common_dot_csdlpt__pb2.ZkVoteReply.SerializeToString,
+                    request_deserializer=common_dot_csdlpt__pb2.ZkVoteMsg.FromString,
+                    response_serializer=common_dot_csdlpt__pb2.ZkVoteReply.SerializeToString,
             ),
             'ZkState': grpc.unary_unary_rpc_method_handler(
                     servicer.ZkState,
-                    request_deserializer=refactor_dot_common_dot_csdlpt__pb2.ZkStateMsg.FromString,
-                    response_serializer=refactor_dot_common_dot_csdlpt__pb2.EmptyReply.SerializeToString,
+                    request_deserializer=common_dot_csdlpt__pb2.ZkStateMsg.FromString,
+                    response_serializer=common_dot_csdlpt__pb2.EmptyReply.SerializeToString,
             ),
     }
     generic_handler = grpc.method_handlers_generic_handler(
@@ -187,8 +204,35 @@ class CoordinatorService(object):
             request,
             target,
             '/csdlpt.CoordinatorService/WorkerHeartbeat',
-            refactor_dot_common_dot_csdlpt__pb2.WorkerHeartbeatMsg.SerializeToString,
-            refactor_dot_common_dot_csdlpt__pb2.EmptyReply.FromString,
+            common_dot_csdlpt__pb2.WorkerHeartbeatMsg.SerializeToString,
+            common_dot_csdlpt__pb2.EmptyReply.FromString,
+            options,
+            channel_credentials,
+            insecure,
+            call_credentials,
+            compression,
+            wait_for_ready,
+            timeout,
+            metadata,
+            _registered_method=True)
+
+    @staticmethod
+    def WorkerPing(request,
+            target,
+            options=(),
+            channel_credentials=None,
+            call_credentials=None,
+            insecure=False,
+            compression=None,
+            wait_for_ready=None,
+            timeout=None,
+            metadata=None):
+        return grpc.experimental.unary_unary(
+            request,
+            target,
+            '/csdlpt.CoordinatorService/WorkerPing',
+            common_dot_csdlpt__pb2.WorkerPingMsg.SerializeToString,
+            common_dot_csdlpt__pb2.EmptyReply.FromString,
             options,
             channel_credentials,
             insecure,
@@ -214,8 +258,8 @@ class CoordinatorService(object):
             request,
             target,
             '/csdlpt.CoordinatorService/IngestorHeartbeat',
-            refactor_dot_common_dot_csdlpt__pb2.IngestorHeartbeatMsg.SerializeToString,
-            refactor_dot_common_dot_csdlpt__pb2.EmptyReply.FromString,
+            common_dot_csdlpt__pb2.IngestorHeartbeatMsg.SerializeToString,
+            common_dot_csdlpt__pb2.EmptyReply.FromString,
             options,
             channel_credentials,
             insecure,
@@ -241,8 +285,8 @@ class CoordinatorService(object):
             request,
             target,
             '/csdlpt.CoordinatorService/GetGlobalState',
-            refactor_dot_common_dot_csdlpt__pb2.StateRequest.SerializeToString,
-            refactor_dot_common_dot_csdlpt__pb2.StateReply.FromString,
+            common_dot_csdlpt__pb2.StateRequest.SerializeToString,
+            common_dot_csdlpt__pb2.StateReply.FromString,
             options,
             channel_credentials,
             insecure,
@@ -268,8 +312,8 @@ class CoordinatorService(object):
             request,
             target,
             '/csdlpt.CoordinatorService/RaftVote',
-            refactor_dot_common_dot_csdlpt__pb2.RaftVoteMsg.SerializeToString,
-            refactor_dot_common_dot_csdlpt__pb2.RaftVoteReply.FromString,
+            common_dot_csdlpt__pb2.RaftVoteMsg.SerializeToString,
+            common_dot_csdlpt__pb2.RaftVoteReply.FromString,
             options,
             channel_credentials,
             insecure,
@@ -295,8 +339,8 @@ class CoordinatorService(object):
             request,
             target,
             '/csdlpt.CoordinatorService/RaftState',
-            refactor_dot_common_dot_csdlpt__pb2.RaftStateMsg.SerializeToString,
-            refactor_dot_common_dot_csdlpt__pb2.EmptyReply.FromString,
+            common_dot_csdlpt__pb2.RaftStateMsg.SerializeToString,
+            common_dot_csdlpt__pb2.EmptyReply.FromString,
             options,
             channel_credentials,
             insecure,
@@ -322,8 +366,8 @@ class CoordinatorService(object):
             request,
             target,
             '/csdlpt.CoordinatorService/ZkVote',
-            refactor_dot_common_dot_csdlpt__pb2.ZkVoteMsg.SerializeToString,
-            refactor_dot_common_dot_csdlpt__pb2.ZkVoteReply.FromString,
+            common_dot_csdlpt__pb2.ZkVoteMsg.SerializeToString,
+            common_dot_csdlpt__pb2.ZkVoteReply.FromString,
             options,
             channel_credentials,
             insecure,
@@ -349,8 +393,8 @@ class CoordinatorService(object):
             request,
             target,
             '/csdlpt.CoordinatorService/ZkState',
-            refactor_dot_common_dot_csdlpt__pb2.ZkStateMsg.SerializeToString,
-            refactor_dot_common_dot_csdlpt__pb2.EmptyReply.FromString,
+            common_dot_csdlpt__pb2.ZkStateMsg.SerializeToString,
+            common_dot_csdlpt__pb2.EmptyReply.FromString,
             options,
             channel_credentials,
             insecure,
@@ -373,8 +417,8 @@ class AggregatorServiceStub(object):
         """
         self.SendWorkerWatermark = channel.unary_unary(
                 '/csdlpt.AggregatorService/SendWorkerWatermark',
-                request_serializer=refactor_dot_common_dot_csdlpt__pb2.WorkerWatermarkMsg.SerializeToString,
-                response_deserializer=refactor_dot_common_dot_csdlpt__pb2.EmptyReply.FromString,
+                request_serializer=common_dot_csdlpt__pb2.WorkerWatermarkMsg.SerializeToString,
+                response_deserializer=common_dot_csdlpt__pb2.EmptyReply.FromString,
                 _registered_method=True)
 
 
@@ -393,8 +437,8 @@ def add_AggregatorServiceServicer_to_server(servicer, server):
     rpc_method_handlers = {
             'SendWorkerWatermark': grpc.unary_unary_rpc_method_handler(
                     servicer.SendWorkerWatermark,
-                    request_deserializer=refactor_dot_common_dot_csdlpt__pb2.WorkerWatermarkMsg.FromString,
-                    response_serializer=refactor_dot_common_dot_csdlpt__pb2.EmptyReply.SerializeToString,
+                    request_deserializer=common_dot_csdlpt__pb2.WorkerWatermarkMsg.FromString,
+                    response_serializer=common_dot_csdlpt__pb2.EmptyReply.SerializeToString,
             ),
     }
     generic_handler = grpc.method_handlers_generic_handler(
@@ -422,8 +466,8 @@ class AggregatorService(object):
             request,
             target,
             '/csdlpt.AggregatorService/SendWorkerWatermark',
-            refactor_dot_common_dot_csdlpt__pb2.WorkerWatermarkMsg.SerializeToString,
-            refactor_dot_common_dot_csdlpt__pb2.EmptyReply.FromString,
+            common_dot_csdlpt__pb2.WorkerWatermarkMsg.SerializeToString,
+            common_dot_csdlpt__pb2.EmptyReply.FromString,
             options,
             channel_credentials,
             insecure,

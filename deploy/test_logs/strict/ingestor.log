@@ -1,41 +1,50 @@
+refactor-ingestor  | [entrypoint] Cleaning old checkpoint data in /data/ ...
+refactor-ingestor  | [entrypoint] Checkpoint cleanup complete.
 refactor-ingestor  | [ingestor] detected access-log CSV format, mapping columns
+refactor-ingestor  | 2026-05-30 03:49:46,496 [ERROR] kafka.conn: <BrokerConnection client_id=topic-init, node_id=bootstrap-0 host=kafka:9092 <connecting> [IPv4 ('172.18.0.4', 9092)]>: Connect attempt returned error 111. Disconnecting.
+refactor-ingestor  | 2026-05-30 03:49:46,496 [ERROR] kafka.conn: <BrokerConnection client_id=topic-init, node_id=bootstrap-0 host=kafka:9092 <connecting> [IPv4 ('172.18.0.4', 9092)]>: Closing connection. KafkaConnectionError: 111 ECONNREFUSED
+refactor-ingestor  | 2026-05-30 03:49:46,496 [WARNING] kafka.client: No node available during check_version; sleeping 0.05 secs
+refactor-ingestor  | 2026-05-30 03:49:46,552 [ERROR] kafka.conn: <BrokerConnection client_id=topic-init, node_id=bootstrap-0 host=kafka:9092 <connecting> [IPv4 ('172.18.0.4', 9092)]>: Connect attempt returned error 111. Disconnecting.
+refactor-ingestor  | 2026-05-30 03:49:46,552 [ERROR] kafka.conn: <BrokerConnection client_id=topic-init, node_id=bootstrap-0 host=kafka:9092 <connecting> [IPv4 ('172.18.0.4', 9092)]>: Closing connection. KafkaConnectionError: 111 ECONNREFUSED
+refactor-ingestor  | 2026-05-30 03:49:46,552 [WARNING] kafka.client: No node available during check_version; sleeping 0.11 secs
+refactor-ingestor  | 2026-05-30 03:49:46,668 [ERROR] kafka.conn: <BrokerConnection client_id=topic-init, node_id=bootstrap-0 host=kafka:9092 <connecting> [IPv4 ('172.18.0.4', 9092)]>: Connect attempt returned error 111. Disconnecting.
+refactor-ingestor  | 2026-05-30 03:49:46,668 [ERROR] kafka.conn: <BrokerConnection client_id=topic-init, node_id=bootstrap-0 host=kafka:9092 <connecting> [IPv4 ('172.18.0.4', 9092)]>: Closing connection. KafkaConnectionError: 111 ECONNREFUSED
+refactor-ingestor  | 2026-05-30 03:49:46,669 [WARNING] kafka.client: No node available during check_version; sleeping 0.24 secs
+refactor-ingestor  | 2026-05-30 03:49:46,907 [ERROR] kafka.conn: <BrokerConnection client_id=topic-init, node_id=bootstrap-0 host=kafka:9092 <connecting> [IPv4 ('172.18.0.4', 9092)]>: Connect attempt returned error 111. Disconnecting.
+refactor-ingestor  | 2026-05-30 03:49:46,907 [ERROR] kafka.conn: <BrokerConnection client_id=topic-init, node_id=bootstrap-0 host=kafka:9092 <connecting> [IPv4 ('172.18.0.4', 9092)]>: Closing connection. KafkaConnectionError: 111 ECONNREFUSED
+refactor-ingestor  | 2026-05-30 03:49:46,908 [WARNING] kafka.client: No node available during check_version; sleeping 0.46 secs
+refactor-ingestor  | 2026-05-30 03:49:47,372 [ERROR] kafka.conn: <BrokerConnection client_id=topic-init, node_id=bootstrap-0 host=kafka:9092 <connecting> [IPv4 ('172.18.0.4', 9092)]>: Connect attempt returned error 111. Disconnecting.
+refactor-ingestor  | 2026-05-30 03:49:47,372 [ERROR] kafka.conn: <BrokerConnection client_id=topic-init, node_id=bootstrap-0 host=kafka:9092 <connecting> [IPv4 ('172.18.0.4', 9092)]>: Closing connection. KafkaConnectionError: 111 ECONNREFUSED
+refactor-ingestor  | 2026-05-30 03:49:47,372 [WARNING] kafka.client: No node available during check_version; sleeping 0.94 secs
+refactor-ingestor  | 2026-05-30 03:49:48,316 [ERROR] kafka.conn: <BrokerConnection client_id=topic-init, node_id=bootstrap-0 host=kafka:9092 <connecting> [IPv4 ('172.18.0.4', 9092)]>: Connect attempt returned error 111. Disconnecting.
+refactor-ingestor  | 2026-05-30 03:49:48,316 [ERROR] kafka.conn: <BrokerConnection client_id=topic-init, node_id=bootstrap-0 host=kafka:9092 <connecting> [IPv4 ('172.18.0.4', 9092)]>: Closing connection. KafkaConnectionError: 111 ECONNREFUSED
+refactor-ingestor  | 2026-05-30 03:49:48,316 [WARNING] kafka.client: No node available during check_version; sleeping 0.18 secs
+refactor-ingestor  | 2026-05-30 03:49:49,496 [ERROR] kafka.conn: <BrokerConnection client_id=topic-init, node_id=bootstrap-0 host=kafka:9092 <connecting> [IPv4 ('172.18.0.4', 9092)]>: Connect attempt returned error 111. Disconnecting.
+refactor-ingestor  | 2026-05-30 03:49:49,496 [ERROR] kafka.conn: <BrokerConnection client_id=topic-init, node_id=bootstrap-0 host=kafka:9092 <connecting> [IPv4 ('172.18.0.4', 9092)]>: Closing connection. KafkaConnectionError: 111 ECONNREFUSED
+refactor-ingestor  | 2026-05-30 03:49:49,496 [WARNING] kafka.client: No node available during check_version; sleeping 0.06 secs
+refactor-ingestor  | 2026-05-30 03:49:49,552 [ERROR] kafka.conn: <BrokerConnection client_id=topic-init, node_id=bootstrap-0 host=kafka:9092 <connecting> [IPv4 ('172.18.0.4', 9092)]>: Connect attempt returned error 111. Disconnecting.
+refactor-ingestor  | 2026-05-30 03:49:49,552 [ERROR] kafka.conn: <BrokerConnection client_id=topic-init, node_id=bootstrap-0 host=kafka:9092 <connecting> [IPv4 ('172.18.0.4', 9092)]>: Closing connection. KafkaConnectionError: 111 ECONNREFUSED
+refactor-ingestor  | 2026-05-30 03:49:49,552 [WARNING] kafka.client: No node available during check_version; sleeping 0.10 secs
+refactor-ingestor  | 2026-05-30 03:49:49,658 [ERROR] kafka.conn: <BrokerConnection client_id=topic-init, node_id=bootstrap-0 host=kafka:9092 <connecting> [IPv4 ('172.18.0.4', 9092)]>: Connect attempt returned error 111. Disconnecting.
+refactor-ingestor  | 2026-05-30 03:49:49,658 [ERROR] kafka.conn: <BrokerConnection client_id=topic-init, node_id=bootstrap-0 host=kafka:9092 <connecting> [IPv4 ('172.18.0.4', 9092)]>: Closing connection. KafkaConnectionError: 111 ECONNREFUSED
+refactor-ingestor  | 2026-05-30 03:49:49,658 [WARNING] kafka.client: No node available during check_version; sleeping 0.20 secs
+refactor-ingestor  | 2026-05-30 03:49:49,857 [ERROR] kafka.conn: <BrokerConnection client_id=topic-init, node_id=bootstrap-0 host=kafka:9092 <connecting> [IPv4 ('172.18.0.4', 9092)]>: Connect attempt returned error 111. Disconnecting.
+refactor-ingestor  | 2026-05-30 03:49:49,857 [ERROR] kafka.conn: <BrokerConnection client_id=topic-init, node_id=bootstrap-0 host=kafka:9092 <connecting> [IPv4 ('172.18.0.4', 9092)]>: Closing connection. KafkaConnectionError: 111 ECONNREFUSED
+refactor-ingestor  | 2026-05-30 03:49:49,857 [WARNING] kafka.client: No node available during check_version; sleeping 0.33 secs
+refactor-ingestor  | 2026-05-30 03:49:50,191 [ERROR] kafka.conn: <BrokerConnection client_id=topic-init, node_id=bootstrap-0 host=kafka:9092 <connecting> [IPv4 ('172.18.0.4', 9092)]>: Connect attempt returned error 111. Disconnecting.
+refactor-ingestor  | 2026-05-30 03:49:50,191 [ERROR] kafka.conn: <BrokerConnection client_id=topic-init, node_id=bootstrap-0 host=kafka:9092 <connecting> [IPv4 ('172.18.0.4', 9092)]>: Closing connection. KafkaConnectionError: 111 ECONNREFUSED
+refactor-ingestor  | 2026-05-30 03:49:50,191 [WARNING] kafka.client: No node available during check_version; sleeping 0.90 secs
+refactor-ingestor  | 2026-05-30 03:49:51,316 [INFO] kafka_real: ensure_topics: created ['heuristic_results']
+refactor-ingestor  | 2026-05-30 03:49:51,317 [INFO] kafka_real: RealKafkaProducer: initializing with bootstrap_servers=['kafka:9092'], acks=all
 refactor-ingestor  | [ingestor] using Kafka producer -> kafka:9092
 refactor-ingestor  | [alerting] PagerDuty not configured, alerts logged to stderr
 refactor-ingestor  | [ingestor] listening on :8100, source=/data/access.log/access_sample.csv
 refactor-ingestor  | [ingestor] CSV EOF at event 200, switching to idle loop
-refactor-ingestor  | [ingestor] punctuation T_commit=1779983458.980 min_et=1779983406.980 max_et=1779983448.980 eof=True mode=data-driven is_empty=False
-refactor-ingestor  | [ingestor] punctuation T_commit=1779983458.980 min_et=1779983406.980 max_et=1779983448.980 eof=True mode=data-driven is_empty=True
-refactor-ingestor  | [ingestor] punctuation T_commit=1779983458.980 min_et=1779983406.980 max_et=1779983448.980 eof=True mode=data-driven is_empty=True
-refactor-ingestor  | [ingestor] punctuation T_commit=1779983458.980 min_et=1779983406.980 max_et=1779983448.980 eof=True mode=data-driven is_empty=True
-refactor-ingestor  | [ingestor] punctuation T_commit=1779983458.980 min_et=1779983406.980 max_et=1779983448.980 eof=True mode=data-driven is_empty=True
-refactor-ingestor  | [ingestor] punctuation T_commit=1779983458.980 min_et=1779983406.980 max_et=1779983448.980 eof=True mode=data-driven is_empty=True
-refactor-ingestor  | [ingestor] punctuation T_commit=1779983458.980 min_et=1779983406.980 max_et=1779983448.980 eof=True mode=data-driven is_empty=True
-refactor-ingestor  | [ingestor] punctuation T_commit=1779983458.980 min_et=1779983406.980 max_et=1779983448.980 eof=True mode=data-driven is_empty=True
-refactor-ingestor  | [ingestor] punctuation T_commit=1779983458.980 min_et=1779983406.980 max_et=1779983448.980 eof=True mode=data-driven is_empty=True
-refactor-ingestor  | [ingestor] punctuation T_commit=1779983458.980 min_et=1779983406.980 max_et=1779983448.980 eof=True mode=data-driven is_empty=True
-refactor-ingestor  | [ingestor] punctuation T_commit=1779983458.980 min_et=1779983406.980 max_et=1779983448.980 eof=True mode=data-driven is_empty=True
-refactor-ingestor  | [ingestor] punctuation T_commit=1779983458.980 min_et=1779983406.980 max_et=1779983448.980 eof=True mode=data-driven is_empty=True
-refactor-ingestor  | [ingestor] punctuation T_commit=1779983458.980 min_et=1779983406.980 max_et=1779983448.980 eof=True mode=data-driven is_empty=True
-refactor-ingestor  | [ingestor] punctuation T_commit=1779983458.980 min_et=1779983406.980 max_et=1779983448.980 eof=True mode=data-driven is_empty=True
-refactor-ingestor  | [ingestor] punctuation T_commit=1779983458.980 min_et=1779983406.980 max_et=1779983448.980 eof=True mode=data-driven is_empty=True
-refactor-ingestor  | [ingestor] punctuation T_commit=1779983458.980 min_et=1779983406.980 max_et=1779983448.980 eof=True mode=data-driven is_empty=True
-refactor-ingestor  | [ingestor] punctuation T_commit=1779983458.980 min_et=1779983406.980 max_et=1779983448.980 eof=True mode=data-driven is_empty=True
-refactor-ingestor  | [ingestor] punctuation T_commit=1779983458.980 min_et=1779983406.980 max_et=1779983448.980 eof=True mode=data-driven is_empty=True
-refactor-ingestor  | [ingestor] punctuation T_commit=1779983458.980 min_et=1779983406.980 max_et=1779983448.980 eof=True mode=data-driven is_empty=True
-refactor-ingestor  | [ingestor] punctuation T_commit=1779983458.980 min_et=1779983406.980 max_et=1779983448.980 eof=True mode=data-driven is_empty=True
-refactor-ingestor  | [ingestor] punctuation T_commit=1779983458.980 min_et=1779983406.980 max_et=1779983448.980 eof=True mode=data-driven is_empty=True
-refactor-ingestor  | [ingestor] punctuation T_commit=1779983458.980 min_et=1779983406.980 max_et=1779983448.980 eof=True mode=data-driven is_empty=True
-refactor-ingestor  | [ingestor] punctuation T_commit=1779983458.980 min_et=1779983406.980 max_et=1779983448.980 eof=True mode=data-driven is_empty=True
-refactor-ingestor  | [ingestor] punctuation T_commit=1779983458.980 min_et=1779983406.980 max_et=1779983448.980 eof=True mode=data-driven is_empty=True
-refactor-ingestor  | [ingestor] punctuation T_commit=1779983458.980 min_et=1779983406.980 max_et=1779983448.980 eof=True mode=data-driven is_empty=True
-refactor-ingestor  | [ingestor] punctuation T_commit=1779983458.980 min_et=1779983406.980 max_et=1779983448.980 eof=True mode=data-driven is_empty=True
-refactor-ingestor  | [ingestor] punctuation T_commit=1779983458.980 min_et=1779983406.980 max_et=1779983448.980 eof=True mode=data-driven is_empty=True
-refactor-ingestor  | [ingestor] punctuation T_commit=1779983458.980 min_et=1779983406.980 max_et=1779983448.980 eof=True mode=data-driven is_empty=True
-refactor-ingestor  | [ingestor] punctuation T_commit=1779983458.980 min_et=1779983406.980 max_et=1779983448.980 eof=True mode=data-driven is_empty=True
-refactor-ingestor  | [ingestor] punctuation T_commit=1779983458.980 min_et=1779983406.980 max_et=1779983448.980 eof=True mode=data-driven is_empty=True
-refactor-ingestor  | [ingestor] punctuation T_commit=1779983458.980 min_et=1779983406.980 max_et=1779983448.980 eof=True mode=data-driven is_empty=True
-refactor-ingestor  | [ingestor] punctuation T_commit=1779983458.980 min_et=1779983406.980 max_et=1779983448.980 eof=True mode=data-driven is_empty=True
-refactor-ingestor  | [ingestor] punctuation T_commit=1779983458.980 min_et=1779983406.980 max_et=1779983448.980 eof=True mode=data-driven is_empty=True
-refactor-ingestor  | [ingestor] punctuation T_commit=1779983458.980 min_et=1779983406.980 max_et=1779983448.980 eof=True mode=data-driven is_empty=True
-refactor-ingestor  | [ingestor] punctuation T_commit=1779983458.980 min_et=1779983406.980 max_et=1779983448.980 eof=True mode=data-driven is_empty=True
-refactor-ingestor  | [ingestor] punctuation T_commit=1779983458.980 min_et=1779983406.980 max_et=1779983448.980 eof=True mode=data-driven is_empty=True
+refactor-ingestor  | [ingestor] punctuation T_commit=1780113043.437 min_et=1780112986.437 max_et=1780113028.437 eof=True mode=data-driven is_empty=False
+refactor-ingestor  | [ingestor] punctuation T_commit=1780113043.437 min_et=1780112986.437 max_et=1780113028.437 eof=True mode=data-driven is_empty=True
+refactor-ingestor  | [ingestor] punctuation T_commit=1780113043.437 min_et=1780112986.437 max_et=1780113028.437 eof=True mode=data-driven is_empty=True
+refactor-ingestor  | [ingestor] punctuation T_commit=1780113043.437 min_et=1780112986.437 max_et=1780113028.437 eof=True mode=data-driven is_empty=True
+refactor-ingestor  | 2026-05-30 03:49:56,341 [WARNING] kafka.cluster: Topic ingestor-heartbeats is not available during auto-create initialization
+refactor-ingestor  | 2026-05-30 03:49:56,445 [WARNING] kafka.cluster: Topic ingestor-heartbeats is not available during auto-create initialization
+refactor-ingestor  | [ingestor] punctuation T_commit=1780113043.437 min_et=1780112986.437 max_et=1780113028.437 eof=True mode=data-driven is_empty=True
+refactor-ingestor  | [ingestor] EOF flush complete (5 punctuations sent), stopping ingest loop

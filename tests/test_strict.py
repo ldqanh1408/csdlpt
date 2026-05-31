@@ -67,9 +67,9 @@ class TestStrictWatermarkEngine:
 
     def test_window_closing(self):
         eng = StrictWatermarkEngine(window_size_s=5.0, delta_base_s=10.0)
-        eng.on_punctuation(PunctuationToken(T_commit=120.0, partition_id=0, ingestor_id="t"))
         for i in range(50):
             eng.process(LogEvent(event_id=f"e{i}", event_time=100.0 + i * 0.1, status=200))
+        eng.on_punctuation(PunctuationToken(T_commit=120.0, partition_id=0, ingestor_id="t"))
         eng.flush()
         assert len(eng.closed_windows) >= 1
 

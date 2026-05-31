@@ -41,7 +41,9 @@
       "Bash(curl -s http://localhost:8000/api/metrics)",
       "Bash(docker run *)",
       "Bash(pip show *)",
-      "Bash(MODE=heuristic docker compose *)"
+      "Bash(MODE=heuristic docker compose *)",
+      "Bash(PYTHONIOENCODING=utf-8 python -)",
+      "Bash(head -n 3 /d/dev/csdlpt/dataset/yellow_tripdata_2024-01.csv 2>/dev/null || head -n 3 \"C:/Users/CYBORG/Downloads/yellow_tripdata_2024-01.csv\")"
     ]
   }
 }

@@ -7,6 +7,7 @@
 dist/
 build/
 
+.*
 # Project dataset & runtime state
 dataset/
 dlq/

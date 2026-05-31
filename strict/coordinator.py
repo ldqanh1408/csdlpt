@@ -24,6 +24,7 @@ class PartitionInfo:
     last_update: float
     status: WorkerStatus
     state: PartitionState = PartitionState.ASSIGNED
+    is_temporary_idle: bool = False
 
 
 class StrictCoordinator:
@@ -123,14 +124,17 @@ class StrictCoordinator:
 
             self._worker_last_seen[worker] = now
             for part_id, lw in hb.partitions.items():
+                is_idle = hb.idle_partitions is not None and part_id in hb.idle_partitions
                 if part_id not in self.partitions:
-                    self.partitions[part_id] = PartitionInfo(
+                    pinfo = PartitionInfo(
                         partition_id=part_id,
                         worker_id=hb.worker_id,
                         local_watermark=lw,
                         last_update=now,
                         status=WorkerStatus.ACTIVE,
                     )
+                    pinfo.is_temporary_idle = is_idle
+                    self.partitions[part_id] = pinfo
                     self._persist_partition(part_id)
                 else:
                     p = self.partitions[part_id]
@@ -138,6 +142,7 @@ class StrictCoordinator:
                     p.last_update = now
                     p.worker_id = hb.worker_id
                     p.status = WorkerStatus.ACTIVE
+                    p.is_temporary_idle = is_idle
                     self._persist_partition(part_id)
             self._update_statuses()
             self._compute_global()
@@ -158,12 +163,13 @@ class StrictCoordinator:
     def _compute_global(self) -> None:
         # §4.4.1: Strict includes IDLE partitions in min() — do NOT use Idleness Bypass
         # Only FAILED partitions are excluded.
+        # But we implement Active Idle Classification to temporarily exclude TEMPORARY_IDLE partitions:
         _ACTIVE_STATUSES = (WorkerStatus.ACTIVE, WorkerStatus.STALE, WorkerStatus.IDLE)
 
         active = [
             p.local_watermark
             for p in self.partitions.values()
-            if p.status in _ACTIVE_STATUSES
+            if p.status in _ACTIVE_STATUSES and not getattr(p, "is_temporary_idle", False)
         ]
         if active:
             candidate = min(active)
@@ -270,6 +276,7 @@ class StrictCoordinator:
                         "local_watermark": v.local_watermark,
                         "status": v.status.value,
                         "state": v.state.value,
+                        "is_temporary_idle": getattr(v, "is_temporary_idle", False),
                     }
                     for k, v in self.partitions.items()
                 },
@@ -332,6 +339,7 @@ class StrictCoordinator:
                         last_update=time.time(),
                         status=WorkerStatus(v["status"]),
                         state=PartitionState(v.get("state", "assigned")),
+                        is_temporary_idle=v.get("is_temporary_idle", False),
                     )
                 return True
             return False

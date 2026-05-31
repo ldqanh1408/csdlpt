@@ -620,6 +620,13 @@ class MonitoringManager:
         self._snapshot["_ingestor_silent"] = silent
         self._snapshot["_ingestor_stuck"] = stuck
 
+        # Update ingestor-specific gauges
+        ingestors = health_eval.get("ingestors", {})
+        for ingestor_id, info in ingestors.items():
+            rtt_ms = info.get("network_rtt_ms", 0.0)
+            self.ingestor_health_rtt_ms.labels(ingestor_id=ingestor_id).set(rtt_ms)
+            self.ingestor_network_rtt_seconds.labels(ingestor_id=ingestor_id).set(rtt_ms / 1000.0)
+
     def update_worker_resources(self, worker_id: str) -> None:
         """Update worker RAM/disk gauges from psutil (best-effort).
 

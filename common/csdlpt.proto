@@ -6,6 +6,9 @@ service CoordinatorService {
   // Worker -> Coordinator heartbeat
   rpc WorkerHeartbeat (WorkerHeartbeatMsg) returns (EmptyReply);
 
+  // Worker -> Coordinator ping for Liveness
+  rpc WorkerPing (WorkerPingMsg) returns (EmptyReply);
+
   // Ingestor -> Coordinator heartbeat
   rpc IngestorHeartbeat (IngestorHeartbeatMsg) returns (EmptyReply);
 
@@ -102,4 +105,9 @@ message WorkerWatermarkMsg {
 
 message EmptyReply {
   bool ok = 1;
+}
+
+message WorkerPingMsg {
+  string worker_id = 1;
+  double timestamp = 2;
 }

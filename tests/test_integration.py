@@ -215,11 +215,6 @@ class TestKafkaIntegration:
         coord = StrictCoordinator(delta_base_s=10.0)
         worker = StrictWorker("w0", [0], window_size_s=5.0, delta_base_s=10.0)
 
-        # Feed punctuation token so the engine can emit windows
-        worker.on_punctuation(PunctuationToken(
-            T_commit=base + 15.0, partition_id=0, ingestor_id="ing-1"
-        ))
-
         # Process events through worker
         for msg in msgs:
             data = json.loads(msg["value"])
@@ -229,6 +224,13 @@ class TestKafkaIntegration:
                 status=data["status"],
             )
             worker.process(event, partition_id=msg["partition"])
+
+        worker.drain_ready(0, batch_size=10)
+
+        # Feed punctuation after data so it acts as a strict close signal.
+        worker.on_punctuation(PunctuationToken(
+            T_commit=base + 15.0, partition_id=0, ingestor_id="ing-1"
+        ))
 
         worker.flush_all()
         coord.receive_heartbeat(worker.heartbeat())

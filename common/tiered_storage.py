@@ -6,6 +6,7 @@ Eviction state machine: CLOSED -> UPLOADING -> UPLOADED -> PURGED
 import io
 import json
 import logging
+import os
 import threading
 import time
 
@@ -91,12 +92,21 @@ class TieredStorageManager:
 
         try:
             from minio import Minio
+            import urllib3
+
+            # Customize HTTP pool client to optimize connection reuse and multiplexing
+            http_client = urllib3.PoolManager(
+                maxsize=32,
+                block=False,
+                retries=urllib3.util.Retry(total=3, backoff_factor=0.2)
+            )
 
             self.client = Minio(
                 endpoint,
                 access_key=access_key,
                 secret_key=secret_key,
                 secure=secure,
+                http_client=http_client,
             )
             self._ensure_bucket()
             logger.info(
@@ -153,6 +163,9 @@ class TieredStorageManager:
             data = response.read()
             response.close()
             response.release_conn()
+            import gzip
+            if data.startswith(b'\x1f\x8b'):
+                data = gzip.decompress(data)
             return json.loads(data)
         except Exception as e:
             logger.warning("TieredStorage: download failed for %s: %s", window_id, e)
@@ -207,7 +220,9 @@ class TieredStorageManager:
             logger.warning("TieredStorage: stats query failed: %s", e)
             return {"status": "error", "total_objects": 0, "total_size_bytes": 0}
 
-        data = json.dumps(window_data).encode()
+    def _do_upload(self, window_id: str, window_data: dict, partition_id: int = 0) -> None:
+        import gzip
+        data = gzip.compress(json.dumps(window_data).encode())
         headers = {}
         sse_kms_key = os.environ.get("MINIO_SSE_KMS_KEY_ID", "")
         if sse_kms_key:

@@ -119,6 +119,7 @@ class HeuristicWatermarkEngine:
 
         # Extreme lag counter (spec §5.5)
         self.extreme_lag_count: int = 0
+        self.punctuation_total: int = 0
 
         # Dedup with TTL (§6.5 — bound memory; idempotent filter only needs
         # to cover ~δ_base seconds of recent IDs). Each entry stores the
@@ -978,5 +979,14 @@ class HeuristicWatermarkEngine:
             "sketch_query_latency_p50_us": _lat_us(self.metrics.T_sketch_query_ns, 0.50),
             "sketch_query_latency_p95_us": _lat_us(self.metrics.T_sketch_query_ns, 0.95),
             "sketch_query_latency_p99_us": _lat_us(self.metrics.T_sketch_query_ns, 0.99),
+            # Gap 3 metrics
+            "active_partitions": getattr(self, "active_partitions", 1),
+            "clock_skew_ms": getattr(self, "clock_skew_ms", 0.0),
+            "punctuation_total": self.punctuation_total,
+            "eviction_state": 0,  # no tiered eviction in heuristic mode
+            "window_id": f"w_{self.partition_id}_none",
+            "ingestor_id": f"ingestor_{self.partition_id}",
+            "ingestor_health_rtt_ms": 0.0,
+            "ingestor_network_rtt_seconds": 0.0,
         })
         return base

@@ -79,6 +79,7 @@ class IngestorHealthMonitor:
         last_T_commit: float = 0.0,
         ingestor_clock: float = None,
         offsets: dict[int, int] = None,
+        network_rtt_ms: float = 0.0,
     ) -> None:
         now = time.time()
         if ingestor_clock is None:
@@ -93,6 +94,7 @@ class IngestorHealthMonitor:
         rec = self.ingestors[ingestor_id]
         rec.last_heartbeat = now
         rec.ingestor_clock = ingestor_clock
+        rec.network_rtt_ms = network_rtt_ms
         if partitions is not None:
             rec.partitions_assigned = partitions
         if offsets:
@@ -175,6 +177,14 @@ class IngestorHealthMonitor:
             "silent_count": sum(1 for r in self.ingestors.values() if r.status == IngestorStatus.SILENT),
             "alerts": self.alerts,
             "w_meta_alert": w_meta_alert,
+            "ingestors": {
+                ingestor_id: {
+                    "clock_skew_ms": rec.clock_skew_ms,
+                    "network_rtt_ms": rec.network_rtt_ms,
+                    "status": rec.status.value,
+                }
+                for ingestor_id, rec in self.ingestors.items()
+            }
         }
 
     def summary(self) -> dict:

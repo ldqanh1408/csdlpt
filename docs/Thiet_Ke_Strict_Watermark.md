@@ -327,18 +327,17 @@ Khuyến nghị: ZooKeeper-based cho Phase 1-2, đánh giá migrate sang Raft ch
 
 Mọi quyết định của Leader đi qua Raft log replication, chỉ commit khi majority (2/3) ack.
 
-**State được replicate**:
+**Trạng thái toàn cục được đồng bộ (Replicated State)**:
 
-```
-ReplicatedState {
-  current_term: int
-  W_global: float (cập nhật 200ms)
-  partition_assignment: Map<PartitionID, NodeID>
-  partition_state_machine: Map<PartitionID, State>  // §8.5
-  failover_history: List<FailoverEvent>            // audit
-  ingestor_health: Map<IngestorID, HealthRecord>   // §10
-}
-```
+| Trường thông tin | Kiểu dữ liệu | Ý nghĩa chức năng |
+|---|---|---|
+| `current_term` | Số nguyên (`int`) | Nhiệm kỳ (term) hiện tại của Coordinator Leader theo Raft. |
+| `W_global` | Số thực (`float`) | Mốc Watermark toàn cục hiện tại (cập nhật định kỳ 200ms). |
+| `partition_assignment` | Bản đồ (`Map<PartitionID, NodeID>`) | Sơ đồ phân bổ phân vùng Kafka cho các Worker Node. |
+| `partition_state_machine` | Bản đồ (`Map<PartitionID, State>`) | Trạng thái phân vùng hiện tại phục vụ chuyển giao lỗi (§8.5). |
+| `failover_history` | Danh sách (`List<FailoverEvent>`) | Nhật ký lịch sử các sự kiện chuyển dịch quyền sở hữu. |
+| `ingestor_health` | Bản đồ (`Map<IngestorID, HealthRecord>`) | Thông số giám sát sức khỏe của các Ingestor đầu nguồn (§10). |
+
 
 ### 5.4. Leader Failover Protocol
 
@@ -989,13 +988,97 @@ Nếu `W_meta_global` lệch `W_global` quá nhiều (> 10s) → cảnh báo Ing
 ### 12.2. Giới hạn đã biết
 
 - **Coordinator Cluster nội bộ**: Raft cần network nội bộ ổn định giữa 3 instance. Network partition giữa 3 instance → minority side step down (mất availability tạm thời).
+
+**Disk I/O vs RAM** *(State Management)*: RocksDB tốn IOPS hơn in-memory store, nhưng bảo vệ tuyệt đối khỏi OOM. Mitigation: Incremental Checkpoint chỉ ghi SST mới.
+
+**Failover Complexity vs Availability**: Partition-level checkpoint + Isolated Instances + Raft Coordinator phức tạp hơn Node-level. Đổi lấy: Even Redistribution, không split-brain, DR an toàn.
+
+**Network Bandwidth vs Storage Cost** *(Tiered)*: Tier 3 (MinIO) tốn bandwidth nhưng tiết kiệm 90% local disk. Mitigation: alert nếu MinIO upload nghẽn > 15 phút.
+
+**Operational Overhead vs Resilience** *(Coordinator HA)*: 3 Coordinator instance tốn hạ tầng hơn 1, nhưng loại bỏ SPOF — bắt buộc cho production.
+
+### 12.2. Giới hạn đã biết
+
+- **Coordinator Cluster nội bộ**: Raft cần network nội bộ ổn định giữa 3 instance. Network partition giữa 3 instance → minority side step down (mất availability tạm thời).
 - **Tier 3 dependency**: Nếu MinIO down, Tier 1+2 vẫn hoạt động nhưng Closed Window archive tích lũy lại trên Tier 2. Cần monitor và scale Tier 2 capacity.
 - **Ingestor Heartbeat lag**: Heartbeat 5s + alert 15s → có thể detect Ingestor sập chậm 20s. Trong khoảng đó, partition có thể đã idle. Đảm bảo Heartbeat Punctuation định kỳ vẫn fail-safe.
 - **Tiered Eviction giới hạn**: Sự cố > 24 giờ vượt quá retention Tier 2 → có thể cần offline backfill từ Tier 3.
 - **Output Exactly-Once dependent on sink**: Cần downstream support tx hoặc idempotent dedup. Append-only sink thuần (vd dashboard live counter) khó đạt EOS hoàn hảo.
 
-### 12.3. Không hỗ trợ
+### 12.3. Cải tiến truyền thông đã thực hiện (Implemented Communication Improvements)
+
+Để khắc phục các điểm nghẽn và rủi ro trong phiên bản thiết kế ban đầu, các cải tiến sau đã được tích hợp và xác minh:
+1. **Phân tách Liveness và Progress**: Giao thức truyền thông giữa Worker và Coordinator được tách thành kênh `WorkerPing` (Liveness out-of-band, chu kỳ 1s) và kênh `WorkerHeartbeat` (Progress in-band). Giúp loại bỏ hoàn toàn các báo động failover giả do nghẽn CPU/GC.
+2. **Kafka Ingestor Heartbeat**: Ingestor chuyển sang đẩy heartbeat trực tiếp qua topic `ingestor-heartbeats`, giảm thiểu gRPC Fan-in Bottleneck tại Coordinator.
+3. **Nén dữ liệu MinIO & Connection Pooling**: Sử dụng `gzip` để nén dữ liệu cửa sổ JSON trước khi tải lên và giải nén khi tải về. Client Minio được cấu hình pool kết nối tối ưu (Keep-Alive, maxsize 32) để giảm hao tổn mạng.
+4. **Active Idle Classification**: Giải quyết vấn đề Straggler bằng cách phân loại các phân vùng nhàn rỗi `is_temporary_idle`. Coordinator tạm thời loại bỏ các phân vùng này ra khỏi hàm `min()` tính toán Watermark toàn cục để tránh nghẽn luồng xử lý chung.
+
+### 12.4. Không hỗ trợ
 
 - Multi-region active-active (single region only).
 - Schema changes runtime (cần migration plan, xem operational guide).
 - Custom user-defined Window (chỉ Tumbling Window cố định size).
+
+---
+
+## 13. Phụ lục — Đồng bộ với code đã implement (Implementation Sync)
+
+> Mục này ghi nhận **hành vi thực tế của code** (`run.py`, `strict/`, `deploy/`) để
+> bản thiết kế khớp với hệ thống đang chạy. Khi có khác biệt giữa văn bản phía trên
+> và mục này, **mục này là nguồn đúng**. Xem thêm [system_architect.md](system_architect.md).
+
+### 13.1. Topology thực tế
+
+- **4 Worker node, 12 partition, đánh số từ 0**: `node0=P0,1,2`, `node1=P3,4,5`,
+  `node2=P6,7,8`, `node3=P9,10,11` (các diagram dùng `P1..P12` 1-indexed ở trên chỉ
+  mang tính minh hoạ; code dùng `0..11`). Xem [deploy/docker-compose.yml](../deploy/docker-compose.yml).
+- **3 Coordinator** (`coordinator-1/2/3`) chạy Raft/ZooKeeper-style; mỗi coordinator
+  có volume checkpoint **riêng**.
+
+### 13.2. Control plane: gRPC + HTTP fallback (không phải pure-gRPC)
+
+- gRPC chạy ở cổng **HTTP_PORT + 50** (vd HTTP `8000` → gRPC `8050`), service
+  `CoordinatorServiceStub` / `AggregatorServiceStub` (`run.py:46-102`).
+- Khi thư viện `grpc` không khả dụng, hệ thống **fallback sang HTTP REST**
+  (`run.py` `HealthHandler`): `GET /health`, `GET /api/metrics`, `GET /state`,
+  `GET /ingestor-health`, `POST /ingestor-heartbeat`. Đây là hành vi thực tế — REST
+  **không bị loại bỏ hoàn toàn** mà giữ làm fallback + kênh quan sát cho dashboard.
+- Worker push `WorkerHeartbeat` ~1s; pull `GetGlobalState` ~500ms.
+
+### 13.3. Tier-2 Shared Volume + dọn checkpoint theo node
+
+- 4 worker **dùng chung** volume `./checkpoint/shared → /data` để survivor đọc được
+  checkpoint Tier-2 (`/data/checkpoint/partition_k/`) của node chết khi failover.
+- `entrypoint.sh` dọn checkpoint khi container khởi động nhưng **chỉ xoá dữ liệu của
+  chính node** (theo `NODE_ID` + `PARTITIONS`): `rocksdb-strict-{node}-p*`,
+  `rocksdb-dlq/replay-{node}`, và `partition_{pid}` của các partition node sở hữu.
+  Nhờ vậy một node restart **không** xoá RocksDB đang mở của 3 node còn lại (tránh
+  cascade `IO error: No such file`). Đặt `CLEAN_CHECKPOINT=false` để crash-recovery.
+  Xem [deploy/entrypoint.sh](../deploy/entrypoint.sh).
+
+### 13.4. Đường khôi phục thực tế khi tiếp quản partition
+
+- `db_path` RocksDB khoá theo **node_id**: `rocksdb-strict-{node_id}-p{pid}`. Survivor
+  mở DB rỗng mới → **không có metadata** → engine fallback đọc
+  `partition_{pid}/checkpoint.json` (Tier-2, khoá theo partition) để phục hồi
+  open_windows / watermark / committed offset (`strict/engine.py:108-160`).
+- `partition_{pid}/emitted.json` được nạp lại để giữ **Exactly-Once Output** qua
+  failover (`strict/engine.py:174`).
+
+### 13.5. "Wait Time" = `DELTA_BASE_S` (δ) — biến độc lập của deliverable
+
+- δ mặc định `10.0s`, truyền qua biến môi trường compose vào **cả coordinator lẫn
+  worker** (`${DELTA_BASE_S:-10.0}`). Tăng δ ⇒ chờ data trễ lâu hơn ⇒ completeness
+  cao hơn nhưng latency tăng — đúng trục hoành của báo cáo *Completeness % vs Wait Time*.
+- Dashboard ([deploy/dashboard.py](../deploy/dashboard.py)) có ô **Wait Time δ (s)**
+  ở sidebar và tab **📐 Completeness vs Wait** để ghi điểm dữ liệu `(δ, completeness%,
+  late%, latency)`, vẽ đường đánh đổi và tải CSV.
+
+### 13.6. Quan sát & kiểm thử
+
+- Dashboard chỉ điều khiển `deploy/docker-compose.yml` (sim bị vô hiệu hoá).
+- Tab **🛑 Node Control** có **Automated Failover Test**: kill node → quan sát
+  reassignment → recover, ghi timeline `before/just_killed/during_outage/after_recover`
+  và tải CSV làm bằng chứng fault-tolerance.
+- Metrics phục vụ deliverable: `data_completeness_pct`, `late_arrival_rate_pct`,
+  `proc_latency_p50/95/99_us`, `watermark_lag_s` (xem `common/monitoring.py`, `/api/metrics`).

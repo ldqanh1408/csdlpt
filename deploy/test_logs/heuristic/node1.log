@@ -1,31 +1,55 @@
-refactor-node1  | [worker-strict:1] Kafka consumer assigned=[3, 4, 5]
+refactor-node1  | [entrypoint] Cleaning old checkpoint data in /data/ ...
+refactor-node1  | [entrypoint] Checkpoint cleanup complete.
+refactor-node1  | 2026-05-30 04:03:00,819 [ERROR] kafka.conn: <BrokerConnection client_id=topic-init, node_id=bootstrap-0 host=kafka:9092 <connecting> [IPv4 ('172.18.0.4', 9092)]>: Connect attempt returned error 111. Disconnecting.
+refactor-node1  | 2026-05-30 04:03:00,819 [ERROR] kafka.conn: <BrokerConnection client_id=topic-init, node_id=bootstrap-0 host=kafka:9092 <connecting> [IPv4 ('172.18.0.4', 9092)]>: Closing connection. KafkaConnectionError: 111 ECONNREFUSED
+refactor-node1  | 2026-05-30 04:03:00,819 [WARNING] kafka.client: No node available during check_version; sleeping 0.06 secs
+refactor-node1  | 2026-05-30 04:03:00,876 [ERROR] kafka.conn: <BrokerConnection client_id=topic-init, node_id=bootstrap-0 host=kafka:9092 <connecting> [IPv4 ('172.18.0.4', 9092)]>: Connect attempt returned error 111. Disconnecting.
+refactor-node1  | 2026-05-30 04:03:00,876 [ERROR] kafka.conn: <BrokerConnection client_id=topic-init, node_id=bootstrap-0 host=kafka:9092 <connecting> [IPv4 ('172.18.0.4', 9092)]>: Closing connection. KafkaConnectionError: 111 ECONNREFUSED
+refactor-node1  | 2026-05-30 04:03:00,876 [WARNING] kafka.client: No node available during check_version; sleeping 0.09 secs
+refactor-node1  | 2026-05-30 04:03:00,971 [ERROR] kafka.conn: <BrokerConnection client_id=topic-init, node_id=bootstrap-0 host=kafka:9092 <connecting> [IPv4 ('172.18.0.4', 9092)]>: Connect attempt returned error 111. Disconnecting.
+refactor-node1  | 2026-05-30 04:03:00,971 [ERROR] kafka.conn: <BrokerConnection client_id=topic-init, node_id=bootstrap-0 host=kafka:9092 <connecting> [IPv4 ('172.18.0.4', 9092)]>: Closing connection. KafkaConnectionError: 111 ECONNREFUSED
+refactor-node1  | 2026-05-30 04:03:00,971 [WARNING] kafka.client: No node available during check_version; sleeping 0.23 secs
+refactor-node1  | 2026-05-30 04:03:01,198 [ERROR] kafka.conn: <BrokerConnection client_id=topic-init, node_id=bootstrap-0 host=kafka:9092 <connecting> [IPv4 ('172.18.0.4', 9092)]>: Connect attempt returned error 111. Disconnecting.
+refactor-node1  | 2026-05-30 04:03:01,199 [ERROR] kafka.conn: <BrokerConnection client_id=topic-init, node_id=bootstrap-0 host=kafka:9092 <connecting> [IPv4 ('172.18.0.4', 9092)]>: Closing connection. KafkaConnectionError: 111 ECONNREFUSED
+refactor-node1  | 2026-05-30 04:03:01,199 [WARNING] kafka.client: No node available during check_version; sleeping 0.43 secs
+refactor-node1  | 2026-05-30 04:03:01,630 [ERROR] kafka.conn: <BrokerConnection client_id=topic-init, node_id=bootstrap-0 host=kafka:9092 <connecting> [IPv4 ('172.18.0.4', 9092)]>: Connect attempt returned error 111. Disconnecting.
+refactor-node1  | 2026-05-30 04:03:01,631 [ERROR] kafka.conn: <BrokerConnection client_id=topic-init, node_id=bootstrap-0 host=kafka:9092 <connecting> [IPv4 ('172.18.0.4', 9092)]>: Closing connection. KafkaConnectionError: 111 ECONNREFUSED
+refactor-node1  | 2026-05-30 04:03:01,631 [WARNING] kafka.client: No node available during check_version; sleeping 0.71 secs
+refactor-node1  | 2026-05-30 04:03:02,345 [ERROR] kafka.conn: <BrokerConnection client_id=topic-init, node_id=bootstrap-0 host=kafka:9092 <connecting> [IPv4 ('172.18.0.4', 9092)]>: Connect attempt returned error 111. Disconnecting.
+refactor-node1  | 2026-05-30 04:03:02,345 [ERROR] kafka.conn: <BrokerConnection client_id=topic-init, node_id=bootstrap-0 host=kafka:9092 <connecting> [IPv4 ('172.18.0.4', 9092)]>: Closing connection. KafkaConnectionError: 111 ECONNREFUSED
+refactor-node1  | 2026-05-30 04:03:02,345 [WARNING] kafka.client: No node available during check_version; sleeping 0.47 secs
+refactor-node1  | 2026-05-30 04:03:03,817 [ERROR] kafka.conn: <BrokerConnection client_id=topic-init, node_id=bootstrap-0 host=kafka:9092 <connecting> [IPv4 ('172.18.0.4', 9092)]>: Connect attempt returned error 111. Disconnecting.
+refactor-node1  | 2026-05-30 04:03:03,817 [ERROR] kafka.conn: <BrokerConnection client_id=topic-init, node_id=bootstrap-0 host=kafka:9092 <connecting> [IPv4 ('172.18.0.4', 9092)]>: Closing connection. KafkaConnectionError: 111 ECONNREFUSED
+refactor-node1  | 2026-05-30 04:03:03,817 [WARNING] kafka.client: No node available during check_version; sleeping 0.06 secs
+refactor-node1  | 2026-05-30 04:03:03,875 [ERROR] kafka.conn: <BrokerConnection client_id=topic-init, node_id=bootstrap-0 host=kafka:9092 <connecting> [IPv4 ('172.18.0.4', 9092)]>: Connect attempt returned error 111. Disconnecting.
+refactor-node1  | 2026-05-30 04:03:03,876 [ERROR] kafka.conn: <BrokerConnection client_id=topic-init, node_id=bootstrap-0 host=kafka:9092 <connecting> [IPv4 ('172.18.0.4', 9092)]>: Closing connection. KafkaConnectionError: 111 ECONNREFUSED
+refactor-node1  | 2026-05-30 04:03:03,876 [WARNING] kafka.client: No node available during check_version; sleeping 0.08 secs
+refactor-node1  | 2026-05-30 04:03:03,958 [ERROR] kafka.conn: <BrokerConnection client_id=topic-init, node_id=bootstrap-0 host=kafka:9092 <connecting> [IPv4 ('172.18.0.4', 9092)]>: Connect attempt returned error 111. Disconnecting.
+refactor-node1  | 2026-05-30 04:03:03,958 [ERROR] kafka.conn: <BrokerConnection client_id=topic-init, node_id=bootstrap-0 host=kafka:9092 <connecting> [IPv4 ('172.18.0.4', 9092)]>: Closing connection. KafkaConnectionError: 111 ECONNREFUSED
+refactor-node1  | 2026-05-30 04:03:03,958 [WARNING] kafka.client: No node available during check_version; sleeping 0.24 secs
+refactor-node1  | 2026-05-30 04:03:04,243 [INFO] kafka_real: RealKafkaConsumer: initializing with bootstrap_servers=['kafka:9092'], group_id=heuristic-workers
+refactor-node1  | 2026-05-30 04:03:04,247 [INFO] kafka_real: RealKafkaConsumer: assigning partition layout=[TopicPartition(topic='events', partition=3), TopicPartition(topic='events', partition=4), TopicPartition(topic='events', partition=5)]
+refactor-node1  | [worker-heuristic:1] Kafka consumer assigned=[3, 4, 5]
+refactor-node1  | 2026-05-30 04:03:04,248 [INFO] kafka_real: RealKafkaProducer: initializing with bootstrap_servers=['kafka:9092'], acks=all
+refactor-node1  | [worker-heuristic:1] Kafka results producer created, topic=heuristic_results
 refactor-node1  | [alerting] PagerDuty not configured, alerts logged to stderr
-refactor-node1  | [worker-strict:1] listening on :8000, partitions=[3, 4, 5]
-refactor-node1  | [worker-strict:1] received=0 on_time=0 late=0 dupes=0 bp_drops=0 completeness=0.0% late_rate=0.0% open_windows=0 closed_windows=0 buf=[p3=24q p4=19q p5=37q] watermarks=[p3:W=-inf p4:W=-inf p5:W=-inf]
-refactor-node1  | [worker-strict:1] received=5222 on_time=5221 late=0 dupes=0 bp_drops=0 completeness=100.0% late_rate=0.0% open_windows=3205 closed_windows=0 buf=[p3=54q p4=0q p5=31q] watermarks=[p3:W=1779143911.3 p4:W=1779143911.3 p5:W=1779143911.3]
-refactor-node1  | Backpressure: PAUSE partition 4 on 1 (buffer=500)
-refactor-node1  | Backpressure: PAUSE partition 5 on 1 (buffer=500)
-refactor-node1  | Backpressure: PAUSE partition 4 on 1 (buffer=500)
-refactor-node1  | Backpressure: PAUSE partition 5 on 1 (buffer=500)
-refactor-node1  | Backpressure: PAUSE partition 3 on 1 (buffer=500)
-refactor-node1  | [worker-strict:1] received=12826 on_time=12814 late=10 dupes=0 bp_drops=0 completeness=99.9% late_rate=0.1% open_windows=6031 closed_windows=0 buf=[p3=0q p4=300q p5=298q] watermarks=[p3:W=1779143911.3 p4:W=1779143911.3 p5:W=1779143911.3]
-refactor-node1  | Backpressure: PAUSE partition 5 on 1 (buffer=500)
-refactor-node1  | Backpressure: PAUSE partition 4 on 1 (buffer=500)
-refactor-node1  | Backpressure: PAUSE partition 3 on 1 (buffer=500)
-refactor-node1  | Backpressure: PAUSE partition 4 on 1 (buffer=500)
-refactor-node1  | Backpressure: PAUSE partition 3 on 1 (buffer=500)
-refactor-node1  | Backpressure: PAUSE partition 4 on 1 (buffer=500)
-refactor-node1  | [worker-strict:1] received=22002 on_time=21992 late=10 dupes=0 bp_drops=0 completeness=100.0% late_rate=0.0% open_windows=9565 closed_windows=0 buf=[p3=0q p4=0q p5=3q] watermarks=[p3:W=1779143911.3 p4:W=1779143911.3 p5:W=1779143911.3]
-refactor-node1  | Backpressure: PAUSE partition 4 on 1 (buffer=500)
-refactor-node1  | Backpressure: PAUSE partition 5 on 1 (buffer=500)
-refactor-node1  | [worker-strict:1] received=26736 on_time=26726 late=10 dupes=0 bp_drops=0 completeness=100.0% late_rate=0.0% open_windows=11640 closed_windows=0 buf=[p3=59q p4=4q p5=133q] watermarks=[p3:W=1779143911.3 p4:W=1779143911.3 p5:W=1779143911.3]
-refactor-node1  | Backpressure: PAUSE partition 4 on 1 (buffer=500)
-refactor-node1  | Backpressure: PAUSE partition 3 on 1 (buffer=500)
-refactor-node1  | Backpressure: PAUSE partition 5 on 1 (buffer=500)
-refactor-node1  | Backpressure: PAUSE partition 4 on 1 (buffer=500)
-refactor-node1  | Backpressure: PAUSE partition 3 on 1 (buffer=500)
-refactor-node1  | Backpressure: PAUSE partition 5 on 1 (buffer=500)
-refactor-node1  | [worker-strict:1] received=31281 on_time=31259 late=22 dupes=0 bp_drops=0 completeness=99.9% late_rate=0.1% open_windows=14427 closed_windows=0 buf=[p3=0q p4=0q p5=0q] watermarks=[p3:W=1779143911.3 p4:W=1779143911.3 p5:W=1779143911.3]
-refactor-node1  | Backpressure: PAUSE partition 4 on 1 (buffer=500)
-refactor-node1  | Backpressure: PAUSE partition 3 on 1 (buffer=500)
-refactor-node1  | Backpressure: PAUSE partition 5 on 1 (buffer=500)
+refactor-node1  | 2026-05-30 04:03:04,255 [INFO] downstream_emitter: 24h FINAL reconciliation scheduler started
+refactor-node1  | 2026-05-30 04:03:04,258 [INFO] downstream_emitter: 24h FINAL reconciliation scheduler started
+refactor-node1  | 2026-05-30 04:03:04,258 [INFO] downstream_emitter: 24h FINAL reconciliation scheduler started
+refactor-node1  | [worker-heuristic:1] listening on :8000, partitions=[3, 4, 5]
+refactor-node1  | 2026-05-30 04:03:04,267 [WARNING] kafka.cluster: Topic events is not available during auto-create initialization
+refactor-node1  | 2026-05-30 04:03:04,762 [WARNING] kafka.cluster: Topic events is not available during auto-create initialization
+refactor-node1  | 2026-05-30 04:03:04,866 [WARNING] kafka.cluster: Topic events is not available during auto-create initialization
+refactor-node1  | [worker-heuristic:1] processed=41 on_time=41 late=0 completeness=100.0% dlq_backlog=0 [p3:W_h=1770113811.4(PHASE_1,cnt=31,met=1780113811.4) p4:W_h=1770113793.4(PHASE_1,cnt=2,met=1780113793.4) p5:W_h=1770113819.4(PHASE_1,cnt=8,met=1780113819.4)]
+refactor-node1  | [worker-heuristic:1] processed=41 on_time=41 late=0 completeness=100.0% dlq_backlog=0 [p3:W_h=1770113811.4 p4:W_h=1770113793.4 p5:W_h=1770113819.4]
+refactor-node1  | [worker-heuristic:1] processed=41 on_time=41 late=0 completeness=100.0% dlq_backlog=0 [p3:W_h=1770113811.4(PHASE_1,cnt=31,met=1780113811.4) p4:W_h=1770113793.4(PHASE_1,cnt=2,met=1780113793.4) p5:W_h=1770113819.4(PHASE_1,cnt=8,met=1780113819.4)]
+refactor-node1  | [worker-heuristic:1] processed=41 on_time=41 late=0 completeness=100.0% dlq_backlog=0 [p3:W_h=1770113811.4 p4:W_h=1770113793.4 p5:W_h=1770113819.4]
+refactor-node1  | [worker-heuristic:1] processed=41 on_time=41 late=0 completeness=100.0% dlq_backlog=0 [p3:W_h=1770113811.4(PHASE_1,cnt=31,met=1780113811.4) p4:W_h=1770113793.4(PHASE_1,cnt=2,met=1780113793.4) p5:W_h=1770113819.4(PHASE_1,cnt=8,met=1780113819.4)]
+refactor-node1  | [worker-heuristic:1] processed=41 on_time=41 late=0 completeness=100.0% dlq_backlog=0 [p3:W_h=1770113811.4 p4:W_h=1770113793.4 p5:W_h=1770113819.4]
+refactor-node1  | [worker-heuristic:1] processed=41 on_time=41 late=0 completeness=100.0% dlq_backlog=0 [p3:W_h=1770113811.4(PHASE_1,cnt=31,met=1780113811.4) p4:W_h=1770113793.4(PHASE_1,cnt=2,met=1780113793.4) p5:W_h=1770113819.4(PHASE_1,cnt=8,met=1780113819.4)]
+refactor-node1  | [worker-heuristic:1] processed=41 on_time=41 late=0 completeness=100.0% dlq_backlog=0 [p3:W_h=1770113811.4 p4:W_h=1770113793.4 p5:W_h=1770113819.4]
+refactor-node1  | [worker-heuristic:1] processed=41 on_time=41 late=0 completeness=100.0% dlq_backlog=0 [p3:W_h=1770113811.4(PHASE_1,cnt=31,met=1780113811.4) p4:W_h=1770113793.4(PHASE_1,cnt=2,met=1780113793.4) p5:W_h=1770113819.4(PHASE_1,cnt=8,met=1780113819.4)]
+refactor-node1  | [worker-heuristic:1] processed=41 on_time=41 late=0 completeness=100.0% dlq_backlog=0 [p3:W_h=1770113811.4 p4:W_h=1770113793.4 p5:W_h=1770113819.4]
+refactor-node1  | [worker-heuristic:1] processed=41 on_time=41 late=0 completeness=100.0% dlq_backlog=0 [p3:W_h=1770113811.4(PHASE_1,cnt=31,met=1780113811.4) p4:W_h=1770113793.4(PHASE_1,cnt=2,met=1780113793.4) p5:W_h=1770113819.4(PHASE_1,cnt=8,met=1780113819.4)]
+refactor-node1  | [worker-heuristic:1] processed=41 on_time=41 late=0 completeness=100.0% dlq_backlog=0 [p3:W_h=1770113811.4 p4:W_h=1770113793.4 p5:W_h=1770113819.4]
+refactor-node1  | [worker-heuristic:1] processed=41 on_time=41 late=0 completeness=100.0% dlq_backlog=0 [p3:W_h=1770113811.4(PHASE_1,cnt=31,met=1780113811.4) p4:W_h=1770113793.4(PHASE_1,cnt=2,met=1780113793.4) p5:W_h=1770113819.4(PHASE_1,cnt=8,met=1780113819.4)]

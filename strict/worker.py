@@ -8,8 +8,8 @@ import time
 from strict.engine import StrictWatermarkEngine
 from common.types import LogEvent, PunctuationToken, WorkerHeartbeat
 
-# Idleness detection: partition idle if no event for > 2.0s
-IDLE_TIMEOUT_S = 2.0
+# Idleness detection: partition idle if no event for > 30.0s
+IDLE_TIMEOUT_S = 30.0
 
 # Backpressure: reject new events when queue >= 500, resume when < 100
 BACKPRESSURE_MAX_QUEUE = 500
@@ -328,6 +328,7 @@ class StrictWorker:
         proc_p50_vals, proc_p95_vals, proc_p99_vals = [], [], []
         poll_p95_vals, dedup_p95_vals, state_p95_vals = [], [], []
         for pid, eng in self.engines.items():
+            eng.active_partitions = len(self.engines)
             with self._partition_locks[pid]:
                 s = eng.summary()
                 m = eng.metrics
@@ -358,6 +359,27 @@ class StrictWorker:
         def _max(values: list[float]) -> float:
             return round(max(values), 2) if values else 0.0
 
+        # Resource stats
+        ram_used = 0
+        ram_total = 0
+        try:
+            import psutil
+            vm = psutil.virtual_memory()
+            ram_used = vm.used
+            ram_total = vm.total
+        except ImportError:
+            pass
+
+        import shutil
+        disk_used = 0
+        disk_total = 0
+        try:
+            usage = shutil.disk_usage("/")
+            disk_used = usage.used
+            disk_total = usage.total
+        except Exception:
+            pass
+
         return {
             "worker_id": self.worker_id,
             "mode": "strict",
@@ -378,6 +400,12 @@ class StrictWorker:
             "dedup_latency_p95_us": _avg(dedup_p95_vals),
             "state_write_latency_p95_us": _avg(state_p95_vals),
             "partitions": partitions,
+            "resources": {
+                "ram_used_bytes": ram_used,
+                "ram_total_bytes": ram_total,
+                "disk_used_bytes": disk_used,
+                "disk_total_bytes": disk_total,
+            }
         }
 
     def broadcast(self) -> dict:

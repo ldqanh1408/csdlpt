@@ -1,6 +1,8 @@
 """Streamlit Dashboard for CSDLPT Watermark System.
 
-Drives both docker-compose.yml (full) and docker-compose.sim.yml (simulation).
+Drives ONLY deploy/docker-compose.yml (the full distributed deployment:
+3 coordinators HA + 4 workers + Kafka/ZK/MinIO/Prometheus/Grafana). The
+simulation compose file is intentionally never launched from this dashboard.
 
 Run:
     pip install -r deploy/requirements-dashboard.txt
@@ -16,6 +18,7 @@ import os
 import glob
 import pandas as pd
 import concurrent.futures
+import threading
 from pathlib import Path
 from datetime import datetime
 
@@ -76,31 +79,38 @@ REFRESH_INTERVAL_S = 3
 # Mode helpers
 # ---------------------------------------------------------------------------
 
-def _is_sim() -> bool:
-    return st.session_state.get("deploy_mode", "full") == "sim"
+def _is_sim(deploy_mode: str = None) -> bool:
+    # This dashboard only ever drives deploy/docker-compose.yml (full deploy).
+    # The simulation compose file must never be launched, so sim mode is
+    # permanently disabled regardless of any stored session state.
+    return False
 
 
-def _compose_file() -> str:
-    return COMPOSE_SIM_FILE if _is_sim() else COMPOSE_FILE
+def _compose_file(deploy_mode: str = None) -> str:
+    return COMPOSE_SIM_FILE if _is_sim(deploy_mode) else COMPOSE_FILE
 
 
-def _workers() -> dict:
-    if _is_sim():
-        mode = st.session_state.get("mode", "strict")
+def _workers(deploy_mode: str = None, mode: str = None) -> dict:
+    if _is_sim(deploy_mode):
+        if mode is None:
+            try:
+                mode = st.session_state.get("mode", "strict")
+            except Exception:
+                mode = "strict"
         return {k: v for k, v in WORKERS_SIM.items() if v.get("profile") == mode}
     return WORKERS_FULL
 
 
-def _infra() -> dict:
-    return INFRA_SIM if _is_sim() else INFRA_FULL
+def _infra(deploy_mode: str = None) -> dict:
+    return INFRA_SIM if _is_sim(deploy_mode) else INFRA_FULL
 
 
-def _coordinators() -> dict:
-    return COORDINATORS_SIM if _is_sim() else COORDINATORS_FULL
+def _coordinators(deploy_mode: str = None) -> dict:
+    return COORDINATORS_SIM if _is_sim(deploy_mode) else COORDINATORS_FULL
 
 
-def _aggregator_port() -> int:
-    return AGGREGATOR_PORT_SIM if _is_sim() else AGGREGATOR_PORT_FULL
+def _aggregator_port(deploy_mode: str = None) -> int:
+    return AGGREGATOR_PORT_SIM if _is_sim(deploy_mode) else AGGREGATOR_PORT_FULL
 
 
 # ---------------------------------------------------------------------------
@@ -120,12 +130,28 @@ def init_state():
         "run_results": {},
         "log_level": "info",
         "punctuation_mode": "data-driven",
+        "delta_base_s": 10.0,
         "log_filter": "",
         "log_auto_scroll": True,
+        "lab_points": [],
+        "failover_test_log": [],
     }
     for k, v in defaults.items():
         if k not in st.session_state:
             st.session_state[k] = v
+            
+    if "fetch_shared_state" not in st.session_state:
+        st.session_state.fetch_shared_state = {
+            "metrics": None,
+            "container_statuses": {},
+            "node_statuses": {},
+            "last_fetch_time": 0.0,
+            "fetch_in_progress": False
+        }
+    if "last_processed_fetch_time" not in st.session_state:
+        st.session_state.last_processed_fetch_time = 0.0
+    if "node_statuses" not in st.session_state:
+        st.session_state.node_statuses = {}
 
 
 # ---------------------------------------------------------------------------
@@ -150,8 +176,8 @@ def count_csv_rows(path: str) -> int:
 # Docker Compose
 # ---------------------------------------------------------------------------
 
-def _compose_base() -> list[str]:
-    return ["docker", "compose", "-f", _compose_file()]
+def _compose_base(deploy_mode: str = None) -> list[str]:
+    return ["docker", "compose", "-f", _compose_file(deploy_mode)]
 
 
 def _make_env(mode: str) -> dict:
@@ -160,6 +186,10 @@ def _make_env(mode: str) -> dict:
     env["DATASET_FILE"] = st.session_state.get("dataset_file", "data.csv")
     env["LOG_LEVEL"] = st.session_state.get("log_level", "info")
     env["PUNCTUATION_MODE"] = st.session_state.get("punctuation_mode", "data-driven")
+    # Wait Time (delta_base) — independent variable for the completeness-vs-wait
+    # study. docker-compose.yml interpolates ${DELTA_BASE_S} into coordinators
+    # and workers.
+    env["DELTA_BASE_S"] = str(st.session_state.get("delta_base_s", 10.0))
     return env
 
 
@@ -273,8 +303,8 @@ def is_healthy(port: int) -> bool:
         return False
 
 
-def check_infra_health(name: str) -> bool:
-    info = _infra()[name]
+def check_infra_health(name: str, deploy_mode: str = None) -> bool:
+    info = _infra(deploy_mode)[name]
     if info.get("health"):
         try:
             r = requests.get(info["health"], timeout=2)
@@ -292,34 +322,35 @@ def check_infra_health(name: str) -> bool:
         return False
 
 
-def _infra_key(name: str) -> str | None:
+def _infra_key(name: str, deploy_mode: str = None) -> str | None:
     """Return the configured infra display key for a docker service name."""
     lname = name.lower()
-    for key in _infra():
+    for key in _infra(deploy_mode):
         if key.lower() == lname:
             return key
     return None
 
 
-def fetch_all_metrics(mode: str) -> dict:
+def fetch_all_metrics(mode: str, deploy_mode: str = None) -> dict:
     result = {"timestamp": time.time(), "mode": mode, "workers": {}}
 
     urls_to_fetch = {}
 
     # 1. Workers
-    for name, info in _workers().items():
+    for name, info in _workers(deploy_mode, mode).items():
         port = info["port"] if isinstance(info, dict) else info
         urls_to_fetch[f"w_m_{name}"] = (f"http://localhost:{port}/api/metrics", 1.5)
         urls_to_fetch[f"w_s_{name}"] = (f"http://localhost:{port}/state", 1.5)
 
     # 2. Coordinators
     if mode in ("strict", "hybrid"):
-        for cname, cport in _coordinators().items():
+        for cname, cport in _coordinators(deploy_mode).items():
             urls_to_fetch[f"c_{cname}"] = (f"http://localhost:{cport}/state", 1.5)
+            urls_to_fetch[f"c_ih_{cname}"] = (f"http://localhost:{cport}/ingestor-health", 1.5)
 
     # 3. Aggregator
     if mode in ("heuristic", "hybrid"):
-        agg_port = _aggregator_port()
+        agg_port = _aggregator_port(deploy_mode)
         urls_to_fetch["aggregator"] = (f"http://localhost:{agg_port}/state", 1.5)
 
     # Fetch in parallel
@@ -338,7 +369,7 @@ def fetch_all_metrics(mode: str) -> dict:
                     fetched[key] = None
 
     # Assemble workers
-    for name, info in _workers().items():
+    for name, info in _workers(deploy_mode, mode).items():
         port = info["port"] if isinstance(info, dict) else info
         metrics = fetched.get(f"w_m_{name}")
         state = fetched.get(f"w_s_{name}")
@@ -348,10 +379,13 @@ def fetch_all_metrics(mode: str) -> dict:
     # Assemble coordinator
     best_coord = None
     best_cname = None
-    for cname, cport in _coordinators().items():
+    for cname, cport in _coordinators(deploy_mode).items():
         coord = fetched.get(f"c_{cname}")
         if coord is None:
             continue
+        ih = fetched.get(f"c_ih_{cname}")
+        if ih:
+            coord["ingestor_health"] = ih
         wg = coord.get("W_global")
         if wg is not None and wg != float("-inf") and wg != float("inf"):
             result["coordinator"] = coord
@@ -680,18 +714,10 @@ def render_sidebar():
     st.sidebar.markdown("## CSDLPT Watermark")
     st.sidebar.markdown("---")
 
-    # Deploy mode
-    deploy_mode = st.sidebar.radio(
-        "Deploy Mode",
-        options=["full", "sim"],
-        format_func=lambda m: {
-            "full": "Full (Kafka, ZK, 4 workers, HA)",
-            "sim": "Sim (HTTP-only, 1 worker, no infra)",
-        }[m],
-        index=0 if st.session_state.deploy_mode == "full" else 1,
-        disabled=st.session_state.running,
-    )
+    # Deploy mode is fixed to the full docker-compose.yml deployment.
+    deploy_mode = "full"
     st.session_state.deploy_mode = deploy_mode
+    st.sidebar.caption("Deploy: **Full** — docker-compose.yml (3 coordinators HA · 4 workers · Kafka/ZK/MinIO)")
 
     st.sidebar.markdown("---")
 
@@ -729,12 +755,29 @@ def render_sidebar():
         disabled=st.session_state.running,
         help="info=summary every 5s | debug/trace=per-event flow through containers",
     )
+    _punct_opts = ["data-driven", "wall-clock", "max-event-time"]
     st.session_state.punctuation_mode = st.sidebar.selectbox(
         "Punctuation Mode",
-        options=["data-driven", "wall-clock"],
-        index=0 if st.session_state.punctuation_mode == "data-driven" else 1,
+        options=_punct_opts,
+        index=_punct_opts.index(st.session_state.punctuation_mode)
+              if st.session_state.punctuation_mode in _punct_opts else 0,
         disabled=st.session_state.running,
-        help="data-driven: T_commit tracks CSV timestamps (100% completeness). wall-clock: T_commit=now (real-time streaming).",
+        help="data-driven: T_commit=-inf until EOF → 100% completeness (no wait-time effect). "
+             "wall-clock: T_commit=now-δ (real-time). "
+             "max-event-time: T_commit=max_event_time_per_partition → δ controls late drops "
+             "(dùng cho Completeness-vs-Wait với dữ liệu out-of-order như NYC taxi).",
+    )
+    # Wait Time (delta_base) — the watermark delay. This is the independent
+    # variable for the "Data Completeness % vs Wait Time" deliverable: larger
+    # delta waits longer for late data (higher completeness, higher latency).
+    st.session_state.delta_base_s = st.sidebar.number_input(
+        "Wait Time δ (s)",
+        min_value=0.0, max_value=120.0, step=1.0,
+        value=float(st.session_state.get("delta_base_s", 10.0)),
+        disabled=st.session_state.running,
+        help="Watermark wait delay (DELTA_BASE_S). Strict: how long to wait for "
+             "late data before closing a window. Sweep this value across runs and "
+             "record points in the 'Completeness vs Wait' tab.",
     )
     st.sidebar.markdown("---")
     c1, c2 = st.sidebar.columns(2)
@@ -785,25 +828,26 @@ def render_sidebar():
         if infra:
             st.sidebar.markdown("**Infrastructure**")
             for name in infra:
-                ok = check_infra_health(name)
+                ok = (check_node_status(name) == "running")
                 st.sidebar.markdown(f"{'🟢' if ok else '🔴'} {name}")
 
         coords = _coordinators()
         if coords:
             st.sidebar.markdown("**Coordinators**")
             for cname, cport in coords.items():
-                ok = is_healthy(cport)
+                ok = (check_node_status(cname, cport) == "running")
                 st.sidebar.markdown(f"{'🟢' if ok else '🔴'} {cname} (:{cport})")
 
         if mode in ("heuristic", "hybrid"):
             st.sidebar.markdown("**Aggregator**")
-            ok = is_healthy(_aggregator_port())
+            agg_service = "heuristic-aggregator" if _is_sim() else "aggregator"
+            ok = (check_node_status(agg_service, _aggregator_port()) == "running")
             st.sidebar.markdown(f"{'🟢' if ok else '🔴'} aggregator (:{_aggregator_port()})")
 
         st.sidebar.markdown("**Workers**")
         for wname, winfo in _workers().items():
             port = winfo["port"] if isinstance(winfo, dict) else winfo
-            ok = is_healthy(port)
+            ok = (check_node_status(wname, port) == "running")
             st.sidebar.markdown(f"{'🟢' if ok else '🔴'} {wname} (:{port})")
 
         if st.session_state.start_time:
@@ -834,282 +878,407 @@ def render_dashboard(mode: str, metrics: dict):
     else:
         st.markdown(f"### {label} — Aggregated Metrics ({worker_count} workers, 12 partitions)")
 
-    # Top-level KPIs
-    c1, c2, c3, c4, c5, c6, c7, c8 = st.columns(8)
-    comp_val = agg['data_completeness_pct']
-    comp_delta = None
-    if len(st.session_state.metrics_history) >= 2:
-        prev_comp = st.session_state.metrics_history[-2]["completeness"]
-        if prev_comp > 0:
-            comp_delta = f"{comp_val - prev_comp:+.2f}%"
-    c1.metric("Completeness", f"{comp_val:.2f}%", delta=comp_delta)
-    c2.metric("Total Received", f"{agg['total_received']:,}")
-    c3.metric("On-Time", f"{agg['on_time']:,}")
-    c4.metric("Late Dropped", f"{agg['late_dropped']:,}")
-    c5.metric("Late Rate", f"{agg['late_arrival_rate_pct']:.2f}%")
-    c6.metric("Duplicates", f"{agg['duplicates']:,}")
-    c7.metric("BP Drops", f"{agg['backpressure_drops']:,}")
-    c8.metric("Non-Mono Punct", f"{agg['non_monotonic_punctuation']:,}")
+    # Define the 5 tabs/pages per specification section §3.3
+    tab_names = [
+        "📈 Page 1: Executive Summary",
+        "🔀 Page 2: Per-Partition Detail",
+        "🔒 Page 3: Strict Specific",
+        "⚡ Page 4: Heuristic Specific",
+        "🖥️ Page 5: Resources"
+    ]
+    selected_page = st.radio(
+        "Select Dashboard Page",
+        tab_names,
+        horizontal=True,
+        label_visibility="collapsed",
+        key="dashboard_sub_page"
+    )
 
-    # Heuristic-specific KPIs
-    if mode == "heuristic":
-        _heuristic_kpi_row(metrics, agg)
-
-    # Performance Latency KPIs (both strict & heuristic)
-    p50 = agg.get("proc_lat_p50_us", 0.0)
-    p95 = agg.get("proc_lat_p95_us", 0.0)
-    p99 = agg.get("proc_lat_p99_us", 0.0)
-    p99mx = agg.get("proc_lat_p99_max_us", 0.0)
-    sp50 = agg.get("sketch_p50_ms", 0.0)
-    sp95 = agg.get("sketch_p95_ms", 0.0)
-    sp99 = agg.get("sketch_p99_ms", 0.0)
-    wlag_avg = agg.get("wm_lag_avg_s", 0.0)
-    wlag_max = agg.get("wm_lag_max_s", 0.0)
-    if metrics.get("workers"):
+    # -----------------------------------------------------------------------
+    # Page 1: Executive Summary
+    # -----------------------------------------------------------------------
+    if selected_page == "📈 Page 1: Executive Summary":
+        st.markdown("#### System Executive Summary")
+        render_export_panel(mode, metrics, agg)
         st.markdown("---")
-        st.markdown("#### Processing Latency & Lag")
-        lc1, lc2, lc3, lc4, lc5, lc6, lc7 = st.columns(7)
-        lc1.metric("Proc p50", f"{p50:.0f} µs" if p50 else "—")
-        lc2.metric("Proc p95", f"{p95:.0f} µs" if p95 else "—")
-        lc3.metric("Proc p99", f"{p99:.0f} µs" if p99 else "—")
-        lc4.metric("Proc p99 (max)", f"{p99mx:.0f} µs" if p99mx else "—")
-        lc5.metric("Event-Lag p50", f"{sp50:.1f} ms" if sp50 else "—")
-        lc6.metric("Event-Lag p99", f"{sp99:.1f} ms" if sp99 else "—")
-        lc7.metric("WM Lag (avg/max)", f"{wlag_avg:.1f}s / {wlag_max:.1f}s" if wlag_avg else "—")
+        c1, c2, c3, c4, c5, c6, c7, c8 = st.columns(8)
+        
+        # Calculate completeness delta
+        comp_val = agg['data_completeness_pct']
+        comp_delta = None
+        if len(st.session_state.metrics_history) >= 2:
+            prev_comp = st.session_state.metrics_history[-2]["completeness"]
+            if prev_comp > 0:
+                comp_delta = f"{comp_val - prev_comp:+.2f}%"
+
+        # Calculate throughput
+        history = st.session_state.metrics_history
+        throughput = 0.0
+        if len(history) >= 2:
+            time_diff = history[-1]["elapsed_s"] - history[-2]["elapsed_s"]
+            recv_diff = history[-1]["total_received"] - history[-2]["total_received"]
+            if time_diff > 0:
+                throughput = max(0.0, recv_diff / time_diff)
+
+        # Worker alive count
+        worker_alive = 0
         if mode == "strict":
-            sl1, sl2, sl3 = st.columns(3)
-            sl1.metric("Poll Decode p95", f"{agg.get('poll_decode_p95_us', 0.0):.0f} us" if agg.get("poll_decode_p95_us", 0.0) else "—")
-            sl2.metric("Dedup p95", f"{agg.get('dedup_p95_us', 0.0):.0f} us" if agg.get("dedup_p95_us", 0.0) else "—")
-            sl3.metric("State Write p95", f"{agg.get('state_write_p95_us', 0.0):.0f} us" if agg.get("state_write_p95_us", 0.0) else "—")
-        else:
-            sl1, sl2, sl3 = st.columns(3)
-            sl1.metric("Event-Lag p95", f"{sp95:.1f} ms" if sp95 else "—")
-            sl2.metric("Sketch Update p95", f"{agg.get('sketch_update_p95_us', 0.0):.0f} us" if agg.get("sketch_update_p95_us", 0.0) else "—")
-            sl3.metric("Sketch Query p95", f"{agg.get('sketch_query_p95_us', 0.0):.0f} us" if agg.get("sketch_query_p95_us", 0.0) else "—")
-
-    st.markdown("---")
-
-    # Control plane + per-worker breakdown
-    col_ctrl, col_workers = st.columns([1, 2])
-
-    with col_ctrl:
-        if mode == "strict":
-            st.markdown("#### Coordinator")
             coord = metrics.get("coordinator", {})
-            wg = coord.get("W_global")
-            if wg is not None and wg != float("-inf"):
-                try:
-                    wm_str = datetime.fromtimestamp(wg).strftime("%Y-%m-%d %H:%M:%S")
-                except (OSError, ValueError, OverflowError):
-                    wm_str = f"{wg:.1f}"
-                st.metric("W_global", wm_str)
-            else:
-                st.metric("W_global", "initializing...")
-            st.caption(f"Leader: {metrics.get('coordinator_name', '?')}")
-            st.caption(f"Term: {coord.get('term', 0)}")
-            st.caption(f"Partitions: {coord.get('partition_count', 0)} | Workers: {coord.get('active_workers', 0)}")
-            skew_ms = coord.get("node_skew_max_ms", 0)
-            lag_s = coord.get("watermark_lag_s", 0)
-            diag = coord.get("combined_diagnosis", "?")
-            skew_status = coord.get("skew_status", "OK")
-            lag_status = coord.get("lag_status", "OK")
-            combined = coord.get("combined_status", "?")
-            st.caption(f"Skew: {skew_ms:.0f}ms ({skew_status}) | Lag: {lag_s:.1f}s ({lag_status})")
-            status_color = {"Healthy": "green", "Degraded": "orange", "Warning": "orange", "Critical": "red"}
-            color = status_color.get(combined, "violet")
-            st.markdown(f"**Status:** :{color}[{combined}] — *{diag}*")
-            fv = coord.get("fencing_violations", 0)
-            if fv > 0:
-                st.caption(f"Fencing violations: {fv}")
+            worker_alive = coord.get("active_workers", 0)
         else:
-            st.markdown("#### Aggregator")
             agg_state = metrics.get("aggregator", {})
-            wgh = agg_state.get("W_global_h")
-            if wgh is not None and wgh != float("-inf"):
-                try:
-                    wm_str = datetime.fromtimestamp(wgh).strftime("%Y-%m-%d %H:%M:%S")
-                except (OSError, ValueError, OverflowError):
-                    wm_str = f"{wgh:.1f}"
-                st.metric("W_global_h", wm_str)
-            else:
-                st.metric("W_global_h", "initializing...")
-            st.caption(f"Active partitions: {agg_state.get('active_count', '?')}")
-            st.caption(f"HA failovers: {agg_state.get('ha_failover_count', 0)}")
-            wlag = agg_state.get("watermark_lag_s", 0)
-            if wlag and wlag != float("inf"):
-                st.caption(f"Watermark lag: {wlag:.1f}s")
+            worker_alive = len(metrics.get("workers", {}))
 
-    with col_workers:
-        st.markdown("#### Per-Worker Breakdown")
-        rows = []
-        for wname, wdata in metrics.get("workers", {}).items():
-            m = wdata.get("metrics")
-            if m is None:
-                continue
-            part_values = [
-                p for p in m.get("partitions", {}).values()
-                if isinstance(p, dict)
-            ]
+        wlag_max = agg.get("wm_lag_max_s", 0.0)
+        data_loss_rate = max(0.0, 100.0 - comp_val)
 
-            def _avg_part(field: str) -> float:
-                vals = [p.get(field, 0.0) for p in part_values if p.get(field, 0.0)]
-                return round(sum(vals) / len(vals), 2) if vals else 0.0
+        c1.metric("Completeness", f"{comp_val:.2f}%", delta=comp_delta)
+        c2.metric("Data Loss Rate", f"{data_loss_rate:.2f}%")
+        c3.metric("Throughput", f"{throughput:.1f}/s" if throughput > 0 else "—")
+        c4.metric("Watermark Lag (max)", f"{wlag_max:.1f}s" if wlag_max else "—")
+        c5.metric("Worker Alive", f"{worker_alive}")
+        c6.metric("Total Received", f"{agg['total_received']:,}")
+        c7.metric("On-Time", f"{agg['on_time']:,}")
+        c8.metric("Late Dropped", f"{agg['late_dropped']:,}")
 
-            if "total_received" in m:
-                rows.append({
-                    "Worker": wname,
-                    "Port": wdata["port"],
-                    "Received": m.get("total_received", 0),
-                    "On-Time": m.get("on_time", 0),
-                    "Late": m.get("late_dropped", 0),
-                    "Completeness %": round(m.get("data_completeness_pct", 0), 2),
-                    "DLQ": m.get("dlq_backlog", 0),
-                    "Sketch N": m.get("sketch_total_count", 0),
-                    "BP Drops": m.get("backpressure_drops", 0),
-                    "Proc p95 us": m.get("proc_latency_p95_us", _avg_part("proc_latency_p95_us")),
-                    "Proc p99 us": m.get("proc_latency_p99_us", _avg_part("proc_latency_p99_us")),
-                })
-            elif "partitions" in m and "node_id" in m:
-                t_recv = sum(p.get("total_received", 0) for p in m["partitions"].values() if isinstance(p, dict))
-                t_on = sum(p.get("on_time", 0) for p in m["partitions"].values() if isinstance(p, dict))
-                t_late = sum(p.get("late_dropped", 0) for p in m["partitions"].values() if isinstance(p, dict))
-                uniq = max(t_recv, 1)
-                rows.append({
-                    "Worker": wname,
-                    "Port": wdata["port"],
-                    "Received": t_recv,
-                    "On-Time": t_on,
-                    "Late": t_late,
-                    "Completeness %": round(100.0 * t_on / uniq, 2),
-                    "DLQ": m.get("dlq_backlog", 0),
-                    "Sketch N": m.get("sketch_total_count", 0),
-                    "BP Drops": 0,
-                    "Proc p95 us": _avg_part("proc_latency_p95_us"),
-                    "Proc p99 us": _avg_part("proc_latency_p99_us"),
-                })
-        if rows:
-            st.dataframe(pd.DataFrame(rows), use_container_width=True, hide_index=True)
-        else:
-            st.info("Waiting for worker data...")
-
-    # Trend charts
-    history = st.session_state.metrics_history
-    if len(history) >= 2:
+        # Latency Metrics sub-row
         st.markdown("---")
-        st.markdown("#### Trends")
-        df = pd.DataFrame(history)
-        df["time_s"] = df["elapsed_s"].round(0)
-        df = df.groupby("time_s").mean().reset_index()
+        st.markdown("##### Latency & Lag Details")
+        lc1, lc2, lc3, lc4, lc5, lc6 = st.columns(6)
+        p50 = agg.get("proc_lat_p50_us", 0.0)
+        p95 = agg.get("proc_lat_p95_us", 0.0)
+        p99 = agg.get("proc_lat_p99_us", 0.0)
+        sp50 = agg.get("sketch_p50_ms", 0.0)
+        sp99 = agg.get("sketch_p99_ms", 0.0)
+        wlag_avg = agg.get("wm_lag_avg_s", 0.0)
 
-        ch1, ch2 = st.columns(2)
-        with ch1:
-            st.markdown("**Completeness %**")
-            st.line_chart(df.set_index("time_s")["completeness"], height=220)
-        with ch2:
-            st.markdown("**Total Events Processed**")
-            st.line_chart(df.set_index("time_s")["total_received"], height=220)
+        lc1.metric("Proc Latency p50", f"{p50:.0f} µs" if p50 else "—")
+        lc2.metric("Proc Latency p95", f"{p95:.0f} µs" if p95 else "—")
+        lc3.metric("Proc Latency p99", f"{p99:.0f} µs" if p99 else "—")
+        lc4.metric("Event Lag p50", f"{sp50:.1f} ms" if sp50 else "—")
+        lc5.metric("Event Lag p99", f"{sp99:.1f} ms" if sp99 else "—")
+        lc6.metric("WM Lag (avg)", f"{wlag_avg:.1f}s" if wlag_avg else "—")
 
-        ch3, ch4 = st.columns(2)
-        with ch3:
-            st.markdown("**Late Dropped (cumulative)**")
-            st.line_chart(df.set_index("time_s")["late_dropped"], height=220)
-        with ch4:
-            st.markdown("**Late Arrival Rate %**")
-            st.line_chart(df.set_index("time_s")["late_rate"], height=220)
+        # Trend charts
+        if len(history) >= 2:
+            st.markdown("---")
+            st.markdown("##### Aggregated Trends")
+            df = pd.DataFrame(history)
+            df["time_s"] = df["elapsed_s"].round(0)
+            df = df.groupby("time_s").mean().reset_index()
 
-        lat_cols = [c for c in ("proc_p95_us", "proc_p99_us") if c in df.columns and df[c].max() > 0]
-        lag_cols = [c for c in ("wm_lag_max_s", "event_lag_p95_ms") if c in df.columns and df[c].max() > 0]
-        if lat_cols or lag_cols:
-            ch5, ch6 = st.columns(2)
-            if lat_cols:
-                with ch5:
-                    st.markdown("**Processing Latency (us)**")
-                    st.line_chart(df.set_index("time_s")[lat_cols], height=220)
-            if lag_cols:
-                with ch6:
-                    st.markdown("**Watermark / Event Lag**")
-                    st.line_chart(df.set_index("time_s")[lag_cols], height=220)
+            ch1, ch2 = st.columns(2)
+            with ch1:
+                st.markdown("**Completeness %**")
+                st.line_chart(df.set_index("time_s")["completeness"], height=200)
+            with ch2:
+                st.markdown("**Total Events Processed**")
+                st.line_chart(df.set_index("time_s")["total_received"], height=200)
 
-    # Per-partition details (expandable)
-    with st.expander("Per-Partition Details", expanded=False):
+            ch3, ch4 = st.columns(2)
+            with ch3:
+                st.markdown("**Late Dropped (cumulative)**")
+                st.line_chart(df.set_index("time_s")["late_dropped"], height=200)
+            with ch4:
+                st.markdown("**Throughput Trend (events/s)**")
+                df_tp = df.copy()
+                df_tp["throughput_s"] = df_tp["total_received"].diff() / df_tp["elapsed_s"].diff()
+                df_tp["throughput_s"] = df_tp["throughput_s"].fillna(0.0).clip(lower=0.0)
+                st.line_chart(df_tp.set_index("time_s")["throughput_s"], height=200)
+
+    # -----------------------------------------------------------------------
+    # Page 2: Per-Partition Detail
+    # -----------------------------------------------------------------------
+    elif selected_page == "🔀 Page 2: Per-Partition Detail":
+        st.markdown("#### Per-Partition Detailed Statistics")
+        
+        parts = _collect_partition_data(metrics)
+        active_parts_count = len(parts)
+        total_punctuations = sum(p.get("punctuation_total", 0) for p in parts)
+        
+        # Calculate watermark global reference
+        w_ref = float("-inf")
+        if mode == "strict":
+            w_ref = metrics.get("coordinator", {}).get("W_global", float("-inf"))
+        else:
+            w_ref = metrics.get("aggregator", {}).get("W_global_h", float("-inf"))
+
+        pc1, pc2, pc3 = st.columns(3)
+        pc1.metric("Active Partitions", f"{active_parts_count}")
+        pc2.metric("Total Punctuations", f"{total_punctuations:,}")
+
         part_rows = []
-        for wname, wdata in metrics.get("workers", {}).items():
-            m = wdata.get("metrics") or {}
-            partitions = m.get("partitions", {})
-            for pid, pdata in partitions.items():
-                if not isinstance(pdata, dict):
-                    continue
-                row = {"Worker": wname, "Partition": str(pid)}
-                if mode == "strict":
-                    row["Watermark"] = format_timestamp(pdata.get("watermark", 0))
-                    row["Local WM"] = format_timestamp(pdata.get("local_watermark", 0))
-                    row["Open Win"] = pdata.get("open_windows", 0)
-                    row["Closed Win"] = pdata.get("closed_windows", 0)
-                    row["Completeness %"] = round(pdata.get("data_completeness_pct", 0), 2)
-                    row["Late"] = pdata.get("late_dropped", 0)
-                    row["Dupes"] = pdata.get("duplicates_filtered", 0)
-                    row["BP Drops"] = pdata.get("backpressure_drops", 0)
-                    row["Poll Decode p95 us"] = pdata.get("poll_decode_latency_p95_us", 0)
-                    row["Dedup p95 us"] = pdata.get("dedup_latency_p95_us", 0)
-                    row["State Write p95 us"] = pdata.get("state_write_latency_p95_us", 0)
-                    row["p50 (µs)"] = pdata.get("proc_latency_p50_us", 0)
-                    row["p99 (µs)"] = pdata.get("proc_latency_p99_us", 0)
-                else:
-                    wh = pdata.get("watermark", pdata.get("W_h", float("-inf")))
-                    row["W_h"] = format_timestamp(wh) if wh != float("-inf") else "—"
-                    row["L_eff (s)"] = round(pdata.get("L_eff_s", 0), 3)
-                    row["p"] = pdata.get("p_current", 0)
-                    row["Sketch N"] = pdata.get("sketch_total_count", 0)
-                    row["Completeness %"] = round(pdata.get("data_completeness_pct", 0), 2)
-                    row["On-Time"] = pdata.get("on_time", 0)
-                    row["Late"] = pdata.get("late_dropped", 0)
-                    row["DLQ"] = pdata.get("dlq_backlog", 0)
-                    row["Extreme"] = pdata.get("extreme_lag_count", 0)
-                    row["Lag p50 (ms)"] = round(pdata.get("sketch_quantile_p50_ms", 0), 2)
-                    row["Lag p99 (ms)"] = round(pdata.get("sketch_quantile_p99_ms", 0), 2)
-                    row["Proc p50 (µs)"] = pdata.get("proc_latency_p50_us", 0)
-                    row["Proc p99 (µs)"] = pdata.get("proc_latency_p99_us", 0)
-                    row["Sketch Update p95 us"] = pdata.get("sketch_update_latency_p95_us", 0)
-                    row["Sketch Query p95 us"] = pdata.get("sketch_query_latency_p95_us", 0)
-                    cs = pdata.get("cold_start", {})
-                    row["Cold Phase"] = cs.get("phase", "?") if cs else "?"
-                    nl = pdata.get("negative_lag", {})
-                    row["NegLag Tier"] = nl.get("tier", "?") if nl else "?"
-                part_rows.append(row)
+        max_skew_ms = 0.0
+        for p in sorted(parts, key=lambda x: int(x["partition"])):
+            w_val = p["W_h"]
+            
+            # Watermark skew calculation (local watermark - W_global)
+            wm_skew_ms = 0.0
+            if w_val != float("-inf") and w_ref != float("-inf"):
+                wm_skew_ms = max(0.0, (w_val - w_ref) * 1000.0)
+                if wm_skew_ms > max_skew_ms:
+                    max_skew_ms = wm_skew_ms
+
+            clk_skew = p.get("clock_skew_ms", 0.0)
+            
+            # Formulating status
+            p_status = "ACTIVE"
+            if p.get("replay"):
+                p_status = "REPLAY"
+            elif p.get("bp_drops", 0) > 0:
+                p_status = "BACKPRESSURE"
+            elif p.get("negative_lag", {}).get("tier") == "critical":
+                p_status = "CRITICAL_LAG"
+
+            if isinstance(w_val, (int, float)) and w_val != float("-inf"):
+                try:
+                    w_str = datetime.fromtimestamp(w_val).strftime("%Y-%m-%d %H:%M:%S")
+                except (OSError, ValueError, OverflowError):
+                    w_str = f"{w_val:.1f}"
+            else:
+                w_str = "—"
+
+            row = {
+                "Partition": p["partition"],
+                "Worker": p["worker"],
+                "Status": p_status,
+                "LW_i (Local WM)": w_str,
+                "WM Skew (ms)": round(wm_skew_ms, 1),
+                "Clock Skew (ms)": round(clk_skew, 1),
+                "BP Drops": p["bp_drops"],
+                "Punctuation Total": p.get("punctuation_total", 0),
+                "Received": p["received"],
+                "On-Time": p["on_time"],
+                "Late": p["late"],
+                "Completeness %": p["completeness"],
+            }
+            part_rows.append(row)
+
+        pc3.metric("Max Watermark Skew", f"{max_skew_ms:.1f} ms")
+
         if part_rows:
             st.dataframe(pd.DataFrame(part_rows), use_container_width=True, hide_index=True)
         else:
             st.info("No partition data yet.")
 
-    # Per-window loss accounting (heuristic only)
-    if mode == "heuristic":
-        loss_entries = _collect_per_window_loss(metrics)
-        if loss_entries:
-            with st.expander("Per-Window Loss Accounting", expanded=False):
-                st.caption("Top windows by loss rate from each partition + overall loss rate.")
-                st.dataframe(pd.DataFrame(loss_entries), use_container_width=True, hide_index=True)
+        # Show load imbalance chart
+        if parts:
+            st.markdown("---")
+            st.markdown("##### Partition Load Balancing")
+            chart_data = pd.DataFrame([
+                {"Partition": p["partition"], "On-Time": p["on_time"], "Late": p["late"]}
+                for p in parts
+            ])
+            st.bar_chart(chart_data.set_index("Partition")[["On-Time", "Late"]], height=240)
 
-    # Coordinator per-partition watermarks (strict mode)
-    if mode == "strict":
-        coord = metrics.get("coordinator", {})
-        partition_types = coord.get("partition_types", {})
-        recovery_info = coord.get("recovery_info", {})
-        if partition_types or recovery_info:
-            with st.expander("Coordinator Partition Map", expanded=False):
-                coord_rows = []
-                for pid_str, ptype in sorted(partition_types.items(), key=lambda x: int(x[0])):
-                    pid = int(pid_str)
-                    row = {"Partition": pid, "Type": ptype}
-                    if pid_str in recovery_info:
-                        ri = recovery_info[pid_str]
-                        row["Original Owner"] = ri.get("original_owner", "?")
-                        row["Current Owner"] = ri.get("current_owner", "?")
-                        row["Reassigned At"] = ri.get("reassigned_at", "?")
-                    coord_rows.append(row)
-                if coord_rows:
+    # -----------------------------------------------------------------------
+    # Page 3: Strict Specific
+    # -----------------------------------------------------------------------
+    elif selected_page == "🔒 Page 3: Strict Specific":
+        st.markdown("#### Strict Mode Operational Specifics")
+        if mode == "strict":
+            sc1, sc2 = st.columns([1, 2])
+            with sc1:
+                st.markdown("##### Coordinator HA Status")
+                coord = metrics.get("coordinator", {})
+                wg = coord.get("W_global")
+                if wg is not None and wg != float("-inf"):
+                    try:
+                        wm_str = datetime.fromtimestamp(wg).strftime("%Y-%m-%d %H:%M:%S")
+                    except (OSError, ValueError, OverflowError):
+                        wm_str = f"{wg:.1f}"
+                    st.metric("W_global", wm_str)
+                else:
+                    st.metric("W_global", "initializing...")
+                
+                st.caption(f"Leader Node: {metrics.get('coordinator_name', '?')}")
+                st.caption(f"Raft Term: {coord.get('term', 0)}")
+                st.caption(f"Partitions: {coord.get('partition_count', 0)} | Workers: {coord.get('active_workers', 0)}")
+                
+                skew_ms = coord.get("node_skew_max_ms", 0)
+                lag_s = coord.get("watermark_lag_s", 0)
+                diag = coord.get("combined_diagnosis", "?")
+                skew_status = coord.get("skew_status", "OK")
+                lag_status = coord.get("lag_status", "OK")
+                combined = coord.get("combined_status", "?")
+                st.caption(f"Skew: {skew_ms:.0f}ms ({skew_status}) | Lag: {lag_s:.1f}s ({lag_status})")
+                
+                status_color = {"Healthy": "green", "Degraded": "orange", "Warning": "orange", "Critical": "red"}
+                color = status_color.get(combined, "violet")
+                st.markdown(f"**Status:** :{color}[{combined}] — *{diag}*")
+                
+                fv = coord.get("fencing_violations", 0)
+                if fv > 0:
+                    st.caption(f"Fencing Violations: {fv}")
+
+            with sc2:
+                st.markdown("##### MinIO Tiered Storage Eviction States")
+                
+                # Fetch eviction state distribution and totals
+                ts_objs = 0
+                ts_bytes = 0
+                total_ev_errors = 0
+                eviction_counts = {0: 0, 1: 0, 2: 0, 3: 0} # CLOSED, UPLOADING, UPLOADED, PURGED
+                
+                for wname, wdata in metrics.get("workers", {}).items():
+                    m = wdata.get("metrics") or {}
+                    total_ev_errors += m.get("tiered_eviction_failure_total", 0)
+                    for pdata in m.get("partitions", {}).values():
+                        if isinstance(pdata, dict):
+                            ev_st = pdata.get("eviction_state", 0)
+                            eviction_counts[ev_st] = eviction_counts.get(ev_st, 0) + 1
+                            if "tier_storage" in pdata:
+                                ts_stats = pdata["tier_storage"]
+                                ts_objs += ts_stats.get("objects", 0)
+                                ts_bytes += ts_stats.get("bytes", 0)
+
+                tc1, tc2, tc3 = st.columns(3)
+                tc1.metric("Objects in MinIO", f"{ts_objs:,}")
+                tc2.metric("Size in MinIO", f"{ts_bytes / (1024*1024):.2f} MB" if ts_bytes else "0.0 MB")
+                tc3.metric("Upload Errors", f"{total_ev_errors}")
+
+                # Eviction state distribution table
+                state_labels = {0: "CLOSED", 1: "UPLOADING", 2: "UPLOADED", 3: "PURGED"}
+                dist_rows = [
+                    {"Eviction State": state_labels[k], "Window Count": v}
+                    for k, v in eviction_counts.items()
+                ]
+                st.dataframe(pd.DataFrame(dist_rows), use_container_width=True, hide_index=True)
+
+                # Show partition map reassignments
+                st.markdown("##### Partition Maps & Recovery Details")
+                partition_types = coord.get("partition_types", {})
+                recovery_info = coord.get("recovery_info", {})
+                if partition_types or recovery_info:
+                    coord_rows = []
+                    for pid_str, ptype in sorted(partition_types.items(), key=lambda x: int(x[0])):
+                        pid = int(pid_str)
+                        row = {"Partition": pid, "Type": ptype}
+                        if pid_str in recovery_info:
+                            ri = recovery_info[pid_str]
+                            row["Original Owner"] = ri.get("original_owner", "?")
+                            row["Current Owner"] = ri.get("current_owner", "?")
+                            row["Reassigned At"] = ri.get("reassigned_at", "?")
+                        coord_rows.append(row)
                     st.dataframe(pd.DataFrame(coord_rows), use_container_width=True, hide_index=True)
                 else:
-                    st.caption("All partitions normal — no reassignments.")
+                    st.caption("No partition reassignments or recovery events.")
+        else:
+            st.info("Strict-specific metrics are only available in Strict mode.")
+
+    # -----------------------------------------------------------------------
+    # Page 4: Heuristic Specific
+    # -----------------------------------------------------------------------
+    elif selected_page == "⚡ Page 4: Heuristic Specific":
+        st.markdown("#### Heuristic Mode Operational Specifics")
+        if mode == "heuristic":
+            hc1, hc2 = st.columns([1, 2])
+            with hc1:
+                st.markdown("##### Aggregator HA Status")
+                agg_state = metrics.get("aggregator", {})
+                wgh = agg_state.get("W_global_h")
+                if wgh is not None and wgh != float("-inf"):
+                    try:
+                        wm_str = datetime.fromtimestamp(wgh).strftime("%Y-%m-%d %H:%M:%S")
+                    except (OSError, ValueError, OverflowError):
+                        wm_str = f"{wgh:.1f}"
+                    st.metric("W_global_h", wm_str)
+                else:
+                    st.metric("W_global_h", "initializing...")
+                
+                st.caption(f"Active partitions: {agg_state.get('active_count', '?')}")
+                st.caption(f"Active Aggregator: {agg_state.get('ha_active', True)}")
+                st.caption(f"Standby Takeovers (Failovers): {agg_state.get('ha_failover_count', 0)}")
+                wlag = agg_state.get("watermark_lag_s", 0)
+                if wlag and wlag != float("inf"):
+                    st.caption(f"Watermark lag: {wlag:.1f}s")
+                
+                # Ingestor clock skews from leader health monitor
+                st.markdown("##### Ingestor Health & Skew")
+                ing_data = []
+                coord = metrics.get("coordinator", {})
+                ih = coord.get("ingestor_health", {}) if isinstance(coord, dict) else {}
+                ing_dict = ih.get("ingestors", {}) if isinstance(ih, dict) else {}
+                for ing_id, ing_val in ing_dict.items():
+                    ing_data.append({
+                        "Ingestor": ing_id,
+                        "Status": ing_val.get("status", "unknown"),
+                        "Clock Skew": f"{ing_val.get('clock_skew_ms', 0.0):.1f} ms",
+                        "Heartbeat Lag": f"{ing_val.get('last_heartbeat_s', 0.0):.1f}s",
+                    })
+                if ing_data:
+                    st.dataframe(pd.DataFrame(ing_data), use_container_width=True, hide_index=True)
+                else:
+                    st.caption("No ingestor health data available.")
+
+            with hc2:
+                st.markdown("##### DLQ Pipeline & DDSketch Details")
+                
+                # Fetch DLQ status and quantiles
+                dlq_backlog = agg.get("dlq_backlog", 0)
+                extreme_lag = agg.get("extreme_lag_count", 0)
+                
+                # Calculate SLA compliance from worker metrics
+                sla_compliant = 100.0
+                for wname, wdata in metrics.get("workers", {}).items():
+                    m = wdata.get("metrics") or {}
+                    if "sla_compliant_pct" in m:
+                        sla_compliant = min(sla_compliant, m.get("sla_compliant_pct", 100.0))
+
+                dc1, dc2, dc3 = st.columns(3)
+                dc1.metric("DLQ Backlog", f"{dlq_backlog:,}")
+                dc2.metric("Extreme Lag Count", f"{extreme_lag:,}")
+                dc3.metric("SLA Compliance %", f"{sla_compliant:.2f}%")
+
+                # Quantiles
+                st.markdown("##### DDSketch Event Lag Quantiles")
+                qc1, qc2, qc3 = st.columns(3)
+                qc1.metric("Lag p50 (ms)", f"{agg.get('sketch_p50_ms', 0.0):.1f} ms")
+                qc2.metric("Lag p95 (ms)", f"{agg.get('sketch_p95_ms', 0.0):.1f} ms")
+                qc3.metric("Lag p99 (ms)", f"{agg.get('sketch_p99_ms', 0.0):.1f} ms")
+
+                # Show per-window loss accounting
+                loss_entries = _collect_per_window_loss(metrics)
+                if loss_entries:
+                    st.markdown("##### Per-Window Loss Accounting")
+                    st.dataframe(pd.DataFrame(loss_entries), use_container_width=True, hide_index=True)
+                else:
+                    st.info("No window loss records yet.")
+        else:
+            st.info("Heuristic-specific metrics are only available in Heuristic mode.")
+
+    # -----------------------------------------------------------------------
+    # Page 5: Resources
+    # -----------------------------------------------------------------------
+    elif selected_page == "🖥️ Page 5: Resources":
+        st.markdown("#### Infrastructure & Node System Resources")
+        
+        resource_rows = []
+        for wname, wdata in metrics.get("workers", {}).items():
+            m = wdata.get("metrics") or {}
+            res = m.get("resources", {})
+            if res:
+                ram_used = res.get("ram_used_bytes", 0)
+                ram_total = res.get("ram_total_bytes", 0)
+                disk_used = res.get("disk_used_bytes", 0)
+                disk_total = res.get("disk_total_bytes", 0)
+                
+                ram_pct = (ram_used / ram_total * 100.0) if ram_total else 0.0
+                disk_pct = (disk_used / disk_total * 100.0) if disk_total else 0.0
+                
+                resource_rows.append({
+                    "Worker Node": wname,
+                    "RAM Used": f"{ram_used / (1024*1024*1024):.2f} GB",
+                    "RAM Total": f"{ram_total / (1024*1024*1024):.2f} GB",
+                    "RAM Usage %": f"{ram_pct:.1f}%",
+                    "Disk Used": f"{disk_used / (1024*1024*1024):.2f} GB",
+                    "Disk Total": f"{disk_total / (1024*1024*1024):.2f} GB",
+                    "Disk Usage %": f"{disk_pct:.1f}%",
+                })
+        if resource_rows:
+            st.dataframe(pd.DataFrame(resource_rows), use_container_width=True, hide_index=True)
+        else:
+            st.info("No system resource metrics available from worker nodes.")
 
 
 # ---------------------------------------------------------------------------
@@ -1192,9 +1361,16 @@ def render_sim_stats(mode: str, metrics: dict):
     st.markdown("---")
 
     # Interactive tabs inside stats
-    stats_tab1, stats_tab2, stats_tab3 = st.tabs(["Partition Metrics", "DDSketch & Latency (Heuristic)", "Load Balance & Skew"])
+    tab_names = ["Partition Metrics", "DDSketch & Latency (Heuristic)", "Load Balance & Skew"]
+    selected_tab = st.radio(
+        "Select Stat Tab",
+        tab_names,
+        horizontal=True,
+        label_visibility="collapsed",
+        key="sim_stats_active_tab"
+    )
 
-    with stats_tab1:
+    if selected_tab == "Partition Metrics":
         st.markdown("#### Per-Partition Detailed Statistics")
         tbl = []
         for p in sorted(parts, key=lambda x: int(x["partition"])):
@@ -1228,7 +1404,7 @@ def render_sim_stats(mode: str, metrics: dict):
             tbl.append(row)
         st.dataframe(pd.DataFrame(tbl), use_container_width=True, hide_index=True)
 
-    with stats_tab2:
+    elif selected_tab == "DDSketch & Latency (Heuristic)":
         if mode == "heuristic":
             st.markdown("#### Heuristic Latency & Profiling")
             ds_tbl = []
@@ -1285,7 +1461,7 @@ def render_sim_stats(mode: str, metrics: dict):
             col_l2.metric("Max Proc p99", f"{max(proc_p99s):.1f} \u03bcs" if proc_p99s else "—")
             col_l3.metric("Total Fencing Violations", f"{sum(fencing_viols)}" if fencing_viols else "0")
 
-    with stats_tab3:
+    elif selected_tab == "Load Balance & Skew":
         st.markdown("#### Event Load Balance & Skew")
         col_chart, col_skew = st.columns([3, 2])
         with col_chart:
@@ -1314,6 +1490,184 @@ def render_sim_stats(mode: str, metrics: dict):
                 st.caption(f"Most-loaded partitions: {', '.join(p['partition'] for p in max_recv_parts)} ({max(recv_vals):,} events)")
                 spread = (max(recv_vals) - min(recv_vals)) / max(recv_vals) * 100
                 st.caption(f"Load Spread: {spread:.1f}% (caused by hash rounding at chunk boundaries)")
+
+
+# ---------------------------------------------------------------------------
+# Export / download helpers
+# ---------------------------------------------------------------------------
+
+def _ts_suffix() -> str:
+    return datetime.now().strftime("%Y%m%d_%H%M%S")
+
+
+def render_export_panel(mode: str, metrics: dict, agg: dict):
+    """Download buttons for the current snapshot: aggregated KPIs (JSON/CSV),
+    per-partition table (CSV), and the time-series history (CSV)."""
+    st.markdown("##### 💾 Export current snapshot")
+    e1, e2, e3, e4 = st.columns(4)
+
+    # Aggregated KPIs
+    agg_export = dict(agg)
+    agg_export.update({"mode": mode, "exported_at": datetime.now().isoformat()})
+    e1.download_button(
+        "Aggregated KPIs (JSON)",
+        data=json.dumps(agg_export, indent=2, default=str),
+        file_name=f"kpi_{mode}_{_ts_suffix()}.json",
+        mime="application/json", width="stretch", key="dl_agg_json",
+    )
+    e2.download_button(
+        "Aggregated KPIs (CSV)",
+        data=pd.DataFrame([agg_export]).to_csv(index=False),
+        file_name=f"kpi_{mode}_{_ts_suffix()}.csv",
+        mime="text/csv", width="stretch", key="dl_agg_csv",
+    )
+
+    # Per-partition table
+    parts = _collect_partition_data(metrics)
+    if parts:
+        pdf = pd.DataFrame([
+            {k: v for k, v in p.items() if not isinstance(v, dict)}
+            for p in parts
+        ])
+        e3.download_button(
+            "Per-Partition (CSV)",
+            data=pdf.to_csv(index=False),
+            file_name=f"partitions_{mode}_{_ts_suffix()}.csv",
+            mime="text/csv", width="stretch", key="dl_parts_csv",
+        )
+    else:
+        e3.button("Per-Partition (CSV)", disabled=True, width="stretch", key="dl_parts_disabled")
+
+    # Time-series history
+    history = st.session_state.get("metrics_history", [])
+    if history:
+        e4.download_button(
+            "Time-Series History (CSV)",
+            data=pd.DataFrame(history).to_csv(index=False),
+            file_name=f"history_{mode}_{_ts_suffix()}.csv",
+            mime="text/csv", width="stretch", key="dl_hist_csv",
+        )
+    else:
+        e4.button("Time-Series History (CSV)", disabled=True, width="stretch", key="dl_hist_disabled")
+
+
+# ---------------------------------------------------------------------------
+# UI — Completeness % vs Wait Time (deliverable §112)
+# ---------------------------------------------------------------------------
+
+def _record_lab_point(mode: str, metrics: dict, agg: dict, note: str = ""):
+    """Append the current achieved (wait_time, completeness, latency) as a data
+    point for the Completeness-vs-Wait-Time deliverable."""
+    point = {
+        "mode": mode,
+        "wait_time_s": float(st.session_state.get("delta_base_s", 10.0)),
+        "window_size_s": 5.0,
+        "completeness_pct": round(agg.get("data_completeness_pct", 0.0), 3),
+        "late_rate_pct": round(agg.get("late_arrival_rate_pct", 0.0), 3),
+        "total_received": agg.get("total_received", 0),
+        "on_time": agg.get("on_time", 0),
+        "late_dropped": agg.get("late_dropped", 0),
+        "wm_lag_max_s": round(agg.get("wm_lag_max_s", 0.0), 3),
+        "proc_lat_p99_us": round(agg.get("proc_lat_p99_us", 0.0), 1),
+        "event_lag_p95_ms": round(agg.get("sketch_p95_ms", 0.0), 1),
+        "timestamp": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+        "note": note,
+    }
+    st.session_state.lab_points.append(point)
+
+
+def render_completeness_vs_wait():
+    st.markdown("### 📐 Data Completeness % vs Wait Time (ms)")
+    st.caption(
+        "Core deliverable (topic #112): the trade-off between **Wait Time** "
+        "(watermark delay δ) and **Data Completeness %**. Set a Wait Time δ in the "
+        "sidebar, run the pipeline, let it stabilise, then record a data point. "
+        "Sweep δ across several runs (strict vs heuristic) to build the curve."
+    )
+
+    mode = st.session_state.mode
+    metrics = st.session_state.get("last_metrics") or {}
+    agg = aggregate_worker_metrics(metrics) if metrics.get("workers") else {}
+
+    c1, c2, c3 = st.columns([2, 1, 1])
+    with c1:
+        if st.session_state.running and agg:
+            st.success(
+                f"Current run — δ={st.session_state.get('delta_base_s', 10.0):.0f}s · "
+                f"mode={mode} · completeness={agg.get('data_completeness_pct', 0.0):.2f}% · "
+                f"late={agg.get('late_arrival_rate_pct', 0.0):.2f}%"
+            )
+        else:
+            st.info("Start a run to capture a live data point (or add a manual one).")
+    with c2:
+        note = st.text_input("Note (optional)", key="lab_note", placeholder="e.g. burst load")
+    with c3:
+        st.markdown("&nbsp;")
+        if st.button("➕ Record data point", type="primary", width="stretch",
+                     disabled=not (st.session_state.running and agg)):
+            _record_lab_point(mode, metrics, agg, note)
+            st.toast("Data point recorded.", icon="📐")
+
+    # Manual entry (for offline / external runs)
+    with st.expander("Add a manual data point"):
+        m1, m2, m3, m4 = st.columns(4)
+        man_mode = m1.selectbox("Mode", ["strict", "heuristic"], key="lab_man_mode")
+        man_wait = m2.number_input("Wait Time δ (s)", min_value=0.0, value=10.0, step=1.0, key="lab_man_wait")
+        man_comp = m3.number_input("Completeness %", min_value=0.0, max_value=100.0, value=100.0, step=0.1, key="lab_man_comp")
+        man_late = m4.number_input("Late rate %", min_value=0.0, max_value=100.0, value=0.0, step=0.1, key="lab_man_late")
+        if st.button("Add manual point", key="lab_man_add"):
+            st.session_state.lab_points.append({
+                "mode": man_mode, "wait_time_s": man_wait, "window_size_s": 5.0,
+                "completeness_pct": man_comp, "late_rate_pct": man_late,
+                "total_received": 0, "on_time": 0, "late_dropped": 0,
+                "wm_lag_max_s": 0.0, "proc_lat_p99_us": 0.0, "event_lag_p95_ms": 0.0,
+                "timestamp": datetime.now().strftime("%Y-%m-%d %H:%M:%S"), "note": "manual",
+            })
+            st.toast("Manual point added.", icon="✍️")
+
+    points = st.session_state.get("lab_points", [])
+    if not points:
+        st.info("No data points yet. Record at least two (varying δ) to see the trade-off curve.")
+        return
+
+    df = pd.DataFrame(points)
+    st.markdown("#### Recorded data points")
+    st.dataframe(df, use_container_width=True, hide_index=True)
+
+    dl1, dl2 = st.columns([1, 4])
+    dl1.download_button(
+        "⬇️ Download CSV", data=df.to_csv(index=False),
+        file_name=f"completeness_vs_wait_{_ts_suffix()}.csv",
+        mime="text/csv", width="stretch", key="dl_lab_csv",
+    )
+    if dl2.button("🗑️ Clear all points", key="lab_clear"):
+        st.session_state.lab_points = []
+        st.rerun()
+
+    # Trade-off curve: completeness vs wait time, one line per mode
+    st.markdown("#### Trade-off curve")
+    try:
+        chart_df = (
+            df.groupby(["mode", "wait_time_s"])["completeness_pct"]
+            .mean().reset_index()
+            .pivot(index="wait_time_s", columns="mode", values="completeness_pct")
+            .sort_index()
+        )
+        cc1, cc2 = st.columns(2)
+        with cc1:
+            st.markdown("**Completeness % vs Wait Time (s)**")
+            st.line_chart(chart_df, height=260)
+        with cc2:
+            lat_df = (
+                df.groupby(["mode", "wait_time_s"])["late_rate_pct"]
+                .mean().reset_index()
+                .pivot(index="wait_time_s", columns="mode", values="late_rate_pct")
+                .sort_index()
+            )
+            st.markdown("**Late Rate % vs Wait Time (s)**")
+            st.line_chart(lat_df, height=260)
+    except Exception as e:
+        st.warning(f"Need more varied data points to plot the curve. ({e})")
 
 
 # ---------------------------------------------------------------------------
@@ -1363,6 +1717,12 @@ def render_logs():
             lines = logs.split("\n")
             logs = "\n".join(line for line in lines if filt in line.lower())
         if logs.strip():
+            st.download_button(
+                "⬇️ Download logs (.log)",
+                data=logs,
+                file_name=f"logs_{service or 'all'}_{_ts_suffix()}.log",
+                mime="text/plain", key="dl_logs",
+            )
             st.code(logs, language="log")
         else:
             st.info("No logs yet — containers may still be starting, or filter excludes everything.")
@@ -1445,12 +1805,12 @@ def render_raw(metrics: dict):
 # Node Control & Fault Injection
 # ---------------------------------------------------------------------------
 
-def fetch_all_container_statuses(mode: str) -> dict[str, str]:
+def fetch_all_container_statuses(mode: str, deploy_mode: str = None) -> dict[str, str]:
     """Fetch the status of all containers in a single docker compose ps call.
     Returns a dict mapping docker service name to status ('running', 'stopped', 'unknown').
     """
     statuses = {}
-    cmd = _compose_base() + [
+    cmd = _compose_base(deploy_mode) + [
         "--profile", "strict",
         "--profile", "heuristic",
         "--profile", "hybrid",
@@ -1513,6 +1873,12 @@ def get_container_status_docker(service: str) -> str:
 
 def check_node_status(service: str, port: int = None) -> str:
     """Combined health status using Docker state lookup and network check fallback."""
+    # Check pre-calculated background cache first
+    cached_statuses = st.session_state.get("node_statuses")
+    if cached_statuses and service in cached_statuses:
+        return cached_statuses[service]
+
+    # Fallback to live check if cache is not available
     # 1. Check Docker state first (fast cache lookup)
     docker_status = get_container_status_docker(service)
     if docker_status == "stopped":
@@ -1600,14 +1966,14 @@ def compose_kill_service(service: str) -> tuple[bool, str]:
         return False, str(e)
 
 
-def _node_control_groups(mode: str) -> list[tuple[str, list[dict]]]:
+def _node_control_groups(mode: str, deploy_mode: str = None) -> list[tuple[str, list[dict]]]:
     """Single source of truth for the controllable services in the current
     deploy/watermark mode. Returns [(group_header, [node, ...]), ...] where each
     node is {service, display, port, role}."""
     def n(service, display, port, role):
         return {"service": service, "display": display, "port": port, "role": role}
 
-    if _is_sim():
+    if _is_sim(deploy_mode):
         if mode == "strict":
             return [("Simulation Cluster", [
                 n("strict-coordinator", "Strict Coordinator", 9000, "Coordinator / Raft Leader"),
@@ -1660,6 +2026,64 @@ _NODE_ACTIONS = {
 }
 
 
+def fetch_node_health_statuses(mode: str, deploy_mode: str = None, container_statuses: dict[str, str] = None) -> dict[str, str]:
+    """Calculate the health status ('running', 'stopped', 'unknown') of all services.
+    Runs HTTP/TCP checks in parallel using a ThreadPoolExecutor.
+    """
+    if container_statuses is None:
+        container_statuses = {}
+    node_statuses = {}
+    
+    # Single source of truth for controllable services
+    groups = _node_control_groups(mode, deploy_mode)
+    flat_nodes = [node for _, nodes in groups for node in nodes]
+    
+    def check_node(node):
+        service = node["service"]
+        port = node["port"]
+        
+        # 1. Get docker status from container_statuses dict
+        docker_status = container_statuses.get(service, "unknown")
+        if docker_status == "stopped":
+            return service, "stopped"
+            
+        # 2. Network/health check fallback if running in docker
+        infra_key = _infra_key(service, deploy_mode)
+        if infra_key is not None:
+            if check_infra_health(infra_key, deploy_mode):
+                return service, "running"
+            return service, docker_status if docker_status != "unknown" else "stopped"
+            
+        if port:
+            if is_healthy(port):
+                return service, "running"
+            return service, "stopped"
+            
+        return service, docker_status
+
+    with concurrent.futures.ThreadPoolExecutor(max_workers=max(1, len(flat_nodes))) as executor:
+        results = executor.map(check_node, flat_nodes)
+        for service, status in results:
+            node_statuses[service] = status
+            
+    return node_statuses
+
+
+def bg_fetch_job(shared_state, mode, deploy_mode):
+    try:
+        metrics = fetch_all_metrics(mode, deploy_mode)
+        container_statuses = fetch_all_container_statuses(mode, deploy_mode)
+        node_statuses = fetch_node_health_statuses(mode, deploy_mode, container_statuses)
+        shared_state["metrics"] = metrics
+        shared_state["container_statuses"] = container_statuses
+        shared_state["node_statuses"] = node_statuses
+        shared_state["last_fetch_time"] = time.time()
+    except Exception as e:
+        print(f"[dashboard] Error in background metrics fetch thread: {e}", flush=True)
+    finally:
+        shared_state["fetch_in_progress"] = False
+
+
 def _exec_node_action(action: str, service: str, display: str):
     """Run a kill/start/stop against a service and refresh the page on success."""
     print(f"[dashboard] EXECUTING NODE ACTION: action={action} service={service} display={display}", flush=True)
@@ -1669,11 +2093,24 @@ def _exec_node_action(action: str, service: str, display: str):
     if ok:
         print(f"[dashboard] NODE ACTION SUCCESS: {past} {display}!", flush=True)
         st.toast(f"{past} {display}!", icon=icon)
+        
+        # Optimistically update the status cache locally
+        new_status = "stopped" if action in ("kill", "stop") else "running"
+        if "node_statuses" in st.session_state:
+            st.session_state.node_statuses[service] = new_status
+        if "container_statuses" in st.session_state:
+            st.session_state.container_statuses[service] = new_status
+            
+        # Reset last fetch time to force an immediate background refresh on next render
+        if "fetch_shared_state" in st.session_state:
+            st.session_state.fetch_shared_state["last_fetch_time"] = 0.0
+            
         time.sleep(1)
         st.rerun()
     else:
         print(f"[dashboard] NODE ACTION FAILED: {action} {display}! Error: {err}", flush=True)
         st.error(f"Failed to {action} {display}: {err}")
+
 
 
 def render_quick_fault_injection(mode: str):
@@ -1760,6 +2197,114 @@ def render_failover_events_section():
     st.dataframe(pd.DataFrame(event_rows), use_container_width=True, hide_index=True)
 
 
+def _failover_snapshot(mode: str, phase: str) -> dict:
+    """Capture a compact metrics snapshot for the failover-test timeline."""
+    metrics = fetch_all_metrics(mode, "full")
+    agg = aggregate_worker_metrics(metrics)
+    coord = metrics.get("coordinator", {}) if mode == "strict" else {}
+    agg_state = metrics.get("aggregator", {}) if mode != "strict" else {}
+    return {
+        "phase": phase,
+        "time": datetime.now().strftime("%H:%M:%S"),
+        "active_workers": coord.get("active_workers", len(metrics.get("workers", {}))),
+        "workers_responding": len(metrics.get("workers", {})),
+        "completeness_pct": round(agg.get("data_completeness_pct", 0.0), 2),
+        "total_received": agg.get("total_received", 0),
+        "late_dropped": agg.get("late_dropped", 0),
+        "W_global": format_timestamp(coord.get("W_global")) if mode == "strict" else format_timestamp(agg_state.get("W_global_h")),
+        "reassignments": len(coord.get("recovery_info", {})) if mode == "strict" else agg_state.get("ha_failover_count", 0),
+        "term": coord.get("term", "—") if mode == "strict" else "—",
+    }
+
+
+def run_automated_failover_test(target_service: str, display: str, mode: str, observe_s: int = 20):
+    """Kill a node, observe recovery while it is down, then recover it —
+    recording a before/during/after timeline for the fault-tolerance deliverable."""
+    timeline = []
+    with st.status(f"Failover test on {display}...", expanded=True) as s:
+        st.write("1/5 · Capturing baseline (healthy cluster)...")
+        timeline.append(_failover_snapshot(mode, "before_kill"))
+
+        st.write(f"2/5 · 💥 Killing {display} (auto-restart disabled)...")
+        ok, err = compose_kill_service(target_service)
+        if not ok:
+            s.update(label="Failover test failed at kill step", state="error")
+            st.error(err)
+            return
+        timeline.append(_failover_snapshot(mode, "just_killed"))
+
+        st.write(f"3/5 · Observing failover for {observe_s}s (partitions should reassign)...")
+        time.sleep(observe_s)
+        timeline.append(_failover_snapshot(mode, "during_outage"))
+
+        st.write(f"4/5 · ♻️ Recovering {display}...")
+        ok, err = compose_start_service(target_service)
+        if not ok:
+            s.update(label="Failover test: node killed but recovery failed", state="error")
+            st.error(err)
+        st.write(f"5/5 · Observing failback for {observe_s}s...")
+        time.sleep(observe_s)
+        timeline.append(_failover_snapshot(mode, "after_recover"))
+
+        s.update(label=f"Failover test complete for {display}", state="complete")
+
+    record = {
+        "target": display, "service": target_service, "mode": mode,
+        "observe_s": observe_s, "ran_at": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+        "timeline": timeline,
+    }
+    st.session_state.failover_test_log.append(record)
+
+
+def render_failover_test(mode: str):
+    """Guided, one-click automated failover test with a recorded timeline."""
+    st.markdown("#### 🧪 Automated Failover Test")
+    st.caption(
+        "Kills a worker, watches the coordinator reassign its partitions while it "
+        "is down, then recovers it — recording a before/during/after timeline you "
+        "can download as evidence of fault tolerance."
+    )
+
+    workers = [("node0", "Node 0 (P0,1,2)"), ("node1", "Node 1 (P3,4,5)"),
+               ("node2", "Node 2 (P6,7,8)"), ("node3", "Node 3 (P9,10,11)")]
+    f1, f2, f3 = st.columns([2, 1, 1])
+    with f1:
+        labels = [d for _, d in workers]
+        sel = st.selectbox("Worker to fail", labels, key="fo_test_target")
+        target = workers[labels.index(sel)][0]
+    with f2:
+        observe_s = st.number_input("Observe window (s)", min_value=5, max_value=120, value=20, step=5, key="fo_observe")
+    with f3:
+        st.markdown("&nbsp;")
+        run = st.button("▶️ Run failover test", type="primary", width="stretch",
+                        disabled=not st.session_state.running, key="fo_run")
+
+    if run:
+        run_automated_failover_test(target, sel, mode, int(observe_s))
+        st.rerun()
+
+    logs = st.session_state.get("failover_test_log", [])
+    if not logs:
+        st.info("No failover tests run yet.")
+        return
+
+    latest = logs[-1]
+    st.markdown(f"**Last test:** {latest['target']} · mode={latest['mode']} · {latest['ran_at']}")
+    tdf = pd.DataFrame(latest["timeline"])
+    st.dataframe(tdf, use_container_width=True, hide_index=True)
+
+    flat = []
+    for rec in logs:
+        for row in rec["timeline"]:
+            flat.append({"ran_at": rec["ran_at"], "target": rec["target"], "mode": rec["mode"], **row})
+    st.download_button(
+        "⬇️ Download failover timeline (CSV)",
+        data=pd.DataFrame(flat).to_csv(index=False),
+        file_name=f"failover_test_{_ts_suffix()}.csv",
+        mime="text/csv", key="dl_failover_csv",
+    )
+
+
 def render_node_control(mode: str):
     st.markdown("### Node Control / Fault Injection")
     st.markdown("Abruptly kill, gracefully stop, or start individual system services to verify fault-tolerance.")
@@ -1769,6 +2314,8 @@ def render_node_control(mode: str):
                    "The Kill / Recover buttons activate once containers are running.")
     else:
         render_quick_fault_injection(mode)
+        st.divider()
+        render_failover_test(mode)
         st.divider()
         render_failover_events_section()
         st.divider()
@@ -1825,18 +2372,34 @@ def main():
         """Fetch live metrics once and append a history sample. Throttled to max once per 2 seconds."""
         metrics = st.session_state.get("last_metrics") or {}
         if st.session_state.running:
+            # 1. Trigger background fetch if not already in progress and 2 seconds elapsed
+            shared = st.session_state.fetch_shared_state
             now = time.time()
-            last_fetch = st.session_state.get("last_fetch_time", 0.0)
-            if now - last_fetch >= 2.0:
-                metrics = fetch_all_metrics(mode) or {}
-                st.session_state.last_metrics = metrics
-                st.session_state.last_fetch_time = now
-                st.session_state.container_statuses = fetch_all_container_statuses(mode)
+            if not shared["fetch_in_progress"]:
+                if now - shared["last_fetch_time"] >= 2.0:
+                    shared["fetch_in_progress"] = True
+                    thread = threading.Thread(
+                        target=bg_fetch_job,
+                        args=(shared, mode, st.session_state.deploy_mode),
+                        daemon=True
+                    )
+                    thread.start()
+
+            # 2. Consume any new background fetch results
+            if shared["last_fetch_time"] > st.session_state.get("last_processed_fetch_time", 0.0):
+                new_metrics = shared["metrics"] or {}
+                new_statuses = shared["container_statuses"] or {}
+                new_node_statuses = shared["node_statuses"] or {}
+                
+                st.session_state.last_metrics = new_metrics
+                st.session_state.container_statuses = new_statuses
+                st.session_state.node_statuses = new_node_statuses
+                st.session_state.last_processed_fetch_time = shared["last_fetch_time"]
                 
                 # Coordination tracking: detect changes and log to console
-                if metrics.get("coordinator"):
-                    coord_data = metrics["coordinator"]
-                    leader = metrics.get("coordinator_name")
+                if new_metrics.get("coordinator"):
+                    coord_data = new_metrics["coordinator"]
+                    leader = new_metrics.get("coordinator_name")
                     term = coord_data.get("term", 0)
                     
                     # Check leader change
@@ -1867,8 +2430,8 @@ def main():
                                           f"reassigned_at={format_timestamp(info.get('reassigned_at'))}", flush=True)
                             st.session_state.last_recovery_info = recovery_info
 
-                if metrics.get("workers"):
-                    agg = aggregate_worker_metrics(metrics)
+                if new_metrics.get("workers"):
+                    agg = aggregate_worker_metrics(new_metrics)
                     elapsed = time.time() - (st.session_state.start_time or time.time())
                     st.session_state.metrics_history.append({
                         "elapsed_s": elapsed,
@@ -1884,24 +2447,21 @@ def main():
                     })
                     if len(st.session_state.metrics_history) > MAX_HISTORY:
                         st.session_state.metrics_history = st.session_state.metrics_history[-MAX_HISTORY:]
-            else:
-                # Use cached metrics if queried within the throttle window
-                metrics = st.session_state.last_metrics or {}
+
+            # Always return the cached metrics
+            metrics = st.session_state.last_metrics or {}
         return metrics or {}
 
     # Build the tab bar once. Node Control sits right after Dashboard and carries
     # a distinct icon so the kill/recover controls are easy to find.
     TAB_DASH = "📊 Dashboard"
     TAB_NODE = "🛑 Node Control · Kill / Recover"
-    TAB_SIM = "🧪 Sim Stats"
+    TAB_LAB = "📐 Completeness vs Wait"
     TAB_LOGS = "📜 Logs"
     TAB_CMP = "⚖️ Compare"
     TAB_RAW = "🧩 Raw JSON"
 
-    tab_names = [TAB_DASH, TAB_NODE]
-    if is_sim:
-        tab_names.append(TAB_SIM)
-    tab_names.extend([TAB_LOGS, TAB_CMP, TAB_RAW])
+    tab_names = [TAB_DASH, TAB_NODE, TAB_LAB, TAB_LOGS, TAB_CMP, TAB_RAW]
     tabs = st.tabs(tab_names)
     tab_idx = {name: i for i, name in enumerate(tab_names)}
 
@@ -1967,21 +2527,14 @@ def main():
 """)
         _dashboard_fragment()
 
-    # Tab: Sim Stats — isolated fragment; auto-refreshes.
-    if is_sim:
-        with tabs[tab_idx[TAB_SIM]]:
-            @st.fragment(run_every=3.0 if st.session_state.running else None)
-            def _sim_fragment():
-                if st.session_state.running:
-                    _render_refresh_bar("sim_refresh")
-                metrics = _refresh_metrics() if st.session_state.running else {}
-                if st.session_state.running and metrics.get("workers"):
-                    render_sim_stats(mode, metrics)
-                elif st.session_state.running:
-                    st.info("Waiting for partition data...")
-                else:
-                    st.info("Start the simulation to see replay statistics.")
-            _sim_fragment()
+    # Tab: Completeness vs Wait Time — deliverable lab. Refresh keeps the live
+    # "current run" line fresh; recorded points persist across reruns.
+    with tabs[tab_idx[TAB_LAB]]:
+        @st.fragment(run_every=5.0 if st.session_state.running else None)
+        def _lab_fragment():
+            _ = _refresh_metrics()
+            render_completeness_vs_wait()
+        _lab_fragment()
 
     # Tab: Node Control — isolated fragment; auto-refreshes.
     with tabs[tab_idx[TAB_NODE]]:
