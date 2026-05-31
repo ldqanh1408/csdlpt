@@ -1,0 +1,360 @@
+# Prometheus Alert Rules for CSDLPT Stream Processor
+groups:
+  - name: csdlpt_critical
+    interval: 10s
+    rules:
+      # ---- Data loss (3.1: split by mode) ----
+      - alert: DataLossRateStrict
+        expr: csdlpt_data_loss_rate{mode="strict"} > 0
+        for: 30s
+        labels: {severity: critical}
+        annotations:
+          summary: "Data loss rate exceeded strict threshold (0%)"
+          description: "Data loss rate {{ $value }}% > 0% in strict mode"
+
+      - alert: DataLossRateHeuristic
+        expr: csdlpt_data_loss_rate{mode="heuristic"} > 1
+        for: 30s
+        labels: {severity: critical}
+        annotations:
+          summary: "Data loss rate exceeded heuristic threshold (1%)"
+          description: "Data loss rate {{ $value }}% > 1% in heuristic mode"
+
+      - alert: DataLossRateHeuristicWarning
+        expr: csdlpt_data_loss_rate{mode="heuristic"} > 0.1
+        for: 5m
+        labels: {severity: warning}
+        annotations:
+          summary: "Heuristic data loss rate > 0.1%"
+
+      # ---- Worker down (3.17: differentiate) ----
+      - alert: WorkerDownCritical
+        expr: csdlpt_worker_alive_count <= 2
+        for: 10s
+        labels: {severity: critical}
+        annotations:
+          summary: "2 or fewer workers alive"
+
+      - alert: WorkerDownWarning
+        expr: csdlpt_worker_alive_count <= 3
+        for: 10s
+        labels: {severity: warning}
+        annotations:
+          summary: "3 or fewer workers alive"
+
+      # ---- Watermark lag (3.2: strict >12s; 3.3: heuristic tiers) ----
+      - alert: WatermarkLagCritical
+        expr: csdlpt_watermark_lag_seconds > 60
+        for: 30s
+        labels: {severity: critical}
+        annotations:
+          summary: "Watermark lag critical ({{ $value }}s > 60s)"
+
+      - alert: WatermarkLagStrictWarning
+        expr: csdlpt_watermark_lag_seconds{mode="strict"} > 12
+        for: 1m
+        labels: {severity: warning}
+        annotations:
+          summary: "Watermark lag elevated in strict mode ({{ $value }}s > 12s)"
+
+      - alert: WatermarkLagHeuristicWarning
+        expr: csdlpt_watermark_lag_seconds{mode="heuristic"} > 5
+        for: 30s
+        labels: {severity: warning}
+        annotations:
+          summary: "Watermark lag elevated in heuristic mode ({{ $value }}s > 5s)"
+
+      - alert: WatermarkLagHeuristicCritical
+        expr: csdlpt_watermark_lag_seconds{mode="heuristic"} > 30
+        for: 30s
+        labels: {severity: critical}
+        annotations:
+          summary: "Watermark lag critical in heuristic mode ({{ $value }}s > 30s)"
+
+      # ---- Node skew (3.4: warning → critical) ----
+      - alert: NodeSkewWarning
+        expr: csdlpt_node_skew_max_ms > 1000
+        for: 1m
+        labels: {severity: warning}
+        annotations:
+          summary: "Node skew elevated ({{ $value }}ms > 1000ms)"
+
+      - alert: NodeSkewHigh
+        expr: csdlpt_node_skew_max_ms > 5000
+        for: 30s
+        labels: {severity: critical}
+        annotations:
+          summary: "Node skew high ({{ $value }}ms > 5000ms)"
+
+      # ---- Backpressure ----
+      - alert: BackpressureActive
+        expr: csdlpt_backpressure_pause_count > 0
+        for: 5m
+        labels: {severity: warning}
+        annotations:
+          summary: "Backpressure active for > 5 min"
+
+      - alert: BackpressureRateWarning
+        expr: rate(csdlpt_backpressure_pause_count[1m]) > 1
+        for: 5m
+        labels: {severity: warning}
+        annotations:
+          summary: "Backpressure pause rate > 1/min"
+
+      - alert: BackpressureRateHigh
+        expr: rate(csdlpt_backpressure_pause_count[1m]) > 10
+        for: 1m
+        labels: {severity: critical}
+        annotations:
+          summary: "Backpressure pause rate > 10/min"
+
+      # ---- Non-monotonic punctuation (3.7) ----
+      - alert: NonMonotonicPunctuationWarning
+        expr: rate(csdlpt_non_monotonic_punctuation_total[1m]) > 0
+        for: 5m
+        labels: {severity: warning}
+        annotations:
+          summary: "Non-monotonic punctuation detected"
+
+      - alert: NonMonotonicPunctuationHigh
+        expr: rate(csdlpt_non_monotonic_punctuation_total[1m]) > 5
+        for: 1m
+        labels: {severity: critical}
+        annotations:
+          summary: "Non-monotonic punctuation > 5/min"
+
+      # ---- DLQ ----
+      - alert: DLQBacklogHigh
+        expr: csdlpt_dlq_backlog > 10000
+        for: 5m
+        labels: {severity: warning}
+        annotations:
+          summary: "DLQ backlog {{ $value }} > 10000"
+
+      - alert: DLQBacklogCritical
+        expr: csdlpt_dlq_backlog > 50000
+        for: 5m
+        labels: {severity: critical}
+        annotations:
+          summary: "DLQ backlog {{ $value }} > 50000"
+
+      - alert: DLQLagTimeHigh
+        expr: csdlpt_dlq_oldest_entry_age_seconds > 3600
+        for: 5m
+        labels: {severity: critical}
+        annotations:
+          summary: "DLQ oldest entry > 1 hour"
+
+      - alert: DLQLagTimeWarning
+        expr: csdlpt_dlq_oldest_entry_age_seconds > 60
+        for: 5m
+        labels: {severity: warning}
+        annotations:
+          summary: "DLQ oldest entry > 1 minute"
+
+      # ---- Negative lag rate (3.5: tighten + add critical) ----
+      - alert: NegativeLagRateHigh
+        expr: csdlpt_negative_lag_rate > 0.01
+        for: 1m
+        labels: {severity: warning}
+        annotations:
+          summary: "Negative lag rate {{ $value }} > 1%"
+
+      - alert: NegativeLagRateCritical
+        expr: csdlpt_negative_lag_rate > 0.05
+        for: 1m
+        labels: {severity: critical}
+        annotations:
+          summary: "Negative lag rate {{ $value }} exceeds 5% threshold"
+
+      # ---- Tiered storage ----
+      - alert: TieredStorageError
+        expr: csdlpt_tier_storage_status == 0
+        for: 1m
+        labels: {severity: warning}
+        annotations:
+          summary: "Tiered storage connection failing"
+
+      # ---- Eviction failures (3.8) ----
+      - alert: EvictionFailureRateHigh
+        expr: rate(csdlpt_tiered_eviction_failure_total[5m]) * 100 > 1
+        for: 5m
+        labels: {severity: critical}
+        annotations:
+          summary: "Tiered eviction failure rate > 1%"
+
+      - alert: EvictionFailureRateWarning
+        expr: rate(csdlpt_tiered_eviction_failure_total[5m]) * 100 > 0
+        for: 5m
+        labels: {severity: warning}
+        annotations:
+          summary: "Tiered eviction failures detected"
+
+      # ---- Ingestor ----
+      - alert: IngestorSilent
+        expr: csdlpt_ingestor_silent > 0
+        for: 15s
+        labels: {severity: critical}
+        annotations:
+          summary: "{{ $value }} ingestor(s) silent"
+
+      # ---- Failover / fencing ----
+      - alert: FailoverEvent
+        expr: rate(csdlpt_failover_events_total[1m]) > 0
+        labels: {severity: warning}
+        annotations:
+          summary: "Failover event in last minute"
+
+      # ---- Replay (3.12: severity bumps) ----
+      - alert: ReplayModeActive
+        expr: csdlpt_replay_mode_active > 0
+        for: 5m
+        labels: {severity: warning}
+        annotations:
+          summary: "Replay mode active > 5 min"
+
+      - alert: ReplayModeMultipleWorkers
+        expr: csdlpt_replay_mode_active >= 2
+        for: 5m
+        labels: {severity: critical}
+        annotations:
+          summary: "2+ workers in replay mode for > 5 min"
+
+      # ---- Leader changes (3.16: rate-based tiers) ----
+      - alert: CoordinatorLeaderChanges
+        expr: rate(csdlpt_coordinator_leader_changes_total[5m]) > 0
+        for: 1m
+        labels: {severity: warning}
+        annotations:
+          summary: "Coordinator leader changed in last 5 min"
+
+      - alert: CoordinatorLeaderChangesCritical
+        expr: rate(csdlpt_coordinator_leader_changes_total[1h]) > 5
+        for: 1m
+        labels: {severity: critical}
+        annotations:
+          summary: "Coordinator leader changed > 5 times per hour"
+
+      - alert: AggregatorLeaderChanges
+        expr: rate(csdlpt_aggregator_leader_changes_total[5m]) > 0
+        for: 1m
+        labels: {severity: warning}
+        annotations:
+          summary: "Aggregator leader changed in last 5 min"
+
+      - alert: AggregatorLeaderChangesCritical
+        expr: rate(csdlpt_aggregator_leader_changes_total[1h]) > 5
+        for: 1m
+        labels: {severity: critical}
+        annotations:
+          summary: "Aggregator leader changed > 5 times per hour"
+
+      # ---- Worker resources (3.13: warning → critical; 3.14: thresholds) ----
+      - alert: WorkerRAMWarning
+        expr: csdlpt_worker_ram_usage_bytes / csdlpt_worker_ram_limit_bytes > 0.70
+        for: 5m
+        labels: {severity: warning}
+        annotations:
+          summary: "Worker RAM usage > 70%"
+
+      - alert: WorkerRAMHigh
+        expr: csdlpt_worker_ram_usage_bytes / csdlpt_worker_ram_limit_bytes > 0.85
+        for: 5m
+        labels: {severity: critical}
+        annotations:
+          summary: "Worker RAM usage > 85%"
+
+      - alert: WorkerDiskHigh
+        expr: csdlpt_worker_disk_usage_bytes / csdlpt_worker_disk_limit_bytes > 0.80
+        for: 5m
+        labels: {severity: critical}
+        annotations:
+          summary: "Worker disk usage > 80%"
+
+      - alert: WorkerDiskHighWarning
+        expr: csdlpt_worker_disk_usage_bytes / csdlpt_worker_disk_limit_bytes > 0.60
+        for: 5m
+        labels: {severity: warning}
+        annotations:
+          summary: "Worker disk usage > 60%"
+
+      # ---- Kafka partition lag (3.15: new warning tier) ----
+      - alert: KafkaPartitionLagCritical
+        expr: csdlpt_kafka_partition_lag > 100000
+        for: 5m
+        labels: {severity: critical}
+        annotations:
+          summary: "Kafka partition lag {{ $value }} > 100k"
+
+      - alert: KafkaPartitionLagWarning
+        expr: csdlpt_kafka_partition_lag > 1000
+        for: 5m
+        labels: {severity: warning}
+        annotations:
+          summary: "Kafka partition lag > 1k"
+
+      # ---- MinIO (3.10: latency-based alerts; keep error-rate alert) ----
+      - alert: MinIOUploadLag
+        expr: rate(csdlpt_minio_upload_errors_total[5m]) > 0
+        for: 5m
+        labels: {severity: warning}
+        annotations:
+          summary: "MinIO upload errors detected"
+
+      - alert: MinIOUploadLatencyCritical
+        expr: csdlpt_minio_upload_lag_seconds > 900
+        for: 5m
+        labels: {severity: critical}
+        annotations:
+          summary: "MinIO upload latency > 15 min"
+
+      - alert: MinIOUploadLatencyWarning
+        expr: csdlpt_minio_upload_lag_seconds > 60
+        for: 5m
+        labels: {severity: warning}
+        annotations:
+          summary: "MinIO upload latency > 1 min"
+
+      # ---- Sketch (3.11: warning → critical) ----
+      - alert: SketchSampleCountLow
+        expr: csdlpt_sketch_total_count < 100
+        for: 10m
+        labels: {severity: critical}
+        annotations:
+          summary: "DDSketch has < 100 samples for > 10 min"
+
+      - alert: SketchSampleCountWarning
+        expr: csdlpt_sketch_total_count < 1000
+        for: 5m
+        labels: {severity: warning}
+        annotations:
+          summary: "DDSketch has < 1000 samples for > 5 min"
+
+      - alert: SketchQuantileP99Warning
+        expr: csdlpt_sketch_quantile_ms{quantile="0.99"} > 1000
+        for: 5m
+        labels: {severity: warning}
+        annotations:
+          summary: "DDSketch P99 latency > 1000ms"
+
+      - alert: SketchQuantileP99Critical
+        expr: csdlpt_sketch_quantile_ms{quantile="0.99"} > 5000
+        for: 5m
+        labels: {severity: critical}
+        annotations:
+          summary: "DDSketch P99 latency > 5000ms"
+
+      # ---- Fencing / HA ----
+      - alert: FencingViolationRate
+        expr: rate(csdlpt_fencing_violations_total[5m]) > 0.1
+        for: 5m
+        labels: {severity: warning}
+        annotations:
+          summary: "Fencing violations detected"
+
+      - alert: AggregatorFailover
+        expr: rate(csdlpt_aggregator_failover_total[10m]) > 0
+        for: 1m
+        labels: {severity: critical}
+        annotations:
+          summary: "Aggregator HA failover occurred"

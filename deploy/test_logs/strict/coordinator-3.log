@@ -1,0 +1,22 @@
+refactor-coordinator-3  | [entrypoint] Cleaning old checkpoint data in /data/ ...
+refactor-coordinator-3  | [entrypoint] Checkpoint cleanup complete.
+refactor-coordinator-3  | 2026-05-30 03:49:46,241 [INFO] raft_coordinator: RaftCoordinator: ZK election mode enabled (ensemble with ['coordinator-1:8000', 'coordinator-2:8000'])
+refactor-coordinator-3  | 2026-05-30 03:49:46,251 [INFO] raft_coordinator: RaftCoordinator: starting real ZooKeeper election on hosts=zookeeper:2181
+refactor-coordinator-3  | 2026-05-30 03:49:46,252 [INFO] raft_coordinator: RaftCoordinator: ZK connecting to zookeeper:2181
+refactor-coordinator-3  | 2026-05-30 03:49:46,259 [INFO] kazoo.client: Connecting to zookeeper(172.18.0.2):2181, use_ssl: False
+refactor-coordinator-3  | 2026-05-30 03:49:46,260 [WARNING] kazoo.client: Connection dropped: socket connection error: Connection refused
+refactor-coordinator-3  | [coordinator] gRPC server listening on :8050
+refactor-coordinator-3  | [alerting] PagerDuty not configured, alerts logged to stderr
+refactor-coordinator-3  | [coordinator] listening on :8000, W_global=-inf
+refactor-coordinator-3  | 2026-05-30 03:49:46,381 [INFO] kazoo.client: Connecting to zookeeper(172.18.0.2):2181, use_ssl: False
+refactor-coordinator-3  | 2026-05-30 03:49:46,381 [WARNING] kazoo.client: Connection dropped: socket connection error: Connection refused
+refactor-coordinator-3  | 2026-05-30 03:49:46,561 [INFO] kazoo.client: Connecting to zookeeper(172.18.0.2):2181, use_ssl: False
+refactor-coordinator-3  | 2026-05-30 03:49:46,562 [WARNING] kazoo.client: Connection dropped: socket connection error: Connection refused
+refactor-coordinator-3  | 2026-05-30 03:49:46,984 [INFO] kazoo.client: Connecting to zookeeper(172.18.0.2):2181, use_ssl: False
+refactor-coordinator-3  | 2026-05-30 03:49:46,984 [WARNING] kazoo.client: Connection dropped: socket connection error: Connection refused
+refactor-coordinator-3  | 2026-05-30 03:49:47,778 [INFO] kazoo.client: Connecting to zookeeper(172.18.0.2):2181, use_ssl: False
+refactor-coordinator-3  | 2026-05-30 03:49:47,778 [WARNING] kazoo.client: Connection dropped: socket connection error: Connection refused
+refactor-coordinator-3  | 2026-05-30 03:49:48,274 [WARNING] kafka_sim: KafkaConsumer subscribe failed: <urlopen error unknown url type: kafka>
+refactor-coordinator-3  | [coordinator] Subscribed to ingestor-heartbeats via Kafka (kafka:9092)
+refactor-coordinator-3  | 2026-05-30 03:49:49,011 [INFO] kazoo.client: Connecting to zookeeper(172.18.0.2):2181, use_ssl: False
+refactor-coordinator-3  | 2026-05-30 03:49:49,014 [INFO] kazoo.client: Zookeeper connection established, state: CONNECTED

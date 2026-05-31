@@ -1,0 +1,47 @@
+refactor-ingestor  | [entrypoint] Cleaning old checkpoint data in /data/ ...
+refactor-ingestor  | [entrypoint] Checkpoint cleanup complete.
+refactor-ingestor  | [ingestor] detected access-log CSV format, mapping columns
+refactor-ingestor  | 2026-05-30 04:03:00,420 [ERROR] kafka.conn: <BrokerConnection client_id=topic-init, node_id=bootstrap-0 host=kafka:9092 <connecting> [IPv4 ('172.18.0.4', 9092)]>: Connect attempt returned error 111. Disconnecting.
+refactor-ingestor  | 2026-05-30 04:03:00,421 [ERROR] kafka.conn: <BrokerConnection client_id=topic-init, node_id=bootstrap-0 host=kafka:9092 <connecting> [IPv4 ('172.18.0.4', 9092)]>: Closing connection. KafkaConnectionError: 111 ECONNREFUSED
+refactor-ingestor  | 2026-05-30 04:03:00,421 [WARNING] kafka.client: No node available during check_version; sleeping 0.04 secs
+refactor-ingestor  | 2026-05-30 04:03:00,466 [ERROR] kafka.conn: <BrokerConnection client_id=topic-init, node_id=bootstrap-0 host=kafka:9092 <connecting> [IPv4 ('172.18.0.4', 9092)]>: Connect attempt returned error 111. Disconnecting.
+refactor-ingestor  | 2026-05-30 04:03:00,466 [ERROR] kafka.conn: <BrokerConnection client_id=topic-init, node_id=bootstrap-0 host=kafka:9092 <connecting> [IPv4 ('172.18.0.4', 9092)]>: Closing connection. KafkaConnectionError: 111 ECONNREFUSED
+refactor-ingestor  | 2026-05-30 04:03:00,466 [WARNING] kafka.client: No node available during check_version; sleeping 0.09 secs
+refactor-ingestor  | 2026-05-30 04:03:00,553 [ERROR] kafka.conn: <BrokerConnection client_id=topic-init, node_id=bootstrap-0 host=kafka:9092 <connecting> [IPv4 ('172.18.0.4', 9092)]>: Connect attempt returned error 111. Disconnecting.
+refactor-ingestor  | 2026-05-30 04:03:00,553 [ERROR] kafka.conn: <BrokerConnection client_id=topic-init, node_id=bootstrap-0 host=kafka:9092 <connecting> [IPv4 ('172.18.0.4', 9092)]>: Closing connection. KafkaConnectionError: 111 ECONNREFUSED
+refactor-ingestor  | 2026-05-30 04:03:00,553 [WARNING] kafka.client: No node available during check_version; sleeping 0.21 secs
+refactor-ingestor  | 2026-05-30 04:03:00,760 [ERROR] kafka.conn: <BrokerConnection client_id=topic-init, node_id=bootstrap-0 host=kafka:9092 <connecting> [IPv4 ('172.18.0.4', 9092)]>: Connect attempt returned error 111. Disconnecting.
+refactor-ingestor  | 2026-05-30 04:03:00,760 [ERROR] kafka.conn: <BrokerConnection client_id=topic-init, node_id=bootstrap-0 host=kafka:9092 <connecting> [IPv4 ('172.18.0.4', 9092)]>: Closing connection. KafkaConnectionError: 111 ECONNREFUSED
+refactor-ingestor  | 2026-05-30 04:03:00,760 [WARNING] kafka.client: No node available during check_version; sleeping 0.34 secs
+refactor-ingestor  | 2026-05-30 04:03:01,103 [ERROR] kafka.conn: <BrokerConnection client_id=topic-init, node_id=bootstrap-0 host=kafka:9092 <connecting> [IPv4 ('172.18.0.4', 9092)]>: Connect attempt returned error 111. Disconnecting.
+refactor-ingestor  | 2026-05-30 04:03:01,104 [ERROR] kafka.conn: <BrokerConnection client_id=topic-init, node_id=bootstrap-0 host=kafka:9092 <connecting> [IPv4 ('172.18.0.4', 9092)]>: Closing connection. KafkaConnectionError: 111 ECONNREFUSED
+refactor-ingestor  | 2026-05-30 04:03:01,104 [WARNING] kafka.client: No node available during check_version; sleeping 0.94 secs
+refactor-ingestor  | 2026-05-30 04:03:02,042 [ERROR] kafka.conn: <BrokerConnection client_id=topic-init, node_id=bootstrap-0 host=kafka:9092 <connecting> [IPv4 ('172.18.0.4', 9092)]>: Connect attempt returned error 111. Disconnecting.
+refactor-ingestor  | 2026-05-30 04:03:02,043 [ERROR] kafka.conn: <BrokerConnection client_id=topic-init, node_id=bootstrap-0 host=kafka:9092 <connecting> [IPv4 ('172.18.0.4', 9092)]>: Closing connection. KafkaConnectionError: 111 ECONNREFUSED
+refactor-ingestor  | 2026-05-30 04:03:02,043 [WARNING] kafka.client: No node available during check_version; sleeping 0.37 secs
+refactor-ingestor  | 2026-05-30 04:03:03,419 [ERROR] kafka.conn: <BrokerConnection client_id=topic-init, node_id=bootstrap-0 host=kafka:9092 <connecting> [IPv4 ('172.18.0.4', 9092)]>: Connect attempt returned error 111. Disconnecting.
+refactor-ingestor  | 2026-05-30 04:03:03,419 [ERROR] kafka.conn: <BrokerConnection client_id=topic-init, node_id=bootstrap-0 host=kafka:9092 <connecting> [IPv4 ('172.18.0.4', 9092)]>: Closing connection. KafkaConnectionError: 111 ECONNREFUSED
+refactor-ingestor  | 2026-05-30 04:03:03,419 [WARNING] kafka.client: No node available during check_version; sleeping 0.04 secs
+refactor-ingestor  | 2026-05-30 04:03:03,463 [ERROR] kafka.conn: <BrokerConnection client_id=topic-init, node_id=bootstrap-0 host=kafka:9092 <connecting> [IPv4 ('172.18.0.4', 9092)]>: Connect attempt returned error 111. Disconnecting.
+refactor-ingestor  | 2026-05-30 04:03:03,463 [ERROR] kafka.conn: <BrokerConnection client_id=topic-init, node_id=bootstrap-0 host=kafka:9092 <connecting> [IPv4 ('172.18.0.4', 9092)]>: Closing connection. KafkaConnectionError: 111 ECONNREFUSED
+refactor-ingestor  | 2026-05-30 04:03:03,463 [WARNING] kafka.client: No node available during check_version; sleeping 0.10 secs
+refactor-ingestor  | 2026-05-30 04:03:03,567 [ERROR] kafka.conn: <BrokerConnection client_id=topic-init, node_id=bootstrap-0 host=kafka:9092 <connecting> [IPv4 ('172.18.0.4', 9092)]>: Connect attempt returned error 111. Disconnecting.
+refactor-ingestor  | 2026-05-30 04:03:03,567 [ERROR] kafka.conn: <BrokerConnection client_id=topic-init, node_id=bootstrap-0 host=kafka:9092 <connecting> [IPv4 ('172.18.0.4', 9092)]>: Closing connection. KafkaConnectionError: 111 ECONNREFUSED
+refactor-ingestor  | 2026-05-30 04:03:03,567 [WARNING] kafka.client: No node available during check_version; sleeping 0.23 secs
+refactor-ingestor  | 2026-05-30 04:03:03,803 [ERROR] kafka.conn: <BrokerConnection client_id=topic-init, node_id=bootstrap-0 host=kafka:9092 <connecting> [IPv4 ('172.18.0.4', 9092)]>: Connect attempt returned error 111. Disconnecting.
+refactor-ingestor  | 2026-05-30 04:03:03,803 [ERROR] kafka.conn: <BrokerConnection client_id=topic-init, node_id=bootstrap-0 host=kafka:9092 <connecting> [IPv4 ('172.18.0.4', 9092)]>: Closing connection. KafkaConnectionError: 111 ECONNREFUSED
+refactor-ingestor  | 2026-05-30 04:03:03,803 [WARNING] kafka.client: No node available during check_version; sleeping 0.32 secs
+refactor-ingestor  | 2026-05-30 04:03:04,902 [INFO] kafka_real: RealKafkaProducer: initializing with bootstrap_servers=['kafka:9092'], acks=all
+refactor-ingestor  | [ingestor] using Kafka producer -> kafka:9092
+refactor-ingestor  | [alerting] PagerDuty not configured, alerts logged to stderr
+refactor-ingestor  | [ingestor] listening on :8100, source=/data/access.log/access_sample.csv
+refactor-ingestor  | [ingestor] CSV EOF at event 200, switching to idle loop
+refactor-ingestor  | [ingestor] punctuation T_commit=1780113837.373 min_et=1780113780.373 max_et=1780113822.373 eof=True mode=data-driven is_empty=False
+refactor-ingestor  | [ingestor] punctuation T_commit=1780113837.373 min_et=1780113780.373 max_et=1780113822.373 eof=True mode=data-driven is_empty=True
+refactor-ingestor  | [ingestor] punctuation T_commit=1780113837.373 min_et=1780113780.373 max_et=1780113822.373 eof=True mode=data-driven is_empty=True
+refactor-ingestor  | [ingestor] punctuation T_commit=1780113837.373 min_et=1780113780.373 max_et=1780113822.373 eof=True mode=data-driven is_empty=True
+refactor-ingestor  | 2026-05-30 04:03:10,010 [WARNING] kafka.cluster: Topic ingestor-heartbeats is not available during auto-create initialization
+refactor-ingestor  | [ingestor] punctuation T_commit=1780113837.373 min_et=1780113780.373 max_et=1780113822.373 eof=True mode=data-driven is_empty=True
+refactor-ingestor  | [ingestor] EOF flush complete (5 punctuations sent), stopping ingest loop
+refactor-ingestor  | 2026-05-30 04:03:10,115 [WARNING] kafka.cluster: Topic ingestor-heartbeats is not available during auto-create initialization
+refactor-ingestor  | 2026-05-30 04:03:10,219 [WARNING] kafka.cluster: Topic ingestor-heartbeats is not available during auto-create initialization

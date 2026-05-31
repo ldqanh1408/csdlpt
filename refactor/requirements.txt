@@ -1,4 +1,0 @@
-rocksdict>=0.3.0
-ddsketch>=3.0.0
-minio>=7.0.0
-prometheus-client>=0.20.0

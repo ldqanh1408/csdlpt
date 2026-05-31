@@ -1,132 +1,130 @@
-# Project 112 — Distributed Watermark Tracker ("Log Delay Compensator")
+# Project 112 - Distributed Watermark Tracker
 
-Stream processing với **event-time watermarks** để xử lý log tới
-không đúng thứ tự (out-of-order). Đây là bản hướng tới mức **Excellent**
-của rubric.
+Distributed Watermark Tracker ("Log Delay Compensator") is a distributed
+stream-processing project for `Web_Server_Logs` with out-of-order arrivals.
+The system compares:
 
-## Cách chạy
+- **Strict Watermark**: waits until an event-time window is safe to close,
+  prioritizing completeness.
+- **Heuristic Watermark**: estimates lateness from observed delay, closes
+  earlier, and sends late records to a correction path.
 
-### Hạ tầng container (branch `rebuild/d1-skeleton`)
+The required analysis output is **Data Completeness (%) vs Wait Time (ms)**.
 
-Triển khai phân tán thật theo `pending/CONTAINER_COORDINATION.md` §9 —
-4 node + 1 coordinator + 1 ingestor + Prometheus + Grafana.
+## Prerequisites
 
-```bash
-make build                # build 3 image (cần Docker Desktop + WSL integration)
-make up-obs               # start cluster + Prometheus + Grafana
+- Python 3.10 or newer.
+- Docker Desktop for the distributed deployment.
+- PowerShell on Windows, or a POSIX shell on Linux/macOS.
 
-# Acceptance tests
-make smoke                # D1 — /health gate
-make happy                # D2 — 10K events, ALL_DONE
-make test-all             # 10 test (smoke + happy + 8 chaos)
+## Local Setup
 
-# Demo 10 phút có pause cho giảng viên
-make demo
-
-# Cleanup
-make down                 # container + volumes + dlq
-make clean                # + xoá image
+```powershell
+python -m venv .venv
+.\.venv\Scripts\Activate.ps1
+pip install -r requirements.txt
+pip install pytest matplotlib
 ```
 
-Sau `make up-obs`:
-- Coordinator: http://localhost:8000 (`/health`, `/api/wait`, `/metrics`)
-- Nodes: http://localhost:810{1..4}
-- Prometheus: http://localhost:9090
-- Grafana: http://localhost:3000 (dashboard "Watermark Tracker — Realtime")
-
-### Giao diện Dashboard (Khuyến nghị cho trình bày & cấu hình)
-`app.py` là một **Dashboard Streamlit 6 tab** tích hợp toàn bộ chức năng —
-chạy live stream, quét Sweep, demo khôi phục lỗi, mô phỏng cluster phân tán
-và **mô phỏng kill / revive node** — qua các nút bấm trực quan, không cần
-gõ thêm lệnh nào trong terminal.
+Linux/macOS:
 
 ```bash
-pip install pandas numpy matplotlib plotly streamlit
-
-# Khởi chạy Dashboard:
-streamlit run app.py
+python3 -m venv .venv
+source .venv/bin/activate
+pip install -r requirements.txt
+pip install pytest matplotlib
 ```
 
-**6 tab của Dashboard:**
+## Run Tests
 
-| Tab | Chức năng chính |
-|---|---|
-| 🏠 Tổng quan | Lộ trình demo 5 bước, kiến trúc, dataset, bám rubric, nút **Demo nhanh** |
-| 📈 Live Stream | Phát luồng realtime — watermark bò lên, cửa sổ đóng dần; có **Play / Dừng / Reset** |
-| 📊 Sweep Analysis | Quét 9 mức Wait Time → đường cong Completeness ↔ Latency (Plotly tương tác), xuất `tradeoff.csv/png` |
-| 🛡️ Recovery & Backpressure | Crash giữa chừng + khôi phục checkpoint atomic (bảng so sánh state); burst tải kiểm chứng drop có kiểm soát |
-| 🖥️ Distributed Cluster | N node `hash(host)%N`, đo hot-key skew, sơ đồ topology Axon-style |
-| 🔪 Kill Node Live | Kill / revive node realtime — events của node chết ghi vào **DLQ trên đĩa**, revive → replay + Exactly-Once. **Auto-Play** có lập lịch sự cố + biểu đồ diễn biến cluster |
-
-> Vùng realtime (Live Stream & Kill Node) dùng `@st.fragment` —
-> chỉ vùng dữ liệu động cập nhật, phần còn lại của trang không rerender
-> (chống flicker).
-
-### Chạy qua Terminal CLI (Dành cho nhà phát triển)
-Nếu muốn chạy trực tiếp bằng dòng lệnh trong terminal:
-
-```bash
-# Sweep phân tích trên dữ liệu Synthetic:
-python analysis.py
-
-# Sweep phân tích trên dữ liệu NASA-HTTP thật (200K event):
-python analysis.py --source real --csv dataset/data.csv -n 200000
-
-# Mô phỏng cluster phân tán 4 nodes:
-python distributed_sweep.py --nodes 4 -n 100000
+```powershell
+python -m pytest -q
 ```
 
-## Cấu trúc
+## Generate Benchmark Artifacts
 
-Logic core nằm trong package `wm/`; root chỉ có 3 script CLI/driver mỏng.
+```powershell
+python reports/watermark_tradeoff_benchmark.py
+```
 
-| File / Module | Vai trò |
-|---|---|
-| `wm/engine.py`         | Engine lõi: event-time windows, watermark, state, checkpoint atomic, dedup, backpressure |
-| `wm/sweep.py`          | Sweep Wait Time → Data Completeness; xuất `tradeoff.csv` + `tradeoff.png` |
-| `wm/demos.py`          | `crash_recovery_demo`, `backpressure_demo` (chứng minh State Management + Robustness) |
-| `wm/partition.py`      | Distributed N-node: `hash(host) % N`, merge metrics, đo hot-key skew |
-| `wm/data/synthetic.py` | Sinh `Web_Server_Logs` mô phỏng (out-of-order + duplicate) |
-| `wm/data/nasa.py`      | Đọc NASA-HTTP thật (`.gz` hoặc `dataset/data.csv`) + sinh arrival-time |
-| `ui/`                  | Package UI: styles, helpers, và 7 tab (overview, stream, sweep, demos, dist, sim, report) |
-| `analysis.py`          | CLI: sweep + recovery + backpressure demo |
-| `distributed_sweep.py` | CLI: chạy cluster N-node, in bảng kết quả |
-| `app.py`               | Dashboard Streamlit 7 tab — entry point mỏng, delegate sang `ui/` |
-| `.simdata/`            | Sinh khi chạy tab Kill Node: `checkpoints/` (state snapshot atomic) + `dlq/` (Dead-Letter Queue `.jsonl` append-only) |
-| `docs/`                | Tài liệu chính thức: DESIGN, SYSTEM_REPORT, EOS_MARKER, GLOSSARY, INFRASTRUCTURE, PERFORMANCE, INDEX |
-| `pending/`             | Tài liệu đang xem xét: PROPOSAL, REPORT, ARCHITECTURE |
+Generated outputs:
 
-## Bám vào rubric — vì sao đạt Excellent
+- `reports/artifacts/dataset_summary.csv`
+- `reports/artifacts/empirical_wait_curve.csv`
+- `reports/artifacts/implemented_heuristic_curve.csv`
+- `reports/artifacts/strict_safe_close.csv`
+- `reports/artifacts/watermark_tradeoff.png`
 
-**1. Windowing Logic — *Correct use of Event-Time vs Processing-Time***
-Cửa sổ được gán bằng `window_start_for(event_time)` — theo **event-time**,
-không phải lúc log tới. Stream lại được nạp theo **arrival/processing-time**
-(`events.sort(arrival_time)`), nên engine phải tự xử lý lệch thời gian bằng
-watermark `= max_event_time − allowed_lateness`. Phân biệt rạch ròi 2 trục
-thời gian chính là yêu cầu cốt lõi của tiêu chí này.
+Current benchmark snapshot on 5,000 sampled web log events:
 
-**2. State Management — *Efficiently manages and checkpoints distributed state***
-State giữ theo từng window (`WindowState`), checkpoint **atomic** (ghi
-`.tmp` rồi `os.replace`) nên không hỏng file nếu chết giữa lúc ghi.
-`restore()` + `crash_recovery_demo()` chứng minh: kill process giữa chừng,
-nạp lại từ checkpoint, chạy tiếp **không mất state và không đếm trùng**
-(nhờ kết hợp checkpoint + deduplication idempotent).
+| Policy | Wait Time (ms) | Data Completeness (%) |
+|---|---:|---:|
+| Strict safe close | 29,988.666 | 100.00 |
+| Heuristic P95 | 7,421.000 | 96.74 |
+| Heuristic P99 | 26,529.000 | 99.46 |
+| Heuristic P99.9 | 28,283.000 | 99.76 |
 
-**3. Latency Analysis — *High-resolution timers; identifies bottlenecks***
-Dùng `time.perf_counter_ns()` (nano giây) đo p50/p99 latency mỗi event,
-và đo riêng **result latency** (độ trễ kết quả theo event-time). Report
-chỉ rõ bottleneck: latency xử lý/event chỉ ~vài µs (p99 ≈ 3 µs) — không
-đáng kể; **bottleneck thực sự là Wait Time do watermark áp đặt** (0 →
-~7800 ms), đây mới là biến cần đánh đổi.
+## Minimal Local Strict-Mode Demo
 
-**4. Robustness — *Handles backpressure or duplicates without crashing***
-Deduplication bằng `seen_ids` → gửi lặp không làm sai kết quả. Hàng đợi
-có ngưỡng `max_queue`: khi `queue_len` vượt ngưỡng thì drop có kiểm soát
-(đếm `backpressure_drops`) thay vì để tràn bộ nhớ/crash. Chạy 5111 dòng
-(có duplicate + tải dao động) không lỗi.
+Open separate terminals from the repository root:
 
-**Live Visualization (rubric gợi ý):** Dashboard Streamlit minh hoạ trực
-quan — cửa sổ đóng dần theo thời gian thực, watermark bò lên (tab Live
-Stream). Tab **Kill Node Live** mô phỏng node chết giữa stream: DLQ phình
-ra rồi xẹp về 0 sau khi revive — đúng tinh thần "Data in Motion", đồng
-thời chứng minh fault-tolerance bằng kịch bản lỗi (failure case) sống động.
+```powershell
+python run.py --role coordinator --mode strict --port 8000
+python run.py --role worker --mode strict --port 8101 --partitions 0,1,2
+python run.py --role ingestor --mode strict --source dataset/access.log/access_full.csv --port 8200
+```
+
+Health check:
+
+```powershell
+curl http://localhost:8000/health
+```
+
+## Docker Compose Deployment
+
+Repository-root scaled deployment:
+
+```powershell
+docker compose up --build
+```
+
+Full strict profile:
+
+```powershell
+cd deploy
+$env:MODE = "strict"
+$env:DATASET_FILE = "access.log/access_full.csv"
+docker compose --profile strict up --build
+```
+
+Full heuristic profile:
+
+```powershell
+cd deploy
+$env:MODE = "heuristic"
+$env:DATASET_FILE = "access.log/access_full.csv"
+docker compose --profile heuristic up --build
+```
+
+Stop and remove containers/volumes:
+
+```powershell
+docker compose down -v
+```
+
+## Final Deliverables
+
+The generated academic submission bundle is under
+`reports/final_deliverables/`:
+
+- `01_Project_Proposal_Distributed_Watermark_Tracker.docx`
+- `02_Two_Page_Design_Document.docx`
+- `03_Code_Repository_README_Instructions.md`
+- `04_Analysis_Ozsu_Valduriez_Report.docx`
+- `05_Proof_Video_Boilerplate.md`
+
+Regenerate them with:
+
+```powershell
+python reports/build_final_deliverables.py
+```

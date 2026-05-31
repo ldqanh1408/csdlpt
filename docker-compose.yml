@@ -1,0 +1,167 @@
+services:
+  # ── Strict Mode ──────────────────────────────────────────────
+  coordinator:
+    build: .
+    image: csdlpt-refactor:latest
+    container_name: csdlpt-coordinator
+    command: python3 -u -m refactor.run --role coordinator --mode strict --port 8000
+    environment:
+      - PYTHONUNBUFFERED=1
+      - CHECKPOINT_DIR=/data/checkpoint
+      - TOTAL_PARTITIONS=12
+      - DELTA_BASE_S=10.0
+      - FAILOVER_ENABLED=true
+      - HEARTBEAT_TIMEOUT_S=10.0
+      - LOG_LEVEL=${LOG_LEVEL:-info}
+    ports:
+      - "8000:8000"
+    volumes:
+      - coordinator-data:/data
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "curl", "-sf", "http://localhost:8000/health"]
+      interval: 10s
+      timeout: 3s
+      retries: 3
+
+  worker-strict-1:
+    build: .
+    image: csdlpt-refactor:latest
+    container_name: csdlpt-worker-strict-1
+    command: python3 -u -m refactor.run --role worker --mode strict --port 8000 --partitions 0,1,2,3
+    environment:
+      - PYTHONUNBUFFERED=1
+      - COORDINATOR_URL=http://coordinator:8000
+      - CHECKPOINT_DIR=/data/checkpoint
+      - TOTAL_PARTITIONS=12
+      - WINDOW_SIZE_S=5.0
+      - DELTA_BASE_S=10.0
+      - NODE_ID=strict-1
+      - LOG_LEVEL=${LOG_LEVEL:-info}
+    volumes:
+      - worker-strict-1-data:/data
+    depends_on:
+      coordinator:
+        condition: service_healthy
+    restart: unless-stopped
+
+  worker-strict-2:
+    build: .
+    image: csdlpt-refactor:latest
+    container_name: csdlpt-worker-strict-2
+    command: python3 -u -m refactor.run --role worker --mode strict --port 8000 --partitions 4,5,6,7
+    environment:
+      - PYTHONUNBUFFERED=1
+      - COORDINATOR_URL=http://coordinator:8000
+      - CHECKPOINT_DIR=/data/checkpoint
+      - TOTAL_PARTITIONS=12
+      - WINDOW_SIZE_S=5.0
+      - DELTA_BASE_S=10.0
+      - NODE_ID=strict-2
+      - LOG_LEVEL=${LOG_LEVEL:-info}
+    volumes:
+      - worker-strict-2-data:/data
+    depends_on:
+      coordinator:
+        condition: service_healthy
+    restart: unless-stopped
+
+  worker-strict-3:
+    build: .
+    image: csdlpt-refactor:latest
+    container_name: csdlpt-worker-strict-3
+    command: python3 -u -m refactor.run --role worker --mode strict --port 8000 --partitions 8,9,10,11
+    environment:
+      - PYTHONUNBUFFERED=1
+      - COORDINATOR_URL=http://coordinator:8000
+      - CHECKPOINT_DIR=/data/checkpoint
+      - TOTAL_PARTITIONS=12
+      - WINDOW_SIZE_S=5.0
+      - DELTA_BASE_S=10.0
+      - NODE_ID=strict-3
+      - LOG_LEVEL=${LOG_LEVEL:-info}
+    volumes:
+      - worker-strict-3-data:/data
+    depends_on:
+      coordinator:
+        condition: service_healthy
+    restart: unless-stopped
+
+  # ── Heuristic Mode ───────────────────────────────────────────
+  aggregator:
+    build: .
+    image: csdlpt-refactor:latest
+    container_name: csdlpt-aggregator
+    command: python3 -u -m refactor.run --role aggregator --port 8001
+    environment:
+      - PYTHONUNBUFFERED=1
+      - CHECKPOINT_DIR=/data/checkpoint
+      - AGGREGATOR_HA_ENABLED=false
+    ports:
+      - "8001:8001"
+    volumes:
+      - aggregator-data:/data
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "curl", "-sf", "http://localhost:8001/health"]
+      interval: 10s
+      timeout: 3s
+      retries: 3
+
+  worker-heuristic:
+    build: .
+    image: csdlpt-refactor:latest
+    container_name: csdlpt-worker-heuristic
+    command: python3 -u -m refactor.run --role worker --mode heuristic --port 8000 --partitions 0,1,2,3
+    environment:
+      - PYTHONUNBUFFERED=1
+      - AGGREGATOR_URL=http://aggregator:8001
+      - CHECKPOINT_DIR=/data/checkpoint
+      - TOTAL_PARTITIONS=12
+      - WINDOW_SIZE_S=5.0
+      - HEURISTIC_ALPHA=0.01
+      - HEURISTIC_P_NORMAL=0.99
+      - HEURISTIC_P_SAFE=0.999
+      - HEURISTIC_L_MAX=60.0
+      - NODE_ID=heuristic-1
+    volumes:
+      - worker-heuristic-data:/data
+    depends_on:
+      aggregator:
+        condition: service_healthy
+    restart: unless-stopped
+
+  # ── Ingestor ─────────────────────────────────────────────────
+  ingestor:
+    build: .
+    image: csdlpt-refactor:latest
+    container_name: csdlpt-ingestor
+    command: python3 -u -m refactor.run --role ingestor --mode strict --source /dataset/data.csv --port 8100
+    environment:
+      - PYTHONUNBUFFERED=1
+      - NODE_HOSTS=worker-strict-1:8000,worker-strict-2:8000,worker-strict-3:8000
+      - COORDINATOR_URL=http://coordinator:8000
+      - MODE=strict
+      - TOTAL_PARTITIONS=12
+      - LOG_LEVEL=${LOG_LEVEL:-info}
+      - PUNCTUATION_MODE=${PUNCTUATION_MODE:-data-driven}
+    volumes:
+      - ./dataset:/dataset:ro
+    depends_on:
+      - worker-strict-1
+      - worker-strict-2
+      - worker-strict-3
+    healthcheck:
+      test: ["CMD", "curl", "-sf", "http://localhost:8100/health"]
+      interval: 10s
+      timeout: 3s
+      retries: 3
+    restart: unless-stopped
+
+volumes:
+  coordinator-data:
+  aggregator-data:
+  worker-strict-1-data:
+  worker-strict-2-data:
+  worker-strict-3-data:
+  worker-heuristic-data:
