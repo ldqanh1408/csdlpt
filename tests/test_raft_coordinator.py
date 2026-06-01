@@ -34,6 +34,7 @@ class TestRaftCoordinator:
 
     def test_delegates_heartbeat(self):
         rc = RaftCoordinator("c1", [])
+        rc.role = RaftRole.LEADER
         hb = WorkerHeartbeat(worker_id="w1", partitions={0: 10.0})
         rc.receive_heartbeat(hb)
         assert len(rc.coordinator.partitions) == 1

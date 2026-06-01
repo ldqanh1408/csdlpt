@@ -8,4 +8,4 @@ Implements the full 3-document design specification:
 Scaled down to single-machine Python for academic project use.
 """
 
-__all__ = ["common", "ddsketch", "strict", "heuristic", "hybrid", "tests"]
+__all__ = ["common", "ddsketch", "strict", "heuristic", "tests"]

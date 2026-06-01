@@ -28,9 +28,9 @@ This document summarizes the Distributed Database Project Proposal compiled from
 
 * **Core Logic (Thuật toán cốt lõi):**
   * **Strict Path**: Uses punctuation tokens from the source to advance local watermarks. The coordinator computes the global minimum watermark:
-    $$W_{\text{global}}(t) = \min_{\forall P_k \in \text{Active}} LW_i(P_k)$$
+    $$\large \boxed{W_{\text{global}}(t) = \min_{\forall P_k \in \text{Active}} LW_i(P_k)}$$
   * **Heuristic Path**: Tracks latency $\ell = T_{\text{arrival}} - T_{\text{event}}$ with log-scale buckets in a sliding DDSketch. Local watermarks advance as:
-    $$W_{\text{heur}}(i, p) = \max_{j < i} T_{\text{event\_max}} - Q_p(\{\ell\})$$
+    $$\large \boxed{W_{\text{heur}}(i, p) = \max_{j < i} T_{\text{event\_max}} - Q_p(\{\ell\})}$$
     where $Q_p$ is the $p$-th percentile. Late events are routed to `late_logs_dlq` for historical window corrections.
 
 ---
@@ -44,10 +44,10 @@ This document summarizes the Distributed Database Project Proposal compiled from
   * Do tập dữ liệu gốc trải dài trọn vẹn 31 ngày thực tế (khoảng 2,678,368 giây), việc chạy mô phỏng trực tiếp theo thời gian thực tế sẽ không khả thi. Hệ thống áp dụng kỹ thuật **Nén thời gian (Time Compression)** với hệ số nén $\text{DIV} = 60$.
   * Mốc thời gian tham chiếu: $t_{\text{ref}} = \min(\text{pickup\_timestamps})$
   * Công thức ánh xạ:
-    $$T_{\text{event}} = \frac{\text{pickup\_timestamp} - t_{\text{ref}}}{60}$$
-    $$T_{\text{arrival}} = \frac{\text{dropoff\_timestamp} - t_{\text{ref}}}{60}$$
+    $$\large \boxed{T_{\text{event}} = \frac{\text{pickup\_timestamp} - t_{\text{ref}}}{60}}$$
+    $$\large \boxed{T_{\text{arrival}} = \frac{\text{dropoff\_timestamp} - t_{\text{ref}}}{60}}$$
   * Đặc tính quan trọng:
-    $$\ell = T_{\text{arrival}} - T_{\text{event}} = \frac{\text{trip\_duration}}{60}$$
+    $$\large \boxed{\ell = T_{\text{arrival}} - T_{\text{event}} = \frac{\text{trip\_duration}}{60}}$$
   * Phép nén này thu nhỏ thời lượng mô phỏng của toàn bộ 31 ngày dữ liệu thực tế xuống còn **12.4 giờ** (giảm 60 lần), trong khi vẫn giữ nguyên các phân phối bất tuần tự thực tế:
     * Thời gian trễ trung vị (p50): 12 phút thực tế $\rightarrow$ **11.63 giây** mô phỏng.
     * Thời gian trễ phân vị p95: 38 phút thực tế $\rightarrow$ **37.78 giây** mô phỏng.
@@ -62,7 +62,7 @@ This document summarizes the Distributed Database Project Proposal compiled from
   * `status` (int): Mã trạng thái giao dịch / phản hồi.
 * **Fragmentation Strategy (Chiến lược phân mảnh):**
   * Horizontal Hash-based partitioning on `host`:
-    $$\text{PartitionID} = \text{hash}(host) \bmod 12$$
+    $$\large \boxed{\text{PartitionID} = \text{hash}(host) \bmod 12}$$
   * 12 partitions are distributed across 4 worker nodes:
     * **Worker 0 (node0)**: partitions 0, 1, 2
     * **Worker 1 (node1)**: partitions 3, 4, 5
@@ -115,7 +115,7 @@ Hệ thống hoạt động dựa trên cấu hình phân tán đồng bộ qua 
 
 * **Domain 2: Luồng điều phối Strict Watermark (Strict Coordination Domain)**
   * *Local Watermark*: Các Worker Node báo cáo Watermark cục bộ $LW_i(P_k)$ thông qua heartbeat về Coordinator.
-  * *HA Coordinator Plane*: Cụm 3 instance chạy đồng thuận Raft (Leader-Follower). Coordinator Leader tiếp nhận nhịp tim, tính toán Watermark toàn cục $W_{\text{global}} = \min(LW_i)$ trên toàn bộ partitions hoạt động và broadcast ngược lại cho các Worker Nodes để đóng cửa sổ.
+  * *HA Coordinator Plane*: Cụm 3 instance chạy đồng bộ. Hệ thống hỗ trợ hai chế độ bầu chọn và quản lý Leader: (1) Chế độ Raft nhúng (Embedded Raft) tự cử Leader và nhân bản trạng thái, hoặc (2) Chế độ ZooKeeper (nếu `ZK_ENSEMBLE` được cấu hình) thông qua việc tranh chấp khóa phân tán tại `/csdlpt/coordinator-lock` và ghi leader ID lên node tạm `/csdlpt/coordinator-leader`. Coordinator Leader tiếp nhận nhịp tim từ các Worker, tính toán Watermark toàn cục $W_{\text{global}} = \min(LW_i)$ trên toàn bộ partitions hoạt động và broadcast ngược lại cho các Worker Nodes để đóng cửa sổ.
   
   ```mermaid
   flowchart TB
@@ -129,13 +129,13 @@ Hệ thống hoạt động dựa trên cấu hình phân tán đồng bộ qua 
           N3["node3 . P9,10,11"]:::worker
       end
 
-      subgraph strictcp["🟣 Strict Control Plane -- Raft 3-node"]
+      subgraph strictcp["🟣 Strict Control Plane -- 3-node HA"]
           C1["coordinator-1<br/>Leader"]:::strict
           C2["coordinator-2"]:::strict
           C3["coordinator-3"]:::strict
-          C1 <-->|Raft| C2
-          C1 <-->|Raft| C3
-          C2 <-->|Raft| C3
+          C1 <-->|Raft / ZK Lock| C2
+          C1 <-->|Raft / ZK Lock| C3
+          C2 <-->|Raft / ZK Lock| C3
       end
 
       N0 & N1 & N2 & N3 <-->|"(1) Worker heartbeat & local LW_i"| C1
@@ -148,13 +148,13 @@ Hệ thống hoạt động dựa trên cấu hình phân tán đồng bộ qua 
   |:---|:---|:---|:---|
   | Worker Heartbeat | Worker → Coordinator Leader | gRPC `WorkerHeartbeat` (cổng HTTP+50), fallback HTTP `POST /punctuation` | `{partitions → LW_i, max_event_time, kafka_offsets, fencing_token, idle_partitions, backpressure}`; chu kỳ 1s. |
   | Get Global State | Worker → Coordinator Leader | gRPC `GetGlobalState`, fallback HTTP `GET /state` | Trả `{W_global, term, partition_types}`; Worker pull mỗi 500ms để chốt cửa sổ. |
-  | Raft replication | Leader ↔ Followers | gRPC `RaftState` / `RaftVote` | Sao chép `{W_global, partition_assignment, failover_history, term}`; chỉ commit khi đa số (2/3) xác nhận. |
+  | Đồng thuận & Bầu chọn HA | Leader ↔ Followers / ZooKeeper | gRPC `RaftState`/`RaftVote` hoặc ZK Lock | Chế độ Raft: Sao chép `{W_global, partition_assignment, term}`, commit khi đa số (2/3) ack. Chế độ ZK: Leader sở hữu khóa tại `/csdlpt/coordinator-lock`, đồng bộ trạng thái qua gRPC/HTTP tới các follower. |
   | Failover / Failback command | Coordinator → Worker | gRPC/HTTP kèm `(term, command_id)` | Lệnh reassign / `PAUSE` / `RESUME` có fencing token; Worker từ chối lệnh có `term` cũ. |
   | Broadcast `W_global` | Coordinator (nội bộ) | Vòng lặp chủ động 200ms | Tính lại và đẩy `W_global` + trạng thái partition phục vụ đồng bộ và metrics. |
 
 * **Domain 3: Luồng điều phối Heuristic Watermark (Heuristic Aggregation Domain)**
   * *Statistical Heartbeat*: Các Worker sử dụng DDSketch cục bộ để đo trễ thực tế, báo cáo mốc Watermark thích ứng $W_h$ và snapshot DDSketch tới Aggregator.
-  * *Active-Standby Control Plane*: Aggregator được duy trì qua cặp dự phòng nóng (Primary-Standby) qua khóa ZooKeeper. Aggregator Primary nhận thông tin DDSketch từ các Worker để tổng hợp phân phối độ trễ toàn cục và điều phối mốc chốt cửa sổ thích ứng. Bản ghi muộn được chuyển hướng vào Dead-Letter Queue (DLQ).
+  * *Active-Standby Control Plane*: Cặp Aggregator dự phòng nóng (Primary-Standby). Việc tranh chấp Leader được thực hiện qua khóa phân tán ZooKeeper (`/csdlpt/aggregator-lock`) hoặc File Lock dùng chung (`FileLockLeader` hỗ trợ cross-platform `fcntl`/`msvcrt`). Standby liên tục theo dõi tệp nhịp tim của Active (`/tmp/aggregator-{port}-heartbeat` ghi mỗi 1s). Nếu nhịp tim mất hoặc quá hạn (> 1.5s), Standby tự động chiếm khóa và được nâng lên làm Active, tải lại trạng thái phân mảnh và watermark từ RocksDB/JSON (`load_state()`). Aggregator Active tổng hợp thông tin thu nhận để điều phối watermark thích ứng cục bộ, bản ghi muộn đi vào Dead-Letter Queue (DLQ).
   
   ```mermaid
   flowchart TB
@@ -169,9 +169,9 @@ Hệ thống hoạt động dựa trên cấu hình phân tán đồng bộ qua 
       end
 
       subgraph heurcp["🔷 Heuristic Control Plane -- HA pair"]
-          AGG["aggregator<br/>primary"]:::heur
-          AGGS["aggregator<br/>standby"]:::heur
-          AGG <-->|HA lock| AGGS
+          AGG["aggregator<br/>primary (Active)"]:::heur
+          AGGS["aggregator<br/>standby (Standby)"]:::heur
+          AGG <-->|ZK Lock / File Lock| AGGS
       end
 
       N0 & N1 & N2 & N3 -.->|"(1) Heuristic heartbeat & local W_h"| AGG
@@ -183,13 +183,13 @@ Hệ thống hoạt động dựa trên cấu hình phân tán đồng bộ qua 
   |:---|:---|:---|:---|
   | Heuristic Heartbeat | Worker → Aggregator Primary | gRPC `SendWorkerWatermark` (HTTP+50), fallback HTTP `POST /punctuation` | `{worker_id, partition_id, W_h}` kèm `L_eff` và snapshot DDSketch; chu kỳ ~200ms. |
   | Tính watermark toàn cục | Aggregator (nội bộ) | Vòng lặp 500ms | `W_global_h = min(W_h)` trên partition active; phân loại trạng thái `ACTIVE/STALE/IDLE/FAILED`. |
-  | HA Active–Standby | Primary ↔ Standby | Khóa ZooKeeper/file lock + Shared Volume | Standby đồng bộ nóng metadata; Primary mất kết nối > 3s → Standby tiếp quản, RTO ≤ 2s. |
+  | HA Active–Standby | Primary ↔ Standby | Khóa ZooKeeper / File lock + Shared State | Standby theo dõi file nhịp tim ghi mỗi 1s. Mất nhịp tim > 1.5s -> Standby chiếm khóa, khôi phục từ RocksDB/JSON và lên Active (RTO ≤ 2s). |
   | Broadcast `W_global_h` | Aggregator → Worker | HTTP `GET /state` (pull) | Worker nhận `W_global_h` thích ứng để chốt cửa sổ. |
   | Định tuyến dữ liệu muộn | Worker → Kafka `late_logs_dlq` | Kafka Producer | Sự kiện `T_event < W_h` được đẩy DLQ; hạch toán `per_window_loss` thay vì chặn dòng chính. |
 
 * **Domain 4: Phối hợp Control & Metadata Plane (Control & Infrastructure Domain)**
-  * *Ingestor Heartbeat*: Ingestor gửi nhịp tim chứa tiến độ đọc và độ lệch đồng hồ vật lý (clock skew) tới Coordinator (Strict) hoặc Aggregator (Heuristic).
-  * *ZooKeeper*: Quản lý cấu hình Kafka cluster, thực hiện Service Discovery và hỗ trợ bầu chọn Leader.
+  * *Ingestor Heartbeat*: Ingestor định kỳ gửi thông tin tiến độ đọc dữ liệu và độ lệch đồng hồ vật lý (clock skew) để Coordinator giám sát health và clock skew. Để tránh gRPC Fan-in Bottleneck, Ingestor đẩy heartbeat trực tiếp qua Kafka topic `ingestor-heartbeats`, sử dụng gRPC/HTTP làm luồng fallback.
+  * *ZooKeeper*: Quản lý cấu hình Kafka cluster, thực hiện Service Discovery và hỗ trợ bầu chọn Leader cho các control plane.
   
   ```mermaid
   flowchart TB
@@ -211,7 +211,7 @@ Hệ thống hoạt động dựa trên cấu hình phân tán đồng bộ qua 
           end
       end
 
-      ING -->|"(1) Ingestor heartbeat & progress (clock skew)"| C1 & AGG
+      ING -->|"(1) Ingestor heartbeat (Kafka topic / gRPC)"| C1 & AGG
       ZK -.->|"(2) Discovery & configuration coordination"| C1 & AGG
   ```
 
@@ -219,7 +219,7 @@ Hệ thống hoạt động dựa trên cấu hình phân tán đồng bộ qua 
 
   | Luồng giao tiếp | Hướng | Giao thức / Cổng | Nội dung & Tần suất |
   |:---|:---|:---|:---|
-  | Ingestor Heartbeat | Ingestor → Coordinator / Aggregator | gRPC `IngestorHeartbeat` (HTTP+50), fallback HTTP `POST /ingestor-heartbeat` | `{ingestor_id, T_commit, partitions_assigned, ingestor_clock, offsets}`; phục vụ giám sát health và độ lệch đồng hồ (clock skew). |
+  | Ingestor Heartbeat | Ingestor → Kafka / Coordinator | Hàng đợi Kafka (`ingestor-heartbeats`) hoặc gRPC `IngestorHeartbeat` (fallback) | `{ingestor_id, T_commit, timestamp, partitions_assigned, ingestor_clock, offsets}`; gửi mỗi 5s; Coordinator nhận RTT để giám sát health và clock skew. |
   | Truy vấn giám sát | Dashboard / Ops → Coordinator · Worker | HTTP `GET /health`, `/state`, `/api/metrics`, `/ingestor-health` | Bảng health/clock-skew, metrics completeness/latency, trạng thái `W_global`/term/failover. |
   | Discovery & cấu hình | ZooKeeper ↔ Kafka / Coordinator / Aggregator | ZooKeeper | Lưu cấu hình cluster Kafka, bầu chọn Leader và hỗ trợ Service Discovery. |
 
@@ -293,7 +293,7 @@ Hiện tượng nút cổ chai xảy ra khi một hoặc một vài phân mảnh
   * Khi Worker nhận được Empty Punctuation Token từ Kafka, nó sẽ tịnh tiến watermark cục bộ $LW_i(P_k)$ của phân mảnh đó lên.
   * Nếu một phân mảnh nhàn rỗi quá thời gian quy định (`IDLE_TIMEOUT_S`), Worker sẽ tự động đánh dấu phân mảnh đó là `TEMPORARY_IDLE` và gửi báo cáo danh sách này lên Coordinator.
   * Coordinator Leader khi tính toán watermark toàn cục sẽ loại trừ các phân mảnh nhàn rỗi *tường minh* ra khỏi hàm $\min$:
-    $$W_{\text{global}} = \max\Big(W_{\text{global}}^{prev},\ \min_{P_k \notin \text{Idle}} LW_i(P_k)\Big)$$
+    $$\large \boxed{W_{\text{global}} = \max\Big(W_{\text{global}}^{prev},\ \min_{P_k \notin \text{Idle}} LW_i(P_k)\Big)}$$
     Điều này cho phép $W_{\text{global}}$ tiếp tục tiến lên, giải phóng trạng thái cửa sổ của các phân mảnh hoạt động khác. Khi phân mảnh nhàn rỗi có dữ liệu trở lại, nó sẽ tự động được đưa trở lại danh sách tính toán.
   * **Lưu ý đồng bộ mã hiện thực** (`strict/coordinator.py`): Empty Punctuation là cơ chế chính giữ $W_{\text{global}}$ tịnh tiến nên hệ thống **không** loại bỏ ngầm các phân mảnh chỉ vì im lặng. Các phân mảnh chậm (`STALE`) và nhàn rỗi ngầm (`IDLE`) vẫn nằm trong hàm $\min()$; chỉ phân mảnh `FAILED` hoặc được Worker đánh dấu `is_temporary_idle` mới bị loại trừ, bảo toàn cam kết 0% loss.
 

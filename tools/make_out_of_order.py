@@ -14,7 +14,7 @@ An event then arrives "late" for wait δ roughly when L > δ, so sweeping δ fro
 max_late_s yields completeness rising from ~(1 - p_late) toward 100%.
 
 Usage:
-    python deploy/make_out_of_order.py --rows 150000 --p-late 0.30 --max-late-s 20 \
+    python tools/make_out_of_order.py --rows 150000 --p-late 0.30 --max-late-s 20 \
         --out dataset/oo_sample.csv
 """
 import argparse
@@ -23,7 +23,7 @@ import random
 from pathlib import Path
 
 ROOT = Path(__file__).parent.parent
-SRC = ROOT / "dataset" / "data.csv"
+SRC = ROOT / "dataset" / "nyc_taxi_events_full.csv"
 
 
 def main():

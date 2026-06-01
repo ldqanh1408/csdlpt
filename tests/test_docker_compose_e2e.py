@@ -29,7 +29,7 @@ def run_cmd(cmd, env=None, cwd=DEPLOY_DIR, check=True, timeout=600):
 def cleanup():
     print("\n=== Cleaning up ===")
     cmd = ["docker", "compose", "-f", COMPOSE_FILE,
-           "--profile", "strict", "--profile", "heuristic", "--profile", "hybrid",
+           "--profile", "strict", "--profile", "heuristic",
            "down", "-v", "--remove-orphans"]
     run_cmd(cmd, check=False)
 
@@ -193,7 +193,7 @@ def run_test_strict():
 
     env = os.environ.copy()
     env["MODE"] = "strict"
-    env["DATASET_FILE"] = "access.log/access_sample.csv"
+    env["DATASET_FILE"] = "nyc_taxi_events_full.csv"
     env["LOG_LEVEL"] = "info"
     env["PUNCTUATION_MODE"] = "data-driven"
 
@@ -230,7 +230,7 @@ def run_test_heuristic():
 
     env = os.environ.copy()
     env["MODE"] = "heuristic"
-    env["DATASET_FILE"] = "access.log/access_sample.csv"
+    env["DATASET_FILE"] = "nyc_taxi_events_full.csv"
     env["LOG_LEVEL"] = "info"
     env["PUNCTUATION_MODE"] = "data-driven"
 

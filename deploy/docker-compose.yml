@@ -4,9 +4,8 @@
 #
 # ═══════════════════════════════════════════════════════════════════════════════
 # USAGE:
-#   Strict mode:   MODE=strict DATASET_FILE=access.log/access_sample.csv docker compose --profile strict up
+#   Strict mode:   MODE=strict DATASET_FILE=nyc_taxi_events_full.csv docker compose --profile strict up
 #   Heuristic mode: MODE=heuristic docker compose --profile heuristic up
-#   Hybrid mode:   MODE=hybrid docker compose --profile hybrid up
 #
 # IMPORTANT: Set MODE= consistently. Workers and ingestor default to "strict"
 # if MODE is not set, causing a mode mismatch when using --profile heuristic.
@@ -34,7 +33,7 @@ services:
     image: csdlpt/refactor:latest
     container_name: refactor-coordinator-1
     command: ["python3", "-m", "refactor.run", "--role", "coordinator", "--mode", "strict"]
-    profiles: ["strict", "hybrid"]
+    profiles: ["strict"]
     environment:
       PYTHONUNBUFFERED: "1"
       ROLE: coordinator
@@ -59,8 +58,10 @@ services:
     restart: unless-stopped
     logging: *default-logging
     depends_on:
-      - zookeeper
-      - kafka
+      zookeeper:
+        condition: service_healthy
+      kafka:
+        condition: service_healthy
     healthcheck:
       test: ["CMD", "curl", "-sf", "http://localhost:8000/health"]
       interval: 3s
@@ -152,7 +153,7 @@ services:
       - "9007:8000"
     volumes:
       - ./checkpoint/aggregator:/data
-    profiles: ["heuristic", "hybrid"]
+    profiles: ["heuristic"]
     restart: unless-stopped
     logging: *default-logging
     depends_on:
@@ -199,7 +200,7 @@ services:
     volumes:
       - ./checkpoint/aggregator-standby:/data
       - aggregator_lock:/lock
-    profiles: ["heuristic", "hybrid"]
+    profiles: ["heuristic"]
     restart: unless-stopped
     logging: *default-logging
     depends_on:
@@ -234,6 +235,7 @@ services:
       ROLE: worker
       MODE: "${MODE:-strict}"
       COORDINATOR_URL: http://coordinator-1:8000
+      COORDINATOR_PEERS: "coordinator-1:8000,coordinator-2:8000,coordinator-3:8000"
       AGGREGATOR_URL: http://aggregator:8000
       AGGREGATOR_STANDBY_URL: http://aggregator-standby:8000
       PARTITIONS: "0,1,2"
@@ -269,7 +271,12 @@ services:
     logging: *default-logging
     depends_on:
       kafka:
-        condition: service_started
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "curl", "-sf", "http://localhost:8000/health"]
+      interval: 3s
+      timeout: 2s
+      retries: 5
     deploy:
       resources:
         limits:
@@ -288,6 +295,7 @@ services:
       ROLE: worker
       MODE: "${MODE:-strict}"
       COORDINATOR_URL: http://coordinator-1:8000
+      COORDINATOR_PEERS: "coordinator-1:8000,coordinator-2:8000,coordinator-3:8000"
       AGGREGATOR_URL: http://aggregator:8000
       AGGREGATOR_STANDBY_URL: http://aggregator-standby:8000
       PARTITIONS: "3,4,5"
@@ -324,6 +332,7 @@ services:
       ROLE: worker
       MODE: "${MODE:-strict}"
       COORDINATOR_URL: http://coordinator-1:8000
+      COORDINATOR_PEERS: "coordinator-1:8000,coordinator-2:8000,coordinator-3:8000"
       AGGREGATOR_URL: http://aggregator:8000
       AGGREGATOR_STANDBY_URL: http://aggregator-standby:8000
       PARTITIONS: "6,7,8"
@@ -360,6 +369,7 @@ services:
       ROLE: worker
       MODE: "${MODE:-strict}"
       COORDINATOR_URL: http://coordinator-1:8000
+      COORDINATOR_PEERS: "coordinator-1:8000,coordinator-2:8000,coordinator-3:8000"
       AGGREGATOR_URL: http://aggregator:8000
       AGGREGATOR_STANDBY_URL: http://aggregator-standby:8000
       PARTITIONS: "9,10,11"
@@ -396,7 +406,7 @@ services:
     image: csdlpt/refactor:latest
     container_name: refactor-ingestor
     command: ["python3", "-m", "refactor.run", "--role", "ingestor"]
-    profiles: ["strict", "heuristic", "hybrid"]
+    profiles: ["strict", "heuristic"]
     environment:
       PYTHONUNBUFFERED: "1"
       ROLE: ingestor
@@ -413,18 +423,23 @@ services:
       KAFKA_ENABLE: "true"
       KAFKA_ENABLE_REAL: "true"
       KAFKA_BROKER_URL: "kafka:9092"
-      SOURCE: "/data/${DATASET_FILE:-data.csv}"
+      SOURCE: "/data/${DATASET_FILE:-nyc_taxi_events_full.csv}"
       TOTAL_PARTITIONS: "12"
     volumes:
       - ../dataset:/data:ro
     restart: unless-stopped
     logging: *default-logging
     depends_on:
-      - node0
-      - node1
-      - node2
-      - node3
-      - kafka
+      node0:
+        condition: service_healthy
+      node1:
+        condition: service_healthy
+      node2:
+        condition: service_healthy
+      node3:
+        condition: service_healthy
+      kafka:
+        condition: service_healthy
     healthcheck:
       test: ["CMD", "curl", "-sf", "http://localhost:8100/health"]
       interval: 3s
@@ -453,6 +468,11 @@ services:
       ZOOKEEPER_TICK_TIME: 2000
     restart: unless-stopped
     logging: *default-logging
+    healthcheck:
+      test: ["CMD-SHELL", "bash -c 'exec 3<>/dev/tcp/127.0.0.1/2181' || exit 1"]
+      interval: 5s
+      timeout: 5s
+      retries: 5
 
   # ── Kafka ─────────────────────────────────────────────────────────
 
@@ -460,7 +480,8 @@ services:
     image: confluentinc/cp-kafka:7.5.0
     container_name: refactor-kafka
     depends_on:
-      - zookeeper
+      zookeeper:
+        condition: service_healthy
     ports:
       - "29092:29092"
     environment:
@@ -475,6 +496,11 @@ services:
       KAFKA_OFFSETS_TOPIC_REPLICATION_FACTOR: 1
     restart: unless-stopped
     logging: *default-logging
+    healthcheck:
+      test: ["CMD-SHELL", "bash -c 'exec 3<>/dev/tcp/127.0.0.1/9092' || exit 1"]
+      interval: 5s
+      timeout: 5s
+      retries: 5
 
   # ── Prometheus ────────────────────────────────────────────────────
 

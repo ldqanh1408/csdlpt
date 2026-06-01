@@ -1,6 +1,6 @@
 {
   "version": "1.0.0",
-  "lastScanned": 1780205285889,
+  "lastScanned": 1780296039681,
   "projectRoot": "D:\\dev\\csdlpt",
   "techStack": {
     "languages": [
@@ -45,7 +45,7 @@
       "path": "common",
       "purpose": null,
       "fileCount": 18,
-      "lastAccessed": 1780205285852,
+      "lastAccessed": 1780296039662,
       "keyFiles": [
         "alerting.py",
         "config.py",
@@ -58,7 +58,7 @@
       "path": "dataset",
       "purpose": null,
       "fileCount": 8,
-      "lastAccessed": 1780205285852,
+      "lastAccessed": 1780296039663,
       "keyFiles": [
         "data.csv",
         "nyc_taxi_events.csv",
@@ -71,7 +71,7 @@
       "path": "ddsketch",
       "purpose": null,
       "fileCount": 3,
-      "lastAccessed": 1780205285853,
+      "lastAccessed": 1780296039663,
       "keyFiles": [
         "compat.py",
         "sketch.py",
@@ -81,8 +81,8 @@
     "deploy": {
       "path": "deploy",
       "purpose": null,
-      "fileCount": 16,
-      "lastAccessed": 1780205285853,
+      "fileCount": 14,
+      "lastAccessed": 1780296039663,
       "keyFiles": [
         "dashboard.py",
         "dataset_stats.py",
@@ -94,21 +94,21 @@
     "docs": {
       "path": "docs",
       "purpose": "Documentation",
-      "fileCount": 22,
-      "lastAccessed": 1780205285854,
+      "fileCount": 17,
+      "lastAccessed": 1780296039664,
       "keyFiles": [
         "Bao_Cao_Thiet_Ke_He_Thong_Watermark.tex",
-        "completeness_vs_wait_strict_20260530_164450.csv",
-        "completeness_vs_wait_strict_20260530_164450.md",
-        "completeness_vs_wait_strict_20260530_170649.csv",
-        "completeness_vs_wait_strict_20260530_170649.md"
+        "dataset_stats_yellow_2024-01.txt",
+        "error.txt",
+        "heuristic_sweep_20260531_123703.csv",
+        "heuristic_sweep_20260531_130204.csv"
       ]
     },
     "heuristic": {
       "path": "heuristic",
       "purpose": null,
       "fileCount": 8,
-      "lastAccessed": 1780205285854,
+      "lastAccessed": 1780296039664,
       "keyFiles": [
         "aggregator.py",
         "aggregator_ha.py",
@@ -121,7 +121,7 @@
       "path": "hybrid",
       "purpose": null,
       "fileCount": 2,
-      "lastAccessed": 1780205285854,
+      "lastAccessed": 1780296039664,
       "keyFiles": [
         "router.py",
         "__init__.py"
@@ -131,7 +131,7 @@
       "path": "strict",
       "purpose": null,
       "fileCount": 11,
-      "lastAccessed": 1780205285855,
+      "lastAccessed": 1780296039665,
       "keyFiles": [
         "backpressure.py",
         "coordinator.py",
@@ -144,7 +144,7 @@
       "path": "tests",
       "purpose": "Test files",
       "fileCount": 17,
-      "lastAccessed": 1780205285855,
+      "lastAccessed": 1780296039665,
       "keyFiles": [
         "check_state.py",
         "test_backpressure.py",
@@ -157,7 +157,7 @@
       "path": "__pycache__",
       "purpose": null,
       "fileCount": 4,
-      "lastAccessed": 1780205285856,
+      "lastAccessed": 1780296039665,
       "keyFiles": [
         "run.cpython-310.pyc",
         "run.cpython-314.pyc",
@@ -166,79 +166,6 @@
       ]
     }
   },
-  "hotPaths": [
-    {
-      "path": "docs\\Distributed Database Project Proposal Template.docx\\REPORT_OZSU_VALDURIEZ_DESIGN_JUSTIFICATION.tex",
-      "accessCount": 25,
-      "lastAccessed": 1780221047104,
-      "type": "file"
-    },
-    {
-      "path": "docs\\Distributed Database Project Proposal Template.docx\\Distributed_Database_Project_Proposal.tex",
-      "accessCount": 13,
-      "lastAccessed": 1780221810726,
-      "type": "file"
-    },
-    {
-      "path": "docs\\Distributed Database Project Proposal Template.docx\\project_proposal_summary.md",
-      "accessCount": 8,
-      "lastAccessed": 1780221328775,
-      "type": "file"
-    },
-    {
-      "path": "docs\\Distributed Database Project Proposal Template.docx\\REPORT_OZSU_VALDURIEZ_DESIGN_JUSTIFICATION.md",
-      "accessCount": 6,
-      "lastAccessed": 1780220404883,
-      "type": "file"
-    },
-    {
-      "path": "docs\\Distributed Database Project Proposal Template.docx\\Tom_Tat_Thiet_Ke_Watermark.tex",
-      "accessCount": 4,
-      "lastAccessed": 1780218057168,
-      "type": "file"
-    },
-    {
-      "path": "strict\\coordinator.py",
-      "accessCount": 2,
-      "lastAccessed": 1780217624248,
-      "type": "directory"
-    },
-    {
-      "path": "docs\\Thiet_Ke_Strict_Watermark.md",
-      "accessCount": 1,
-      "lastAccessed": 1780217582464,
-      "type": "file"
-    },
-    {
-      "path": "docs\\Thiet_Ke_Heuristic_Watermark.md",
-      "accessCount": 1,
-      "lastAccessed": 1780217582657,
-      "type": "file"
-    },
-    {
-      "path": "docs\\system_architect.md",
-      "accessCount": 1,
-      "lastAccessed": 1780217599665,
-      "type": "file"
-    },
-    {
-      "path": "run.py",
-      "accessCount": 1,
-      "lastAccessed": 1780217600261,
-      "type": "file"
-    },
-    {
-      "path": "strict",
-      "accessCount": 1,
-      "lastAccessed": 1780217620378,
-      "type": "directory"
-    },
-    {
-      "path": "docs\\REPORT_full_dataset_20260531_123703.md",
-      "accessCount": 1,
-      "lastAccessed": 1780222054652,
-      "type": "file"
-    }
-  ],
+  "hotPaths": [],
   "userDirectives": []
 }

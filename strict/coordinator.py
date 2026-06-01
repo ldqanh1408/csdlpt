@@ -1,6 +1,7 @@
 """Strict Coordinator - computes W_global from worker heartbeats."""
 
 import json
+import math
 import os
 import threading
 import time
@@ -180,7 +181,10 @@ class StrictCoordinator:
         if self.partitions:
             self._node_watermarks.clear()
             for p in self.partitions.values():
-                if p.status in _ACTIVE_STATUSES:
+                # Skip non-finite watermarks (e.g. -inf for partitions that have
+                # not produced a watermark yet, or right after a coordinator
+                # restart). Including them would poison the skew with inf-inf=NaN.
+                if p.status in _ACTIVE_STATUSES and math.isfinite(p.local_watermark):
                     wid = p.worker_id
                     if wid not in self._node_watermarks:
                         self._node_watermarks[wid] = p.local_watermark
@@ -192,6 +196,8 @@ class StrictCoordinator:
                 W_max = max(self._node_watermarks.values())
                 skews = [W_max - lw for lw in self._node_watermarks.values()]
                 skew_s = max(skews) if skews else 0.0
+                if not math.isfinite(skew_s):
+                    skew_s = 0.0
                 self._node_skew_max_ms = skew_s * 1000.0
                 if self._node_skew_max_ms <= 1000:
                     self._skew_status = "OK"
@@ -199,7 +205,15 @@ class StrictCoordinator:
                     self._skew_status = "Warning"
                 else:
                     self._skew_status = "Critical"
-        self._watermark_lag_s = time.time() - self.W_global - self.delta_base
+        # Watermark lag is only meaningful once a finite global watermark exists.
+        # Before the first heartbeat (or right after a coordinator restart)
+        # W_global is -inf, which would make the lag +inf and trip every
+        # downstream alert (watermark_lag_critical, combined_status_critical)
+        # with a garbage value.
+        if math.isfinite(self.W_global):
+            self._watermark_lag_s = time.time() - self.W_global - self.delta_base
+        else:
+            self._watermark_lag_s = 0.0
         if self._watermark_lag_s < 12:
             self._lag_status = "OK"
         elif self._watermark_lag_s < 30:

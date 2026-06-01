@@ -23,14 +23,6 @@ from common.tiered_storage import (
 )
 from common.monitoring import MonitoringManager, AlertRule
 from common.alerting import AlertManager, alert_evaluation_loop
-from common.kafka_sim import (
-    KafkaMessage,
-    KafkaTopic,
-    KafkaBroker,
-    KafkaProducer,
-    KafkaConsumer,
-    ConsumerGroup,
-)
 
 __all__ = [
     "WatermarkMode",
@@ -55,10 +47,4 @@ __all__ = [
     "AlertRule",
     "AlertManager",
     "alert_evaluation_loop",
-    "KafkaMessage",
-    "KafkaTopic",
-    "KafkaBroker",
-    "KafkaProducer",
-    "KafkaConsumer",
-    "ConsumerGroup",
 ]

@@ -57,7 +57,7 @@ Trong thiết kế hệ thống xử lý dữ liệu phân tán, việc ưu tiê
 > **Bài toán Straggler (Nút cổ chai trạm chậm) và Giải pháp hiện thực hóa:**
 > Trong lý thuyết xử lý luồng phân tán, giải pháp Strict Watermark tiêu chuẩn thường dễ bị tổn thương bởi hiện tượng Straggler (phân mảnh chậm tiến độ làm tắc nghẽn toàn cụm). Tuy nhiên, thiết kế hệ thống của chúng tôi đã chủ động giải quyết bài toán Straggler trong chế độ Strict bằng hai cơ chế phối hợp:
 > - **Cơ chế Bỏ qua phân mảnh nhàn rỗi (Idleness Bypass / Bypass Idle Partitions)**: Khi một phân mảnh tạm thời không phát sinh dữ liệu mới vượt quá cấu hình giới hạn thời gian (`IDLE_TIMEOUT_S`), Worker quản lý sẽ tự động đánh dấu phân mảnh đó là nhàn rỗi (`TEMPORARY_IDLE`) và báo cáo trong heartbeat. Coordinator Leader khi nhận được nhịp tim sẽ tự động loại trừ phân mảnh nhàn rỗi này ra khỏi hàm tối thiểu toàn cục:
->   $$W_{\text{global}} = \min_{P_k \notin \text{Idle}} LW_i(P_k)$$
+>   $$\large \boxed{W_{\text{global}} = \min_{P_k \notin \text{Idle}} LW_i(P_k)}$$
 >   Điều này cho phép dòng chảy thời gian của toàn cụm tiếp tục tịnh tiến, giải phóng trạng thái cửa sổ của các phân mảnh đang hoạt động bình thường mà không bị nghẽn bởi phân mảnh nhàn rỗi. Khi phân mảnh nhàn rỗi có log mới nạp vào, nó sẽ tự động được đưa trở lại danh sách tính toán watermark toàn cục.
 > - **Tái phân bổ động dựa trên hết hạn nhịp tim (Heartbeat Timeout Failover)**: Nếu một Worker bị sập vật lý hoặc bị phân mảnh mạng nghiêm trọng (trở thành trạm chậm vĩnh viễn), Coordinator Leader sẽ phát hiện sau khi hết hạn nhịp tim (`HEARTBEAT_TIMEOUT_S` là 10 giây). Hệ thống sẽ kích hoạt giao thức tái phân bổ động, thu hồi quyền sở hữu phân mảnh của node lỗi, tăng `fencing term` logic để phong tỏa các lệnh cũ, và phân phối đều các phân mảnh bị ảnh hưởng cho các Worker còn sống gánh hộ. Worker mới nạp trạng thái từ checkpoint Tier-2 để tiếp tục tiêu thụ dữ liệu, giải phóng nghẽn dòng chảy watermark.
 >
@@ -87,12 +87,12 @@ Giao thức này đảm bảo bàn giao trạng thái nhất quán và không tr
 ### 3.5. Điều phối toàn cục và Nhất quán mạnh (Global Coordination & Strong Consistency)
 Strict Watermark yêu cầu một quyết định nhất quán toàn cục để đóng một cửa sổ thời gian. Vì mỗi Worker chỉ nắm bắt tiến độ cục bộ của phân mảnh mình quản lý, hệ thống cần một cơ chế điều phối metadata toàn cục:
 
-$$W_{\text{global}} = \min_{\forall P_k \in \text{Active}} LW_i(P_k)$$
+$$\large \boxed{W_{\text{global}} = \min_{\forall P_k \in \text{Active}} LW_i(P_k)}$$
 
 * **Lựa chọn Cơ chế Đồng thuận (Consensus Selection)**:
   Để bảo đảm tính nhất quán nghiêm ngặt và chống lỗi phân mảnh mạng (Split-Brain), hệ thống sử dụng hai cơ chế điều khiển khác nhau:
-  - **Strict Coordinator (Raft Consensus)**: Sử dụng mô hình bầu chọn và sao chép trạng thái (Leader Election & State Replication) thông qua cơ chế đồng thuận Raft phân tán. Cụm 3 Coordinator chạy thuật toán Raft để bầu chọn Leader. Mọi thay đổi về phân bổ phân mảnh và watermark toàn cục đều ghi vào nhật ký đồng thuận được xác nhận bởi đa số (quorum acks). Các Worker sử dụng `fencing term` từ Raft để cô lập các Coordinator cũ khi xảy ra chia cắt mạng.
-  - **Heuristic Aggregator (ZooKeeper Lock HA)**: Sử dụng cấu hình dự phòng nóng (Active-Standby) được điều phối qua khóa phân tán. Cơ chế này hoạt động bất đồng bộ, giúp hạ thấp chi phí điều phối so với giải thuật đồng thuận Raft để ưu tiên hiệu năng và tính tự trị cục bộ.
+  - **Strict Coordinator (Raft/ZK HA)**: Cụm 3 Coordinator chạy điều phối. Hệ thống hỗ trợ bầu chọn Leader qua (1) thuật toán đồng thuận Raft nhúng (Embedded Raft) với nhân bản log và bầu cử theo nhiệm kỳ, hoặc (2) ZooKeeper Leader Election (khi cấu hình `ZK_ENSEMBLE`) tranh chấp khóa phân tán tại `/csdlpt/coordinator-lock` và ghi Leader ID vào node tạm `/csdlpt/coordinator-leader`. Các chỉ thị điều phối kèm cặp `(term, command_id)` làm token fencing ngăn chặn split-brain khi phân mảnh mạng.
+  - **Heuristic Aggregator (ZooKeeper/File Lock HA)**: Sử dụng cấu hình dự phòng nóng (Active-Standby) thông qua khóa phân tán ZooKeeper tại `/csdlpt/aggregator-lock` hoặc File Lock dùng chung (`FileLockLeader` dùng `fcntl`/`msvcrt`). Cơ chế này hoạt động bất đồng bộ, giúp hạ thấp chi phí điều phối truyền thông để ưu tiên hiệu năng và tính tự trị cục bộ.
 
 ```mermaid
 sequenceDiagram
@@ -118,7 +118,7 @@ Strict Watermark sử dụng các thông điệp kiểm soát đặc biệt là 
 Thiết kế này giải quyết bài toán cốt lõi trong hệ phân tán: **sự vắng mặt của dữ liệu không đồng nghĩa với việc thời gian dừng lại**. Nếu không có punctuation, hệ thống không thể phân biệt giữa một phân mảnh nhàn rỗi và một phân mảnh bị tắc nghẽn do hỏng hóc hoặc mạng chậm. Nhờ punctuation, hệ thống tiếp tục tịnh tiến Watermark toàn cục và tránh làm nghẽn toàn bộ luồng xử lý.
 
 > [!NOTE]
-> **Đồng bộ với mã hiện thực (`strict/coordinator.py::_compute_global`)**: Empty Punctuation là cơ chế *chính* giữ $W_{global}$ luôn tịnh tiến, do đó Strict **không** dùng cơ chế Idleness Bypass ngầm tại Coordinator (việc tự loại các phân mảnh "im lặng" sẽ gây mất dữ liệu khi chúng hoạt động lại). Cụ thể, các phân mảnh phản hồi chậm (`STALE`) và nhàn rỗi ngầm (`IDLE`) **vẫn** tham gia hàm $\min()$ để bảo toàn cam kết 0% loss; chỉ những phân mảnh được xác nhận lỗi (`FAILED`) hoặc được Worker đánh dấu nhàn rỗi *tường minh* (`is_temporary_idle` sau `IDLE_TIMEOUT_S`) mới bị loại trừ tạm thời, và tự động quay lại danh sách khi có sự kiện mới.
+> **Đồng bộ với mã hiện thực (`strict/coordinator.py::_compute_global`)**: Empty Punctuation là cơ chế *chính* giữ $W_{global}$ luôn tịnh tiến, do đó Strict **không** dùng cơ chế Idleness Bypass ngầm tại Coordinator (việc tự loại các phân mảnh "im lặng" sẽ gây mất dữ liệu khi chúng hoạt động lại). Cụ thể, các phân mảnh phản hồi chậm (`STALE`) và nhàn rỗi ngầm (`IDLE`) **vẫn** tham gia hàm $\min()$ để bảo toàn cam kết 0% loss; chỉ những phân mảnh được xác nhận lỗi (`FAILED`) hoặc được Worker đánh dấu nhàn rỗi *tường minh* (`is_temporary_idle` sau `IDLE_TIMEOUT_S` = 30.0 giây) mới bị loại trừ tạm thời, và tự động quay lại danh sách khi có sự kiện mới.
 
 ### 3.7. Nhân bản và Tính sẵn sàng cao (Replication & HA)
 Hệ thống sử dụng các cơ chế dự phòng ở nhiều tầng để loại bỏ các điểm lỗi đơn lẻ (Single Point of Failure):
@@ -168,12 +168,12 @@ DDSketch là một cấu trúc dữ liệu phác thảo thống kê (streaming s
 - **Khả năng cộng gộp (Mergeability)**: Nhiều DDSketch từ các phân mảnh khác nhau có thể được gộp lại với sai số giới hạn ($\alpha = 0.01$).
 - **Độ chính xác phân vị**: Cho phép ước lượng chính xác phân vị $p$ của độ trễ thực tế (ví dụ: p95 hoặc p99) để tính toán biên an toàn hiệu dụng:
 
-$$W_{\text{heur}} = T_{\text{event\_max}} - Q_p(\{\ell\})$$
+$$\large \boxed{W_{\text{heur}} = T_{\text{event\_max}} - Q_p(\{\ell\})}$$
 
 ### 4.5. Aggregator HA và Lược bớt điều phối (Reduced Coordination)
 Chế độ Heuristic không sử dụng Strict Coordinator với thuật toán Raft chặn (blocking). Thay vào đó, nó sử dụng **Aggregator** đóng vai trò gom hợp metadata thích ứng từ các Worker. 
 
-Để bảo đảm tính sẵn sàng cao mà không cần trả chi phí đồng thuận Raft đắt đỏ, Aggregator sử dụng cấu hình Active-Standby qua khóa phân tán ZooKeeper. Bộ điều phối này hoạt động bất đồng bộ, cập nhật watermark toàn cục thích ứng $W_{\text{global\_heur}} = \min(W_{\text{heur}})$ mà không chặn tiến độ xử lý của bất kỳ Worker nào.
+Để bảo đảm tính sẵn sàng cao mà không cần trả chi phí đồng thuận Raft đắt đỏ, Aggregator sử dụng cấu hình dự phòng nóng (Active-Standby) qua khóa phân tán ZooKeeper (`/csdlpt/aggregator-lock`) hoặc File Lock dùng chung (`FileLockLeader`). Active gửi tệp nhịp tim mỗi 1.0 giây, Standby giám sát tệp này và tự động takeover nâng lên Active nếu nhịp tim mất hoặc quá hạn (> 1.5 giây), tải lại trạng thái phân mảnh và watermark từ RocksDB/JSON. Bộ điều phối này hoạt động bất đồng bộ, cập nhật watermark toàn cục thích ứng $W_{\text{global\_heur}} = \min(W_{\text{heur}})$ mà không chặn tiến độ xử lý của bất kỳ Worker nào.
 
 ### 4.6. Sửa lỗi đền bù (Eventual Consistency & DLQ correction)
 Vì Heuristic Watermark chốt cửa sổ dựa trên ước lượng phân vị (speculative chốt), các sự kiện đến muộn hơn mốc Watermark đã chốt sẽ không thể đưa vào cửa sổ xử lý chính. Hệ thống giải quyết bằng mô hình **Nhất quán sau cùng (Eventual Consistency)**:

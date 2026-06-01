@@ -215,7 +215,20 @@ class RaftCoordinator:
                     self.coordinator.W_global_prev = wg
 
     def receive_heartbeat(self, hb):
-        return self.coordinator.receive_heartbeat(hb)
+        # ── Leader guard: followers reject direct worker heartbeats ──
+        # Workers should always target the leader (coordinator_health_check_loop
+        # handles this). If a follower receives a heartbeat, it means the worker
+        # hasn't discovered the leader yet — reject so the worker falls through
+        # and the health check loop redirects.
+        if self.role != RaftRole.LEADER:
+            logger.warning(
+                "RaftCoordinator: follower %s received WorkerHeartbeat from %s "
+                "(leader is %s) — dropping. Worker should redirect to leader.",
+                self.coordinator_id, getattr(hb, 'worker_id', '?'), self.leader_id,
+            )
+            return None  # signal to caller: not accepted
+        self.coordinator.receive_heartbeat(hb)
+        return True  # signal to caller: accepted by leader
 
     def set_failover_manager(self, fm: object) -> None:
         """Inject a FailoverManager, delegating to the inner StrictCoordinator."""
@@ -331,18 +344,26 @@ class RaftCoordinator:
                             # Replicate state to peers
                             self._zk_heartbeat_loop()
                         else:
-                            with self._lock:
-                                self.role = RaftRole.FOLLOWER
-
-                            # Read leader node
+                            # If the leader in ZK is still us, don't reset role
+                            # (lock may have flapped due to ZK connection hiccup but
+                            # we're still the designated leader)
                             try:
                                 if self._zk_client.exists("/csdlpt/coordinator-leader"):
                                     data, _ = self._zk_client.get("/csdlpt/coordinator-leader")
                                     leader_id = data.decode('utf-8')
                                     with self._lock:
                                         self.leader_id = leader_id
+                                        if leader_id == self.coordinator_id:
+                                            if self.role != RaftRole.LEADER:
+                                                logger.warning(
+                                                    "Real ZK Coordinator: ZK still shows us as leader, "
+                                                    "restoring LEADER role (lock acquire flapped)")
+                                            self.role = RaftRole.LEADER
+                                        else:
+                                            self.role = RaftRole.FOLLOWER
                                 else:
                                     with self._lock:
+                                        self.role = RaftRole.FOLLOWER
                                         self.leader_id = ""
                             except Exception as e:
                                 logger.debug("Real ZK Coordinator: failed to read leader node: %s", e)
