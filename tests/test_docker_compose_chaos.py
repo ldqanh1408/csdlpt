@@ -108,7 +108,7 @@ def run_chaos_test():
 
     env = os.environ.copy()
     env["MODE"] = "strict"
-    env["DATASET_FILE"] = "access.log/access_sample.csv"
+    env["DATASET_FILE"] = "nyc_taxi_events_full.csv"
     env["LOG_LEVEL"] = "info"
     env["PUNCTUATION_MODE"] = "data-driven"
 

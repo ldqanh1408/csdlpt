@@ -58,7 +58,7 @@ Hệ thống xử lý luồng log Web Server đến \emph{out-of-order} 24/7, d�
     \item \textbf{Ingest}: \texttt{Ingestor} gán $T_{event}$, băm $\text{PartitionID}=\text{hash}(host)\bmod 12$, produce vào Kafka topic \texttt{events} (kèm Punctuation Token cho Strict mode).
     \item \textbf{Data Plane (Kafka)}: 12 phân vùng, RF=3, append-only; sắp xếp out-of-order đẩy xuống Worker.
     \item \textbf{Compute (4 Worker)}: ánh xạ 3 phân vùng/node, tách luồng nạp (poll + backpressure) và xử lý (drain theo $T_{event}$, dedupe, gom window, RocksDB).
-    \item \textbf{Control Plane (gRPC/HTTP)}: Strict dùng Coordinator Raft 3-node; Heuristic dùng Aggregator HA Active--Standby.
+    \item \textbf{Control Plane (gRPC/HTTP)}: Strict dùng Coordinator HA (hỗ trợ Raft hoặc ZooKeeper Lock); Heuristic dùng Aggregator HA (Active--Standby qua khóa ZooKeeper hoặc File Lock).
     \item \textbf{Tiered Storage}: Tier-1 RocksDB (nóng), Tier-2 Shared Volume (checkpoint 10s), Tier-3 MinIO/S3 (cold \& DR).
 \end{itemize}
 
@@ -69,10 +69,12 @@ Strict Path phục vụ nghiệp vụ kiểm toán/đối soát tài chính, ưu
     \item \textbf{Định thời dựa trên Punctuation}: Ingestor chèn token kiểm soát mang mốc cam kết $T_{commit}$. Khi phân vùng rảnh (Idle), Ingestor vẫn gửi \emph{Empty Punctuation Token} mỗi 1000ms để dòng thời gian logic toàn cụm không bị đóng băng --- đây là cơ chế \emph{chính} giữ $W_{global}$ luôn tịnh tiến, giải quyết bài toán \emph{không thể phân biệt phân vùng nhàn rỗi với phân vùng tắc nghẽn} (một vấn đề cốt lõi trong hệ phân tán theo Özsu \& Valduriez).
     \item \textbf{Worker-side Bounded Priority Queue}: Min-Heap RAM tối đa 10.000 bản ghi sắp xếp lại theo $T_{event}$; ép đẩy (\texttt{Forced Pop}) khi hàng đợi đầy hoặc phần tử đỉnh heap bị giữ quá $\texttt{max\_wait\_ms}=1000$ms, chống tràn bộ đệm.
     \item \textbf{Hội tụ toàn cục tối thiểu (Min-of-Min)}:
+    {\large
     \begin{equation}
-    W_{global}(t) = \max\Big(W_{global}(t{-}1),\ \min_{\forall P_k \in \text{Active}} LW_i(P_k)\Big)
+    \boxed{W_{global}(t) = \max\Big(W_{global}(t{-}1),\ \min_{\forall P_k \in \text{Active}} LW_i(P_k)\Big)}
     \end{equation}
-    Phân vùng phản hồi chậm (STALE) và nhàn rỗi ngầm (IDLE) \emph{vẫn} tham gia $\min()$ để giữ cam kết 0\% loss. Chỉ phân vùng xác nhận lỗi (FAILED) hoặc được Worker đánh dấu nhàn rỗi tường minh (\texttt{is\_temporary\_idle}) sau \texttt{IDLE\_TIMEOUT\_S}$=2.0$s mới bị loại trừ; khi có sự kiện mới, phân vùng tự động quay lại hàm tính --- đây là cơ chế \textbf{Idleness Bypass} chống Straggler.
+    }
+    Phân vùng phản hồi chậm (STALE) và nhàn rỗi ngầm (IDLE) \emph{vẫn} tham gia $\min()$ để giữ cam kết 0\% loss. Chỉ phân vùng xác nhận lỗi (FAILED) hoặc được Worker đánh dấu nhàn rỗi tường minh (\texttt{is\_temporary\_idle}) sau \texttt{IDLE\_TIMEOUT\_S}$=30.0$s mới bị loại trừ; khi có sự kiện mới, phân vùng tự động quay lại hàm tính --- đây là cơ chế \textbf{Idleness Bypass} chống Straggler.
     \item \textbf{Chống Split-Brain (Fencing)}: Mọi lệnh điều phối kèm cặp $(term, command\_id)$. Worker từ chối lệnh có $term$ nhỏ hơn nhiệm kỳ lớn nhất đã biết, và bỏ qua lệnh trùng $command\_id$ (idempotent).
     \item \textbf{Tái phân bổ cân bằng tải}: Khi \texttt{HEARTBEAT\_TIMEOUT\_S}$=10$s, Coordinator phát hiện Worker chết, tăng \emph{fencing term}, chia \emph{đều} các phân vùng mồ côi cho các Worker sống (ví dụ P9$\to$node0, P10$\to$node1, P11$\to$node2) --- tránh dồn tải gây sập dây chuyền. Khi $\ge 2$ Worker sập, Cascading Failure Protocol điều phối qua Raft log để tái phân bổ toàn bộ phân vùng mồ côi.
     \item \textbf{Strict Failback State Machine}: Bàn giao ngược 5 bước trên Raft log: \texttt{PAUSE} $\to$\allowbreak \texttt{FLUSH\_ACK} $\to$\allowbreak \texttt{KAFKA\_REASSIGN} $\to$\allowbreak \texttt{SEEK\_RESUME} $\to$\allowbreak \texttt{COMPLETE}, qua chu trình trạng thái \texttt{ASSIGNED}$\to$\allowbreak\texttt{REASSIGNING}$\to$\allowbreak\texttt{PAUSED}$\to$\allowbreak\texttt{ASSIGNED}. Bảo đảm tại một thời điểm duy nhất một Worker được consume/ghi một phân vùng (Exactly-Once output). Output được phát song song vào \texttt{strict\_results} và \texttt{audit\_results} (Critical Audit Sink) để consumer kiểm toán replay độc lập.
@@ -85,12 +87,14 @@ Heuristic Path loại bỏ điều phối đồng bộ chặn, trao quyền tự
 \begin{itemize}[leftmargin=*]
     \item \textbf{Ước lượng phân vị thích ứng DDSketch}: Đo độ trễ thô $lag=t_{arrival}-T_{event}$ qua Sliding Window DDSketch (60 sub-sketch $\times$ 1s), bảo đảm sai số tương đối $\frac{|\hat q-q|}{q}\le\alpha$ ($\alpha=0.01$), bộ nhớ $\le 100$KB/partition (hard cap \texttt{max\_buckets}=1024, \texttt{MAX\_LAG}=1h). DDSketch có tính \emph{cộng gộp} (mergeable): Aggregator có thể gộp sketch từ nhiều phân vùng để ước lượng phân vị toàn cục với sai số giới hạn.
     \item \textbf{Watermark cục bộ thích ứng (đơn điệu)}:
+    {\large
     \begin{equation}
-    W_{h,i}^{P_k}(t) = \max\Big(W_{h,i}^{P_k}(t{-}1),\ T_{event\_max} - L_{eff}(t)\Big),\quad L_{eff}=\text{DDSketch.quantile}(p)
+    \boxed{W_{h,i}^{P_k}(t) = \max\Big(W_{h,i}^{P_k}(t{-}1),\ T_{event\_max} - L_{eff}(t)\Big),\quad L_{eff}=\text{DDSketch.quantile}(p)}
     \end{equation}
+    }
     Phân vị tự nâng từ $p_{normal}=0.99$ lên $p_{safe}=0.999$ khi phát hiện burst lag $>2.0\times$ trung bình, mở rộng biên an toàn (Loss Budget Guarantee).
     \item \textbf{Cold Start \& Negative Lag}: 3 pha khởi động (buffer-only $\to$ Conservative Prior $L_{max}=60$s $\to$ Normal khi $\ge 10$s \emph{và} $\ge 1000$ mẫu); lọc lag âm do lệch đồng hồ (Clock Skew), hiệu chuẩn cộng bù $|\text{median\_neg\_lag}|$ khi tỷ lệ âm $\ge 1\%$.
-    \item \textbf{Aggregator HA (Active--Standby)}: Khóa loại trừ (ephemeral node) trên ZooKeeper. Primary tính $W_{global\_h}=\min(W_{h})$ trên phân vùng active và phát mỗi 500ms; mất kết nối $>3000$ms thì Standby (đồng bộ nóng qua Shared Volume) tiếp quản, $RTO\le 2$s. Không dùng Raft để tránh chi phí đồng thuận chặn --- đánh đổi có chủ đích theo nguyên lý giảm Communication Cost của Özsu \& Valduriez.
+    \item \textbf{Aggregator HA (Active--Standby)}: Sử dụng khóa loại trừ trên ZooKeeper tại \texttt{/csdlpt/aggregator-lock} hoặc File Lock dự phòng (\texttt{FileLockLeader} dùng \texttt{fcntl}/\texttt{msvcrt}). Active ghi file nhịp tim mỗi 1s. Nếu nhịp tim mất hoặc quá hạn ($>1.5$s), Standby tự động chiếm khóa, khôi phục trạng thái từ RocksDB/JSON và lên Active ($RTO\le 2$s), tránh SPOF.
     \item \textbf{Replay-Mode Sketch Snapshot \& Rollback}: Hàng đợi 6 snapshot DDSketch trong 60s gần nhất. Khi phát hiện trễ tăng $10\times$ (dấu hiệu replay), Worker rollback về snapshot an toàn và đóng băng bộ ước lượng, tránh ``nhiễm bẩn'' thống kê. Kết hợp Replay Sub-Checkpointing để không phải replay lại từ đầu khi xử lý backlog lớn.
     \item \textbf{Đường ống sửa lỗi DLQ Correction}: Bản ghi $T_{event}<W_{global\_h}$ định tuyến vào \texttt{late\_logs\_dlq} (không drop ngầm, hạch toán \texttt{per\_window\_loss}). DLQ Consumer nạp lại trạng thái cửa sổ lịch sử, tính Delta và phát \texttt{CorrectionMessage} xuống downstream (Incremental / Replace / Append-with-Versioning) $\Rightarrow$ Eventual Completeness 100\%. Mô hình này hiện thực hóa \textbf{Eventual Consistency} theo Özsu \& Valduriez: chấp nhận nhất quán tức thời yếu hơn để giảm trễ, bù đắp bằng sửa lỗi bất đồng bộ.
 \end{itemize}

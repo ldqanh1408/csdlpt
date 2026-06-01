@@ -120,6 +120,12 @@ class AggregatorHA:
             logger.info("Aggregator HA: ACTIVE (pid=%d)", os.getpid())
             self._start_heartbeat_writer()
         else:
+            # A revived old-active starts here: the current active still holds
+            # the shared lock, so we come up as STANDBY. Explicitly clear the
+            # active flag (its default is True) so state is consistent and we
+            # never advertise ourselves as active until we win the lock.
+            self._active = False
+            self.aggregator._is_active = False
             logger.info("Aggregator HA: STANDBY (pid=%d)", os.getpid())
             self._start_heartbeat_monitor()
 
@@ -140,10 +146,24 @@ class AggregatorHA:
         def _monitor():
             while not self._stop.is_set():
                 try:
-                    if os.path.exists(self.heartbeat_path):
-                        if time.time() - os.path.getmtime(self.heartbeat_path) > 1.5:
-                            logger.warning("Aggregator HA: active stale, taking over")
-                            self._attempt_takeover()
+                    # The standby must take over whenever it can no longer see a
+                    # FRESH active heartbeat. That includes the heartbeat file
+                    # being stale *and* the file being absent entirely (active
+                    # crashed before writing, or the path is not shared). The
+                    # shared leader lock (try_acquire) is the real arbiter, so
+                    # attempting takeover on a missing heartbeat is safe and
+                    # cannot cause split-brain.
+                    fresh = (
+                        os.path.exists(self.heartbeat_path)
+                        and (time.time() - os.path.getmtime(self.heartbeat_path)) <= 1.5
+                    )
+                    if not fresh:
+                        logger.warning(
+                            "Aggregator HA: no fresh active heartbeat, attempting takeover")
+                        self._attempt_takeover()
+                        if self._active:
+                            # Promoted; heartbeat writer is now running.
+                            break
                 except Exception:
                     pass
                 time.sleep(1.0)

@@ -183,7 +183,7 @@ def _compose_base(deploy_mode: str = None) -> list[str]:
 def _make_env(mode: str) -> dict:
     env = os.environ.copy()
     env["MODE"] = mode
-    env["DATASET_FILE"] = st.session_state.get("dataset_file", "data.csv")
+    env["DATASET_FILE"] = st.session_state.get("dataset_file", "nyc_taxi_events_full.csv")
     env["LOG_LEVEL"] = st.session_state.get("log_level", "info")
     env["PUNCTUATION_MODE"] = st.session_state.get("punctuation_mode", "data-driven")
     # Wait Time (delta_base) — independent variable for the completeness-vs-wait
@@ -201,8 +201,7 @@ def compose_up(mode: str, dataset_file: str) -> tuple[bool, str]:
         profiles = [mode]
     else:
         profiles = [mode]
-        if mode == "hybrid":
-            profiles.extend(["heuristic"])
+        profiles.extend(["heuristic"])
 
     cmd = _compose_base()
     for p in profiles:
@@ -343,13 +342,11 @@ def fetch_all_metrics(mode: str, deploy_mode: str = None) -> dict:
         urls_to_fetch[f"w_s_{name}"] = (f"http://localhost:{port}/state", 1.5)
 
     # 2. Coordinators
-    if mode in ("strict", "hybrid"):
         for cname, cport in _coordinators(deploy_mode).items():
             urls_to_fetch[f"c_{cname}"] = (f"http://localhost:{cport}/state", 1.5)
             urls_to_fetch[f"c_ih_{cname}"] = (f"http://localhost:{cport}/ingestor-health", 1.5)
 
     # 3. Aggregator
-    if mode in ("heuristic", "hybrid"):
         agg_port = _aggregator_port(deploy_mode)
         urls_to_fetch["aggregator"] = (f"http://localhost:{agg_port}/state", 1.5)
 
@@ -402,7 +399,6 @@ def fetch_all_metrics(mode: str, deploy_mode: str = None) -> dict:
         result["coordinator_name"] = best_cname
 
     # Assemble aggregator
-    if mode in ("heuristic", "hybrid"):
         agg = fetched.get("aggregator")
         if agg:
             result["aggregator"] = agg
@@ -737,7 +733,7 @@ def render_sidebar():
     datasets = get_datasets()
     if not datasets:
         st.sidebar.warning("No CSV in dataset/")
-        selected_ds = "data.csv"
+        selected_ds = "nyc_taxi_events_full.csv"
     else:
         selected_ds = st.sidebar.selectbox(
             "Dataset", list(datasets.keys()), disabled=st.session_state.running,
@@ -838,7 +834,6 @@ def render_sidebar():
                 ok = (check_node_status(cname, cport) == "running")
                 st.sidebar.markdown(f"{'🟢' if ok else '🔴'} {cname} (:{cport})")
 
-        if mode in ("heuristic", "hybrid"):
             st.sidebar.markdown("**Aggregator**")
             agg_service = "heuristic-aggregator" if _is_sim() else "aggregator"
             ok = (check_node_status(agg_service, _aggregator_port()) == "running")
@@ -1304,7 +1299,7 @@ def render_sim_stats(mode: str, metrics: dict):
     total_fencing = sum(p["fencing_violations"] for p in parts)
 
     # Dataset progress & ETA
-    dataset_file = st.session_state.get("dataset_file", "data.csv")
+    dataset_file = st.session_state.get("dataset_file", "nyc_taxi_events_full.csv")
     total_rows = 0
     datasets = get_datasets()
     ds_path = datasets.get(dataset_file, "")
@@ -1813,7 +1808,6 @@ def fetch_all_container_statuses(mode: str, deploy_mode: str = None) -> dict[str
     cmd = _compose_base(deploy_mode) + [
         "--profile", "strict",
         "--profile", "heuristic",
-        "--profile", "hybrid",
         "ps", "--format", "json"
     ]
     try:

@@ -24,15 +24,15 @@ Punctuation mode and the trade-off curve:
     event-times span many days but is replayed in seconds, δ of a few seconds is
     negligible, so completeness is roughly flat — not useful for the curve.
 
-Usage (from repo root or deploy/):
-    python deploy/experiment_completeness_vs_wait.py \
+Usage (from repo root):
+    python reports/run_experiment.py \
         --mode strict --punctuation wall-clock \
-        --dataset sample_150k.csv \
+        --dataset nyc_taxi_events_full.csv \
         --deltas 0,2,5,10,20 --repeats 1 \
         --max-wait 300 --settle 25
 
     # Full dataset (slow, ~10 min/point):
-    python deploy/experiment_completeness_vs_wait.py --dataset data.csv --deltas 0,5,10,20,40
+    python reports/run_experiment.py --dataset nyc_taxi_events_full.csv --deltas 0,5,10,20,40
 """
 from __future__ import annotations
 import argparse
@@ -47,12 +47,13 @@ import urllib.request
 from datetime import datetime
 from pathlib import Path
 
-DEPLOY_DIR = Path(__file__).parent.resolve()
-PROJECT_ROOT = DEPLOY_DIR.parent
+REPORTS_DIR = Path(__file__).parent.resolve()
+PROJECT_ROOT = REPORTS_DIR.parent
+DEPLOY_DIR = PROJECT_ROOT / "deploy"
 COMPOSE_FILE = str(DEPLOY_DIR / "docker-compose.yml")
 SHARED_VOL = DEPLOY_DIR / "checkpoint" / "shared"
 WORKER_PORTS = [9101, 9102, 9103, 9104]
-ALL_PROFILES = ["strict", "heuristic", "hybrid"]
+ALL_PROFILES = ["strict", "heuristic"]
 
 # Reuse the dashboard's metric helpers so completeness is computed identically to the UI.
 _spec = importlib.util.spec_from_file_location("_dash", str(DEPLOY_DIR / "dashboard.py"))
@@ -117,7 +118,7 @@ def _agg(mode: str, retries: int = 4) -> dict:
     drops slow workers under load and produces spurious dips). Completeness is
     computed identically to the dashboard: on_time / (received - duplicates)."""
     blank = {"total_received": 0, "on_time": 0, "late_dropped": 0,
-             "data_completeness_pct": 0.0, "late_arrival_rate_pct": 0.0,
+             "data_completeness_pct": -1.0, "late_arrival_rate_pct": 0.0,
              "wm_lag_max_s": 0.0, "proc_lat_p99_us": 0.0, "l_eff_ms": 0.0, "_workers": 0}
     for _ in range(retries):
         ms = [_read_worker(p) for p in WORKER_PORTS]
@@ -142,6 +143,8 @@ def _agg(mode: str, retries: int = 4) -> dict:
                     le = d.get("L_eff_s")
                     if le is not None and float(le) > 0:
                         leff_vals.append(float(le))
+            if tot == 0:
+                return blank  # no data yet → sentinel completeness = -1
             uniq = max(tot - dup, 1)
             leff_ms = round(1000.0 * sum(leff_vals) / len(leff_vals), 1) if leff_vals else 0.0
             return {"total_received": tot, "on_time": on, "late_dropped": late,
@@ -232,7 +235,7 @@ def run_point(mode: str, punctuation: str, dataset: str, sweep_var: str, sweep_v
         time.sleep(5)
         a = _agg(mode)
         total = a.get("total_received", 0)
-        comp = a.get("data_completeness_pct", 0.0)
+        comp = a.get("data_completeness_pct", -1.0)
         if not eof_seen and _ingestor_eof():
             eof_seen = True
             print(f"  [eof] ingestor reached EOF at t={int(time.time()-t0)}s (received={total:,})")
@@ -242,9 +245,10 @@ def run_point(mode: str, punctuation: str, dataset: str, sweep_var: str, sweep_v
             stable = 0
             last_total = total
         consumed_ok = (target_rows == 0) or (total >= 0.90 * target_rows)
+        comp_str = f"{comp:6.2f}%" if comp >= 0 else "     N/A"
         print(f"    t={int(time.time()-t0):>4}s received={total:>9,}"
               f"{('/'+format(target_rows,',')) if target_rows else ''} "
-              f"completeness={comp:6.2f}% eof={eof_seen} consumed_ok={consumed_ok} stable={stable}")
+              f"completeness={comp_str} eof={eof_seen} consumed_ok={consumed_ok} stable={stable}")
         # Done only when: ingestor EOF, ~all rows consumed, AND the count has
         # held steady (drained). consumed_ok guards against a backpressure lull
         # being mistaken for completion.
@@ -252,17 +256,21 @@ def run_point(mode: str, punctuation: str, dataset: str, sweep_var: str, sweep_v
             break
 
     # Settle: let final windows close, then sample completeness for the average.
+    # Skip samples where total_received == 0 — completeness is meaningless when
+    # no data has arrived (would be 0% and skew the average downward).
     print(f"  settling {settle}s and sampling steady-state completeness...")
     samples = []
     s_end = time.time() + settle
     final = _agg(mode)
     while time.time() < s_end:
         a = _agg(mode)
-        samples.append(a.get("data_completeness_pct", 0.0))
-        final = a
+        if a.get("total_received", 0) > 0:
+            samples.append(a.get("data_completeness_pct", 0.0))
+            final = a
         time.sleep(5)
 
-    comp_avg = round(statistics.mean(samples), 3) if samples else final.get("data_completeness_pct", 0.0)
+    comp_avg = round(statistics.mean(samples), 3) if samples else (
+        final.get("data_completeness_pct", 0.0) if final.get("total_received", 0) > 0 else 0.0)
     leff_ms = round(final.get("l_eff_ms", 0.0), 1)
     # Wait-time axis: strict uses the CONFIGURED δ (DELTA_BASE_S); heuristic uses
     # the REALIZED effective lag L_eff measured from the DDSketch.
@@ -341,7 +349,7 @@ def main():
     ap.add_argument("--mode", default="strict", choices=["strict", "heuristic"])
     ap.add_argument("--punctuation", default="data-driven",
                     choices=["wall-clock", "data-driven", "max-event-time"])
-    ap.add_argument("--dataset", default="sample_150k.csv", help="DATASET_FILE relative to dataset/")
+    ap.add_argument("--dataset", default="nyc_taxi_events_full.csv", help="DATASET_FILE relative to dataset/")
     ap.add_argument("--deltas", default="0,2,5,10,20",
                     help="strict: comma-separated wait times in SECONDS (DELTA_BASE_S)")
     ap.add_argument("--ps", default="0.5,0.8,0.95,0.99,0.999",

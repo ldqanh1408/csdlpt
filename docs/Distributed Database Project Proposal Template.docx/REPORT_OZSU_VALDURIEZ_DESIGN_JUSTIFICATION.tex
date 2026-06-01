@@ -68,30 +68,6 @@ Dự án có hai hướng thiết kế chính:
 
 Hai thiết kế đều tuân theo các nguyên tắc của hệ cơ sở dữ liệu phân tán, nhưng chọn hai điểm đánh đổi khác nhau giữa \textit{consistency}, \textit{availability}, \textit{latency}, \textit{autonomy} và \textit{communication cost}.
 
-\section{Cơ sở lý thuyết Özsu và Valduriez}
-
-Theo Özsu và Valduriez, thiết kế một hệ cơ sở dữ liệu phân tán cần được đánh giá qua các khía cạnh sau:
-
-\begin{longtable}{p{0.25\textwidth} p{0.34\textwidth} p{0.33\textwidth}}
-\toprule
-\textbf{Khái niệm lý thuyết} & \textbf{Ý nghĩa trong Distributed Database} & \textbf{Ánh xạ trong dự án} \\
-\midrule
-\endhead
-\textbf{Fragmentation / Partitioning} & Chia dữ liệu thành các mảnh để mỗi \textit{site} xử lý một phần dữ liệu toàn cục. & \textit{Kafka partitions} chia luồng log vô hạn cho nhiều \textit{Workers}. \\
-\textbf{Allocation} & Quyết định mảnh dữ liệu được lưu và xử lý ở đâu. & \textit{Partitions} được gán cho \textit{Worker nodes}; khi lỗi có thể \textit{reassign}. \\
-\textbf{Replication} & Lưu nhiều bản sao dữ liệu hoặc metadata để tăng \textit{availability} và khả năng phục hồi. & \textit{Kafka replication}, \textit{Coordinator HA}, \textit{Aggregator HA}, \textit{checkpoints}, \textit{Tier 2/Tier 3 state}. \\
-\textbf{Distributed Processing} & Thực thi xử lý trên nhiều \textit{sites} và hợp nhất kết quả cục bộ. & \textit{Workers} xử lý \textit{local windows/local watermarks}; \textit{Coordinator/Aggregator} tính \textit{global watermark}. \\
-\textbf{Distributed Coordination} & Điều phối trạng thái hoặc metadata dùng chung giữa nhiều \textit{sites}. & \textit{Coordinator} tính \texttt{W\_global}; \textit{Aggregator} tính \texttt{W\_global\_h}. \\
-\textbf{Consistency Management} & Đảm bảo tính đúng khi nhiều node cùng cập nhật trạng thái logic. & \textit{Exactly-Once}, \textit{Fencing Token}, \textit{Failback State Machine}, \textit{Idempotent Output}. \\
-\textbf{Reliability and Recovery} & Phục hồi khi có lỗi node, storage hoặc communication. & \textit{Checkpoint}, \textit{Replay}, \textit{DLQ}, \textit{Tiered State Storage}, \textit{Disaster Recovery}. \\
-\textbf{Transparency} & Che giấu sự phân tán để người dùng nhìn thấy một hệ thống logic thống nhất. & Người dùng nhìn thấy một pipeline xử lý log thống nhất dù bên dưới có nhiều nodes và partitions. \\
-\textbf{Communication Cost} & Tối ưu chi phí truyền thông giữa các node. & \textit{Strict Watermark} chấp nhận cost cao hơn; \textit{Heuristic Watermark} giảm \textit{blocking coordination}. \\
-\textbf{Site Autonomy} & Cho phép mỗi site hoạt động cục bộ khi có thể. & \textit{Heuristic Workers} tự ước lượng watermark bằng \textit{DDSketch}. \\
-\bottomrule
-\end{longtable}
-
-Những khái niệm này là cơ sở để biện minh hai hướng thiết kế của dự án.
-
 \section{Bảng ký hiệu và biến của dự án (Glossary)}
 
 Bảng dưới đây tổng hợp các ký hiệu toán học và biến trạng thái được sử dụng xuyên suốt báo cáo, làm tham chiếu cho các công thức ở các mục biện minh thiết kế phía sau:
@@ -118,12 +94,38 @@ $\alpha$ & Sai số tương đối (relative error) của DDSketch. & 0.01 \\
 $\gamma$ & Hệ số log-scale bucket của DDSketch: $\gamma = (1+\alpha)/(1-\alpha)$. & $\approx 1.0202$ \\
 $\varepsilon$ & Ngân sách hao hụt (loss budget) của Heuristic: $\varepsilon = 1 - p$. & $\le 1\%$ \\
 $term$ & Nhiệm kỳ (Raft term) gắn vào Fencing Token để chống Split-brain. & số nguyên \\
-\texttt{IDLE\_TIMEOUT\_S} & Ngưỡng thời gian đánh dấu phân mảnh nhàn rỗi tường minh (\texttt{TEMPORARY\_IDLE}). & 2.0 s \\
+\texttt{IDLE\_TIMEOUT\_S} & Ngưỡng thời gian đánh dấu phân mảnh nhàn rỗi tường minh (\texttt{TEMPORARY\_IDLE}). & 30.0 s \\
 \texttt{HEARTBEAT\_TIMEOUT\_S} & Ngưỡng hết hạn nhịp tim để Coordinator xác nhận Worker lỗi. & 10 s \\
 \bottomrule
 \caption{Bảng ký hiệu và biến trạng thái của hệ thống Distributed Watermark Tracker.}
 \label{tab:glossary}
 \end{longtable}
+
+\section{Cơ sở lý thuyết Özsu và Valduriez}
+
+Theo Özsu và Valduriez, thiết kế một hệ cơ sở dữ liệu phân tán cần được đánh giá qua các khía cạnh sau:
+
+\begin{longtable}{p{0.25\textwidth} p{0.34\textwidth} p{0.33\textwidth}}
+\toprule
+\textbf{Khái niệm lý thuyết} & \textbf{Ý nghĩa trong Distributed Database} & \textbf{Ánh xạ trong dự án} \\
+\midrule
+\endhead
+\textbf{Fragmentation / Partitioning} & Chia dữ liệu thành các mảnh để mỗi \textit{site} xử lý một phần dữ liệu toàn cục. & \textit{Kafka partitions} chia luồng log vô hạn cho nhiều \textit{Workers}. \\
+\textbf{Allocation} & Quyết định mảnh dữ liệu được lưu và xử lý ở đâu. & \textit{Partitions} được gán cho \textit{Worker nodes}; khi lỗi có thể \textit{reassign}. \\
+\textbf{Replication} & Lưu nhiều bản sao dữ liệu hoặc metadata để tăng \textit{availability} và khả năng phục hồi. & \textit{Kafka replication}, \textit{Coordinator HA}, \textit{Aggregator HA}, \textit{checkpoints}, \textit{Tier 2/Tier 3 state}. \\
+\textbf{Distributed Processing} & Thực thi xử lý trên nhiều \textit{sites} và hợp nhất kết quả cục bộ. & \textit{Workers} xử lý \textit{local windows/local watermarks}; \textit{Coordinator/Aggregator} tính \textit{global watermark}. \\
+\textbf{Distributed Coordination} & Điều phối trạng thái hoặc metadata dùng chung giữa nhiều \textit{sites}. & \textit{Coordinator} tính \texttt{W\_global}; \textit{Aggregator} tính \texttt{W\_global\_h}. \\
+\textbf{Consistency Management} & Đảm bảo tính đúng khi nhiều node cùng cập nhật trạng thái logic. & \textit{Exactly-Once}, \textit{Fencing Token}, \textit{Failback State Machine}, \textit{Idempotent Output}. \\
+\textbf{Reliability and Recovery} & Phục hồi khi có lỗi node, storage hoặc communication. & \textit{Checkpoint}, \textit{Replay}, \textit{DLQ}, \textit{Tiered State Storage}, \textit{Disaster Recovery}. \\
+\textbf{Transparency} & Che giấu sự phân tán để người dùng nhìn thấy một hệ thống logic thống nhất. & Người dùng nhìn thấy một pipeline xử lý log thống nhất dù bên dưới có nhiều nodes và partitions. \\
+\textbf{Communication Cost} & Tối ưu chi phí truyền thông giữa các node. & \textit{Strict Watermark} chấp nhận cost cao hơn; \textit{Heuristic Watermark} giảm \textit{blocking coordination}. \\
+\textbf{Site Autonomy} & Cho phép mỗi site hoạt động cục bộ khi có thể. & \textit{Heuristic Workers} tự ước lượng watermark bằng \textit{DDSketch}. \\
+\bottomrule
+\end{longtable}
+
+Những khái niệm này là cơ sở để biện minh hai hướng thiết kế của dự án.
+
+
 
 \section{Biện minh thiết kế Strict Watermark}
 
@@ -157,9 +159,11 @@ Trong thiết kế hệ thống xử lý dữ liệu phân tán, việc ưu tiê
 Trong lý thuyết xử lý luồng phân tán, giải pháp \textit{Strict Watermark} tiêu chuẩn thường dễ bị tổn thương bởi hiện tượng Straggler (một phân mảnh bị trễ hoặc dừng luồng dữ liệu nạp khiến watermark toàn cục bị nghẽn). Tuy nhiên, thiết kế hệ thống của chúng tôi đã chủ động giải quyết bài toán Straggler trong chế độ Strict bằng hai cơ chế phối hợp:
 \begin{itemize}
     \item \textbf{Cơ chế Bỏ qua phân mảnh nhàn rỗi (Idleness Bypass / Bypass Idle Partitions)}: Khi một phân mảnh tạm thời không phát sinh dữ liệu mới vượt quá cấu hình giới hạn thời gian (\texttt{IDLE\_TIMEOUT\_S}), Worker sẽ tự động đánh dấu phân mảnh đó là nhàn rỗi (\texttt{TEMPORARY\_IDLE}) và báo cáo trong heartbeat. Coordinator Leader khi nhận được nhịp tim sẽ tự động loại trừ phân mảnh nhàn rỗi này ra khỏi hàm tối thiểu toàn cục:
+    {\large
     \begin{equation}
-        W_{global} = \min_{P_k \notin \text{Idle}} LW_i(P_k)
+        \boxed{W_{global} = \min_{P_k \notin \text{Idle}} LW_i(P_k)}
     \end{equation}
+    }
     Điều này cho phép dòng chảy thời gian của toàn cụm tiếp tục tịnh tiến, giải phóng trạng thái cửa sổ của các phân mảnh đang hoạt động bình thường mà không bị nghẽn bởi phân mảnh nhàn rỗi. Khi phân mảnh nhàn rỗi có log mới nạp vào, nó sẽ tự động được đưa trở lại danh sách tính toán watermark toàn cục.
     \item \textbf{Tái phân bổ động dựa trên hết hạn nhịp tim (Heartbeat Timeout Failover)}: Nếu một Worker bị sập vật lý hoặc bị phân mảnh mạng nghiêm trọng (trở thành trạm chậm vĩnh viễn), Coordinator Leader sẽ phát hiện sau khi hết hạn nhịp tim (\texttt{HEARTBEAT\_TIMEOUT\_S} là 10 giây). Hệ thống sẽ kích hoạt giao thức tái phân bổ động, thu hồi quyền sở hữu phân mảnh của node lỗi, tăng \textit{fencing term} logic để phong tỏa các lệnh cũ, và phân phối đều các phân mảnh bị ảnh hưởng cho các Worker còn sống gánh hộ. Worker mới nạp trạng thái từ checkpoint Tier-2 để tiếp tục tiêu thụ dữ liệu, giải phóng nghẽn dòng chảy watermark.
 \end{itemize}
@@ -214,17 +218,19 @@ Chuỗi bàn giao failback 5 bước có kiểm soát khi Worker cũ hồi phụ
 
 \textit{Strict Watermark} cần một quyết định toàn cục: khi nào một window an toàn để đóng. Mỗi Worker chỉ biết tiến độ cục bộ. Coordinator hợp nhất các \textit{local watermarks}:
 
+{\large
 \begin{equation}
-    W_{global}(t) = \min_{\forall P_k \in \text{Active}} LW_i(P_k)
+    \boxed{W_{global}(t) = \min_{\forall P_k \in \text{Active}} LW_i(P_k)}
 \end{equation}
+}
 
 Đây là dạng \textit{distributed metadata coordination}. Theo Özsu và Valduriez, khi tính đúng phụ thuộc vào trạng thái của nhiều sites, hệ phân tán cần một cơ chế điều phối metadata toàn cục.
 
 \paragraph{Lựa chọn Cơ chế Đồng thuận (Consensus Selection):}
 Để bảo đảm tính nhất quán nghiêm ngặt (Strong Consistency) và chống lỗi phân mảnh mạng (Split-Brain), hệ thống sử dụng hai phương thức đồng thuận khác nhau tùy theo mô hình xử lý:
 \begin{itemize}
-    \item \textbf{Strict Coordinator (Raft Consensus)}: Được triển khai thông qua cơ chế đồng thuận Raft phân tán. Một nhóm 3 nodes Coordinator chạy thuật toán đồng thuận Raft để bầu chọn Leader và sao chép trạng thái (Leader Election \& State Replication). Mọi thay đổi về phân bổ phân mảnh hay cập nhật watermark toàn cục đều được lưu trữ dưới dạng log đồng thuận được xác nhận bởi đa số (quorum acks). Các Worker sử dụng \textit{Fencing Token/Term} từ Raft để từ chối các chỉ thị lỗi thời từ một Leader cũ bị cô lập mạng.
-    \item \textbf{Heuristic Aggregator (ZooKeeper Lock HA)}: Triển khai thông qua cơ chế dự phòng Active-Standby được điều phối qua khóa phân tán của ZooKeeper. Cách tiếp cận này giúp giảm đáng kể chi phí truyền thông (Communication Cost), tăng hiệu năng và hạ thấp độ trễ khi hệ thống không yêu cầu cam kết nhất quán nghiêm ngặt tức thời mà ưu tiên tính tự trị cục bộ (Site Autonomy).
+    \item \textbf{Strict Coordinator (Raft/ZK HA)}: Được triển khai thông qua cụm 3 Coordinator chịu lỗi. Hệ thống hỗ trợ bầu chọn Leader qua (1) thuật toán đồng thuận Raft nhúng (Embedded Raft) với nhân bản log và bầu cử theo nhiệm kỳ, hoặc (2) ZooKeeper Leader Election (khi cấu hình \texttt{ZK\_ENSEMBLE}) tranh chấp khóa phân tán tại \texttt{/csdlpt/coordinator-lock} và ghi Leader ID vào node tạm \texttt{/csdlpt/coordinator-leader}. Các chỉ thị điều phối kèm cặp \texttt{(term, command\_id)} làm token fencing ngăn chặn split-brain khi phân mảnh mạng.
+    \item \textbf{Heuristic Aggregator (ZooKeeper/File Lock HA)}: Triển khai thông qua cơ chế dự phòng nóng (Active-Standby) được điều phối qua khóa phân tán của ZooKeeper tại \texttt{/csdlpt/aggregator-lock} hoặc File Lock dùng chung (\texttt{FileLockLeader} dùng \texttt{fcntl}/\texttt{msvcrt}). Active ghi file nhịp tim mỗi 1s. Nếu nhịp tim mất hoặc quá hạn ($>1.5$\,s), Standby tự động chiếm khóa, khôi phục trạng thái từ RocksDB/JSON và lên Active ($RTO\le 2$\,s), tối ưu hiệu năng và tính tự trị cục bộ (Site Autonomy).
 \end{itemize}
 
 \begin{longtable}{p{0.38\textwidth} p{0.52\textwidth}}
@@ -309,9 +315,11 @@ Output & Transactional hoặc idempotent sink & Tránh duplicate output. \\
 
 Invariant cốt lõi là:
 
+{\large
 \begin{equation*}
-    \forall\, t,\ \forall\, P_k : \quad \big|\,\mathrm{Owner}(P_k,\, t)\,\big| = 1
+    \boxed{\forall\, t,\ \forall\, P_k : \quad \big|\,\mathrm{Owner}(P_k,\, t)\,\big| = 1}
 \end{equation*}
+}
 \begin{center}
     \small\textit{(Bất biến: tại mọi thời điểm, mỗi phân mảnh có đúng một chủ sở hữu xử lý hợp lệ.)}
 \end{center}
@@ -430,11 +438,17 @@ Lựa chọn DDSketch hợp lý vì:
 
 Hệ thống ước lượng:
 
-\begin{align*}
-    \ell    &= T_{arrival} - T_{event}, \\
-    L_{eff} &= Q_p(\{\ell\}), \\
-    W_h     &= T_{event\_max} - L_{eff}.
-\end{align*}
+{\large
+\begin{equation*}
+    \boxed{\displaystyle
+    \begin{aligned}
+        \ell    &= T_{arrival} - T_{event}, \\
+        L_{eff} &= Q_p(\{\ell\}), \\
+        W_h     &= T_{event\_max} - L_{eff}.
+    \end{aligned}
+    }
+\end{equation*}
+}
 
 Đây là thiết kế \textit{approximate distributed metadata}: giảm coordination cost nhưng vẫn có cơ sở thống kê để quyết định event-time progress.
 
@@ -442,22 +456,25 @@ Hệ thống ước lượng:
 
 \textit{Heuristic Watermark} dùng Aggregator nhẹ hơn so với Strict Coordinator. Aggregator theo dõi heuristic watermarks theo partition và tính:
 
+{\large
 \begin{equation}
-    W_{global\_h}(t) = \min_{\forall P_k \in \text{Active}} W_{h,i}^{P_k}(t)
+    \boxed{W_{global\_h}(t) = \min_{\forall P_k \in \text{Active}} W_{h,i}^{P_k}(t)}
 \end{equation}
+}
 
 Cơ chế này vẫn có một điểm hợp nhất toàn cục, nhưng nhẹ hơn:
 
 \begin{itemize}
     \item không yêu cầu upstream punctuation,
     \item không cần strict failback state machine cho mỗi quyết định watermark,
-    \item có thể chạy \textit{Active-Standby} bằng ZooKeeper lock,
+    \item có thể chạy \textit{Active-Standby} qua khóa phân tán ZooKeeper hoặc File Lock dùng chung,
+    \item tự động phục hồi và tiếp quản trạng thái (failover promotion) từ RocksDB/JSON,
     \item tập trung vào global progress aggregation thay vì chứng minh strict correctness.
 \end{itemize}
 
 Theo Özsu và Valduriez, khi ứng dụng cho phép correction, giảm \textit{blocking coordination} để giảm latency là một trade-off hợp lý.
 
-Sơ đồ điều phối Heuristic: Aggregator (Active-Standby qua khóa ZooKeeper) gom \texttt{W\_h} từ các Worker tự trị mà không chặn dòng xử lý:
+Sơ đồ điều phối Heuristic: Aggregator (Active-Standby qua khóa ZooKeeper hoặc File Lock dùng chung) gom \texttt{W\_h} từ các Worker tự trị mà không chặn dòng xử lý:
 \begin{figure}[H]
     \centering
     \includegraphics[width=0.9\textwidth,height=7.0cm,keepaspectratio]{Heuristic Aggregator.pdf}
@@ -521,9 +538,11 @@ Thiết kế dùng:
 
 Hệ phân tán thường gặp \textit{clock skew}. \textit{Heuristic Watermark} xử lý rõ \textit{negative lag}:
 
+{\large
 \begin{equation}
-    \ell = T_{arrival} - T_{event}
+    \boxed{\ell = T_{arrival} - T_{event}}
 \end{equation}
+}
 
 Nếu \texttt{lag < 0}, hệ thống nhận diện clock skew và tránh làm nhiễm DDSketch. Điều này phù hợp với lý thuyết hệ phân tán vì không thể giả định đồng hồ vật lý giữa các sites luôn đồng bộ tuyệt đối.
 

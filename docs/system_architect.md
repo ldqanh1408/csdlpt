@@ -479,7 +479,7 @@ flowchart TB
 
 ```mermaid
 flowchart TB
-    subgraph compose["deploy/docker-compose.yml — profiles: strict / heuristic / hybrid"]
+    subgraph compose["deploy/docker-compose.yml — profiles: strict / heuristic"]
         direction TB
         subgraph vols["Volumes"]
             sv["./checkpoint/shared -> /data (4 workers DUNG CHUNG)"]

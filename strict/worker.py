@@ -133,10 +133,10 @@ class StrictWorker:
             self.ensure_partition(pid)
 
     def ensure_partition(self, pid: int) -> None:
-        if pid in self.engines:
+        if pid in list(self.engines):
             return
         with self._dynamic_partition_lock:
-            if pid in self.engines:
+            if pid in list(self.engines):
                 return
             from strict.output_manager import OutputManager
             from common.rocks_store import RocksStore
@@ -208,9 +208,12 @@ class StrictWorker:
 
     def on_punctuation(self, token: PunctuationToken) -> None:
         pid = token.partition_id
-        if pid in self.engines:
-            with self._partition_locks[pid]:
-                self.engines[pid].on_punctuation(token)
+        lock = self._partition_locks.get(pid)
+        if lock is not None:
+            with lock:
+                eng = self.engines.get(pid)
+                if eng is not None:
+                    eng.on_punctuation(token)
 
     # ---- Idleness detection ----
     def is_idle(self, partition_id: int) -> bool:
@@ -224,11 +227,16 @@ class StrictWorker:
         return [pid for pid in self.partition_ids if self.is_idle(pid)]
 
     def process(self, event: LogEvent, partition_id: int) -> float | None:
-        if partition_id not in self.engines:
+        if partition_id not in list(self.engines):
             self.ensure_partition(partition_id)
 
-        with self._partition_locks[partition_id]:
-            buf = self.buffers[partition_id]
+        lock = self._partition_locks.get(partition_id)
+        if lock is None:
+            return None
+        with lock:
+            buf = self.buffers.get(partition_id)
+            if buf is None:
+                return None
 
             # Backpressure should pause upstream polling, but strict mode must still
             # accept any records that were already fetched from Kafka.
@@ -236,7 +244,7 @@ class StrictWorker:
                 if len(buf) < self.resume_threshold:
                     self._backpressure_active[partition_id] = False
             if len(buf) >= self.max_queue:
-                if not self._backpressure_active[partition_id]:
+                if not self._backpressure_active.get(partition_id, False):
                     self._backpressure_active[partition_id] = True
                     self.backpressure_pause_count += 1
 
@@ -249,7 +257,7 @@ class StrictWorker:
 
             # Check backpressure threshold after push
             if len(buf) >= self.max_queue:
-                if not self._backpressure_active[partition_id]:
+                if not self._backpressure_active.get(partition_id, False):
                     self._backpressure_active[partition_id] = True
                     self.backpressure_pause_count += 1
 
@@ -267,45 +275,61 @@ class StrictWorker:
             return result
 
     def _process_event(self, event: LogEvent, partition_id: int) -> float | None:
-        with self._partition_locks[partition_id]:
+        lock = self._partition_locks.get(partition_id)
+        if lock is None:
+            # Partition was reassigned/removed (e.g. by sync_active_partitions)
+            # between the caller's existence check and here. Skip silently.
+            return None
+        with lock:
+            engine = self.engines.get(partition_id)
+            buf = self.buffers.get(partition_id)
+            if engine is None or buf is None:
+                return None
             self.max_event_times[partition_id] = max(
-                self.max_event_times[partition_id], event.event_time
+                self.max_event_times.get(partition_id, float("-inf")),
+                event.event_time,
             )
-            return self.engines[partition_id].process(
-                event, len(self.buffers[partition_id])
-            )
+            return engine.process(event, len(buf))
 
     def buffer_size(self, partition_id: int) -> int:
-        if partition_id not in self.buffers:
+        lock = self._partition_locks.get(partition_id)
+        if lock is None:
             return 0
-        with self._partition_locks[partition_id]:
-            return len(self.buffers[partition_id])
+        with lock:
+            buf = self.buffers.get(partition_id)
+            return len(buf) if buf is not None else 0
 
     def drain_ready(self, partition_id: int, batch_size: int = 200) -> int:
-        if partition_id not in self.buffers:
+        lock = self._partition_locks.get(partition_id)
+        if lock is None:
             return 0
-        with self._partition_locks[partition_id]:
-            batch = self.buffers[partition_id].pop_all_ready(batch_size=batch_size)
+        with lock:
+            buf = self.buffers.get(partition_id)
+            if buf is None:
+                return 0
+            batch = buf.pop_all_ready(batch_size=batch_size)
             for event in batch:
                 self._process_event(event, partition_id)
             if self._backpressure_active.get(partition_id, False):
-                if len(self.buffers[partition_id]) < self.resume_threshold:
+                if len(buf) < self.resume_threshold:
                     self._backpressure_active[partition_id] = False
             return len(batch)
 
     def heartbeat(self) -> WorkerHeartbeat:
         partitions = {}
-        for pid, eng in self.engines.items():
-            with self._partition_locks[pid]:
-                partitions[pid] = eng.local_watermark
+        for pid, eng in list(self.engines.items()):
+            lock = self._partition_locks.get(pid)
+            if lock is not None:
+                with lock:
+                    partitions[pid] = eng.local_watermark
         return WorkerHeartbeat(
             worker_id=self.worker_id,
             partitions=partitions,
-            max_event_time=max(self.max_event_times.values(), default=0.0),
+            max_event_time=max(list(self.max_event_times.values()), default=0.0),
             timestamp=time.time(),
             fencing_token=self.known_term,
             idle_partitions=self.idle_partitions(),
-            backpressure_partitions=dict(self._backpressure_active),
+            backpressure_partitions=dict(list(self._backpressure_active.items())),
         )
 
     def update_global_watermark(
@@ -313,10 +337,12 @@ class StrictWorker:
     ) -> None:
         if not self.validate_command(term, command_id):
             return
-        for pid, eng in self.engines.items():
-            with self._partition_locks[pid]:
-                eng.watermark = max(eng.watermark, W_global)
-                eng.raft_term = max(eng.raft_term, term)
+        for pid, eng in list(self.engines.items()):
+            lock = self._partition_locks.get(pid)
+            if lock is not None:
+                with lock:
+                    eng.watermark = max(eng.watermark, W_global)
+                    eng.raft_term = max(eng.raft_term, term)
 
     def summary(self) -> dict:
         total_recv = 0
@@ -327,9 +353,12 @@ class StrictWorker:
         partitions = {}
         proc_p50_vals, proc_p95_vals, proc_p99_vals = [], [], []
         poll_p95_vals, dedup_p95_vals, state_p95_vals = [], [], []
-        for pid, eng in self.engines.items():
+        for pid, eng in list(self.engines.items()):
             eng.active_partitions = len(self.engines)
-            with self._partition_locks[pid]:
+            lock = self._partition_locks.get(pid)
+            if lock is None:
+                continue
+            with lock:
                 s = eng.summary()
                 m = eng.metrics
             total_recv += m.total_received
@@ -391,7 +420,7 @@ class StrictWorker:
             "data_completeness_pct": round(completeness, 3),
             "late_arrival_rate_pct": round(late_rate, 3),
             "non_monotonic_punctuation": sum(
-                eng.metrics.non_monotonic_punctuation for eng in self.engines.values()
+                eng.metrics.non_monotonic_punctuation for eng in list(self.engines.values())
             ),
             "proc_latency_p50_us": _avg(proc_p50_vals),
             "proc_latency_p95_us": _avg(proc_p95_vals),
@@ -410,15 +439,17 @@ class StrictWorker:
 
     def broadcast(self) -> dict:
         partitions = {}
-        for pid, eng in self.engines.items():
-            with self._partition_locks[pid]:
-                partitions[pid] = {
-                    "watermark": eng.watermark,
-                    "local_watermark": eng.local_watermark,
-                    "open_windows": len(eng.open_windows),
-                    "closed_windows": len(eng.closed_windows),
-                    "data_completeness_pct": eng.metrics.data_completeness(),
-                }
+        for pid, eng in list(self.engines.items()):
+            lock = self._partition_locks.get(pid)
+            if lock is not None:
+                with lock:
+                    partitions[pid] = {
+                        "watermark": eng.watermark,
+                        "local_watermark": eng.local_watermark,
+                        "open_windows": len(eng.open_windows),
+                        "closed_windows": len(eng.closed_windows),
+                        "data_completeness_pct": eng.metrics.data_completeness(),
+                    }
         return {
             "worker_id": self.worker_id,
             "mode": "strict",
@@ -426,10 +457,13 @@ class StrictWorker:
         }
 
     def flush_all(self) -> None:
-        for pid, buf in self.buffers.items():
-            with self._partition_locks[pid]:
-                for event in buf.flush_all():
-                    self._process_event(event, pid)
-                eng = self.engines[pid]
-                eng.flush()
-                eng.checkpoint()
+        for pid, buf in list(self.buffers.items()):
+            lock = self._partition_locks.get(pid)
+            if lock is not None:
+                with lock:
+                    for event in buf.flush_all():
+                        self._process_event(event, pid)
+                    eng = self.engines.get(pid)
+                    if eng is not None:
+                        eng.flush()
+                        eng.checkpoint()

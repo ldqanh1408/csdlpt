@@ -1,7 +1,7 @@
 """Unified entrypoint for the refactor stream processing system.
 
 Roles: coordinator | aggregator | worker | ingestor
-Modes:  strict | heuristic | hybrid
+Modes:  strict | heuristic
 
 Usage:
   python3 -m refactor.run --role coordinator --mode strict
@@ -196,7 +196,7 @@ def parse_args():
     p.add_argument("--role", required=True,
                    choices=["coordinator", "aggregator", "worker", "ingestor"])
     p.add_argument("--mode", default="strict",
-                   choices=["strict", "heuristic", "hybrid"])
+                   choices=["strict", "heuristic"])
     p.add_argument("--port", type=int, default=8000)
     p.add_argument("--node-id", default=None)
     p.add_argument("--partitions", default="0,1,2")
@@ -729,7 +729,12 @@ def run_coordinator(args):
             idle_partitions=list(data.get("idle_partitions", [])),
         )
         old_wg = coord.W_global
-        coord.receive_heartbeat(hb)
+        result = coord.receive_heartbeat(hb)
+        # ── Follower guard: RaftCoordinator.receive_heartbeat returns False
+        #     when this node is not the leader. StrictCoordinator always
+        #     returns None (legacy), so only check when Raft is active. ──
+        if hasattr(coord, 'role') and result is not True:
+            return  # silently drop; health_check_loop redirects caller
         _coord_hb_count[0] += 1
         now = time.time()
 
@@ -869,15 +874,9 @@ def run_coordinator(args):
                     idle_partitions=list(request.idle_partitions),
                     backpressure_partitions={int(k): bool(v) for k, v in request.backpressure_partitions.items()} if request.backpressure_partitions else {},
                 )
-                self.coord.receive_heartbeat(hb)
-                _coord_hb_count[0] += 1
-                if self.fm is not None:
-                    kafka_offsets = {int(k): int(v) for k, v in request.kafka_offsets.items()} if request.kafka_offsets else None
-                    self.fm.heartbeat(hb.worker_id, list(hb.partitions.keys()), offsets=kafka_offsets)
-                    failed = self.fm.detect_failures()
-                    if failed:
-                        self.fm.reassign_failed_partitions()
-                # ── Fix: refresh cached_state so /state returns live data ──
+                result = self.coord.receive_heartbeat(hb)
+                # ── Refresh cached_state even on follower rejection so /state
+                #     always returns accurate raft_role + raft_leader ──
                 now = time.time()
                 if now - _coord_last_cache_update[0] >= 1.0:
                     try:
@@ -889,6 +888,16 @@ def run_coordinator(args):
                         _coord_last_cache_update[0] = now
                     except Exception:
                         pass
+                # ── Follower guard: RaftCoordinator returns False when not leader ──
+                if hasattr(self.coord, 'role') and result is not True:
+                    return csdlpt_pb2.EmptyReply(ok=False)
+                _coord_hb_count[0] += 1
+                if self.fm is not None:
+                    kafka_offsets = {int(k): int(v) for k, v in request.kafka_offsets.items()} if request.kafka_offsets else None
+                    self.fm.heartbeat(hb.worker_id, list(hb.partitions.keys()), offsets=kafka_offsets)
+                    failed = self.fm.detect_failures()
+                    if failed:
+                        self.fm.reassign_failed_partitions()
                 return csdlpt_pb2.EmptyReply(ok=True)
 
             def WorkerPing(self, request, context):
@@ -988,8 +997,34 @@ def run_coordinator(args):
     # Failover monitoring loop: proactively detect worker failures and trigger rebalancing
     def failover_monitoring_loop():
         from common.types import WorkerStatus
+        
+        last_role = None
+        
         while not stop.is_set():
             time.sleep(1.0)
+            
+            # Follower guard: only the leader coordinator should perform failover detection and actions
+            is_leader = True
+            if hasattr(coord, 'role'):
+                is_leader = (coord.role.value == 'leader')
+                
+            if not is_leader:
+                last_role = None
+                continue
+                
+            # Transitioned to leader: reset worker heartbeat timestamps to avoid false timeouts
+            now = time.time()
+            if last_role != 'leader':
+                print(f"[coordinator] Transitioned to LEADER, resetting worker heartbeat timestamps.", file=sys.stderr, flush=True)
+                last_role = 'leader'
+                if fm is not None:
+                    with fm._lock:
+                        for wid, wr in fm._workers.items():
+                            wr.last_heartbeat = now
+                            if wr.status == WorkerStatus.FAILED:
+                                wr.status = WorkerStatus.ACTIVE
+                                wr.failure_count = 0
+
             if fm is not None:
                 try:
                     # 1. Proactive failover detection
@@ -1024,6 +1059,8 @@ def run_coordinator(args):
     threading.Thread(target=failover_monitoring_loop, daemon=True).start()
 
     # §11 Proactive 200ms broadcast loop: push W_global + partition state
+    # Also refreshes cached_state so /state always returns live Raft info
+    # (role, leader, term) even for followers that reject heartbeats.
     def proactive_broadcast_loop():
         while not stop.is_set():
             time.sleep(0.2)
@@ -1031,6 +1068,16 @@ def run_coordinator(args):
                 broadcast = coord.broadcast()
                 mon_mgr.update_from_coordinator(broadcast)
                 state["last_broadcast"] = broadcast
+                # Keep cached_state valid so /state endpoint returns live info
+                # even when no heartbeat is being accepted (follower mode)
+                try:
+                    _cached = dict(broadcast)
+                    if fm is not None:
+                        _cached["failover"] = fm.summary()
+                    _cached["timestamp"] = time.time()
+                    state["cached_state"] = _cached
+                except Exception:
+                    pass
     threading.Thread(target=proactive_broadcast_loop, daemon=True).start()
 
     # Monitoring push loop
@@ -1046,10 +1093,7 @@ def run_coordinator(args):
     if kafka_broker_url or args.enable_kafka:
         def ingestor_heartbeat_consumer_loop():
             time.sleep(2.0)
-            if os.environ.get("KAFKA_REAL", "0") == "1":
-                from common.kafka_real import KafkaConsumer
-            else:
-                from common.kafka_sim import KafkaConsumer
+            from common.kafka_real import KafkaConsumer
             try:
                 consumer = KafkaConsumer(
                     broker_url=kafka_broker_url,
@@ -1092,15 +1136,6 @@ def run_coordinator(args):
     print(f"[coordinator] listening on :{port}, W_global={coord.W_global}")
     
     enable_kafka = args.enable_kafka or os.environ.get("KAFKA_ENABLE", "false").lower() in ("1", "true", "yes", "on")
-    # Kafka broker — start embedded when --enable-kafka and not real Kafka
-    kafka_broker = None
-    if enable_kafka and not os.environ.get("KAFKA_ENABLE_REAL", "false").lower() in ("1", "true", "yes", "on"):
-        from common.kafka_sim import KafkaBroker
-        kafka_port = int(os.environ.get("KAFKA_PORT", str(args.kafka_port)))
-        kafka_broker = KafkaBroker()
-        kafka_broker.start_http_server(kafka_port)
-        state["kafka_broker"] = kafka_broker
-        print(f"[coordinator] kafka broker on :{kafka_port}")
 
     _wait_shutdown(stop, srv, state)
 
@@ -1236,10 +1271,41 @@ def run_worker(args):
     node_id = args.node_id or os.environ.get("NODE_ID", "0")
     parts = [int(x.strip()) for x in os.environ.get("PARTITIONS", args.partitions).split(",") if x.strip()]
 
+    # Wait for at least one coordinator to be healthy in strict mode
+    if mode == "strict":
+        coord_peers_str = os.environ.get("COORDINATOR_PEERS", "")
+        if coord_peers_str:
+            coord_peers = [p.strip() for p in coord_peers_str.split(",") if p.strip()]
+        else:
+            coord_url = os.environ.get("COORDINATOR_URL", "")
+            if coord_url:
+                import urllib.parse
+                parsed = urllib.parse.urlparse(coord_url)
+                coord_peers = [parsed.netloc] if parsed.netloc else []
+            else:
+                coord_peers = []
+
+        if coord_peers:
+            print(f"[worker:{node_id}] Waiting for at least one coordinator to be healthy: {coord_peers}", flush=True)
+            import urllib.request
+            while True:
+                any_healthy = False
+                for peer in coord_peers:
+                    try:
+                        req = urllib.request.Request(f"http://{peer}/health")
+                        with urllib.request.urlopen(req, timeout=1) as resp:
+                            if resp.status == 200:
+                                any_healthy = True
+                                break
+                    except Exception:
+                        pass
+                if any_healthy:
+                    print(f"[worker:{node_id}] Coordinator is healthy. Starting worker.", flush=True)
+                    break
+                time.sleep(1.0)
+
     if mode == "strict":
         _run_strict_worker(node_id, parts, args)
-    elif mode == "hybrid":
-        _run_hybrid_worker(node_id, parts, args)
     else:
         _run_heuristic_worker(node_id, parts, args)
 
@@ -1299,11 +1365,8 @@ def _run_strict_worker(node_id, parts, args):
     kafka_broker_url = args.kafka_broker_url or os.environ.get("KAFKA_BROKER_URL", "")
     enable_kafka = args.enable_kafka or os.environ.get("KAFKA_ENABLE", "false").lower() in ("1", "true", "yes", "on")
     if enable_kafka and kafka_broker_url:
-        if os.environ.get("KAFKA_ENABLE_REAL", "false").lower() in ("1", "true", "yes", "on"):
-            from common.kafka_real import KafkaConsumer, KafkaProducer, ensure_topics
-            ensure_topics(kafka_broker_url, ["events", "strict_results", "audit_results"], num_partitions=12)
-        else:
-            from common.kafka_sim import KafkaConsumer, KafkaProducer
+        from common.kafka_real import KafkaConsumer, KafkaProducer, ensure_topics
+        ensure_topics(kafka_broker_url, ["events", "strict_results", "audit_results"], num_partitions=12)
         kafka_consumer = KafkaConsumer(broker_url=kafka_broker_url,
                                        group_id="strict-workers",
                                        client_id=f"strict-{node_id}")
@@ -1391,7 +1454,7 @@ def _run_strict_worker(node_id, parts, args):
     def drain_loop():
         while not stop.is_set():
             time.sleep(strict_drain_sleep)
-            for pid in worker.buffers:
+            for pid in list(worker.buffers):
                 bp.report_buffer(node_id, pid, worker.buffer_size(pid))
                 worker.drain_ready(pid, batch_size=strict_drain_batch)
     threading.Thread(target=drain_loop, daemon=True).start()
@@ -1468,8 +1531,8 @@ def _run_strict_worker(node_id, parts, args):
                     # Progress log every 5s
                     if now_t - last_progress_log >= 5.0 and poll_total[0] > 0:
                         s = worker.summary()
-                        buf_info = " ".join(f"p{p}={len(b)}q" for p, b in worker.buffers.items())
-                        wm_info = " ".join(f"p{p}:W={eng.watermark:.1f}" for p, eng in worker.engines.items())
+                        buf_info = " ".join(f"p{p}={len(b)}q" for p, b in list(worker.buffers.items()))
+                        wm_info = " ".join(f"p{p}:W={eng.watermark:.1f}" for p, eng in list(worker.engines.items()))
                         print(f"[worker-strict:{node_id}] "
                               f"received={s['total_received']} "
                               f"on_time={s['on_time']} "
@@ -1504,23 +1567,64 @@ def _run_strict_worker(node_id, parts, args):
     coord_state = {"url": coordinator_url, "failures": 0}
 
     def coordinator_health_check_loop():
+        """Leader-aware health check: queries /state to discover the Raft leader.
+
+        On each tick, fetches /state from the current coordinator. If the
+        coordinator reports it is NOT the leader but knows who the leader is,
+        we redirect. On failure, we probe peers for the leader instead of
+        blind round-robin — this prevents heartbeat spam to followers.
+        """
         if not coord_state["url"]:
             return
         import urllib.request
         while not stop.is_set():
             time.sleep(5.0)
             try:
-                req = urllib.request.Request(coord_state["url"] + "/health")
-                urllib.request.urlopen(req, timeout=2)
+                req = urllib.request.Request(coord_state["url"] + "/state")
+                with urllib.request.urlopen(req, timeout=2) as resp:
+                    state_data = json.loads(resp.read())
                 coord_state["failures"] = 0
+
+                # ── Leader-aware redirect ──
+                raft_leader = state_data.get("raft_leader", "")
+                raft_role = state_data.get("raft_role", "")
+                if raft_role != "leader" and raft_leader:
+                    leader_url = f"http://{raft_leader}"
+                    if coord_state["url"] != leader_url and any(
+                        peer in raft_leader for peer in coordinator_peers
+                    ):
+                        old_url = coord_state["url"]
+                        coord_state["url"] = leader_url
+                        print(f"[worker-strict:{node_id}] health: leader redirect {old_url} -> {leader_url} (role={raft_role})",
+                              file=sys.stderr)
             except Exception:
                 coord_state["failures"] += 1
                 if coord_state["failures"] >= 3 and coordinator_peers:
                     old_url = coord_state["url"]
-                    coord_state["url"] = f"http://{coordinator_peers[coord_state['failures'] % len(coordinator_peers)]}"
-                    print(f"[worker-strict:{node_id}] coordinator switched: {old_url} -> {coord_state['url']} (failures={coord_state['failures']})",
-                          file=sys.stderr)
-                    coord_state["failures"] = 0
+                    # Probe peers for the Raft leader instead of blind round-robin
+                    found_leader = False
+                    for peer in coordinator_peers:
+                        try:
+                            peer_url = f"http://{peer}"
+                            req = urllib.request.Request(peer_url + "/state")
+                            with urllib.request.urlopen(req, timeout=1) as resp:
+                                peer_state = json.loads(resp.read())
+                            if peer_state.get("raft_role") == "leader":
+                                coord_state["url"] = peer_url
+                                coord_state["failures"] = 0
+                                found_leader = True
+                                print(f"[worker-strict:{node_id}] health: switched to leader {old_url} -> {peer_url}",
+                                      file=sys.stderr)
+                                break
+                        except Exception:
+                            continue
+                    if not found_leader:
+                        # No leader found — fall back to round-robin so worker can
+                        # keep trying until an election completes
+                        coord_state["url"] = f"http://{coordinator_peers[coord_state['failures'] % len(coordinator_peers)]}"
+                        print(f"[worker-strict:{node_id}] health: fallback (no leader) {old_url} -> {coord_state['url']}",
+                              file=sys.stderr)
+                        coord_state["failures"] = 0
     threading.Thread(target=coordinator_health_check_loop, daemon=True).start()
 
     # Monitoring push loop
@@ -1530,11 +1634,49 @@ def _run_strict_worker(node_id, parts, args):
             _update_monitoring_from_component(mon_mgr, state)
     threading.Thread(target=monitoring_loop, daemon=True).start()
 
-    # ── Fix 1: Heartbeat loop — send LW to coordinator every 200ms ──
+    # ── Fix 1: Heartbeat loop — send LW to leader every 200ms ──
+    # Leader-aware: always sends via coord_state["url"], which
+    # coordinator_health_check_loop keeps pointed at the Raft leader.
+    # On 3 consecutive failures (600ms), triggers immediate leader
+    # re-discovery so we don't spam a dead coordinator for 15 seconds.
     def heartbeat_loop():
         import dataclasses
         import urllib.request
         last_ping_time = 0.0
+        _hb_failures = 0  # consecutive heartbeat send failures
+
+        def _rediscover_leader(old_url):
+            """Probe all coordinator peers for the current Raft leader."""
+            if not coordinator_peers:
+                return old_url
+            for peer in coordinator_peers:
+                try:
+                    peer_url = f"http://{peer}"
+                    req = urllib.request.Request(peer_url + "/state")
+                    with urllib.request.urlopen(req, timeout=1) as resp:
+                        peer_state = json.loads(resp.read())
+                    if peer_state.get("raft_role") == "leader":
+                        print(f"[worker-strict:{node_id}] hb: fast-redirect to leader {old_url} -> {peer_url}",
+                              file=sys.stderr)
+                        return peer_url
+                except Exception:
+                    continue
+            # No leader found — try next peer round-robin as last resort
+            if coordinator_peers:
+                old_host = old_url.replace("http://", "").replace("https://", "")
+                idx = -1
+                for i, peer in enumerate(coordinator_peers):
+                    if peer in old_host or old_host in peer:
+                        idx = i
+                        break
+                next_idx = (idx + 1) % len(coordinator_peers)
+                next_url = f"http://{coordinator_peers[next_idx]}"
+                if next_url != old_url:
+                    print(f"[worker-strict:{node_id}] hb: fallback (no leader found) {old_url} -> {next_url}",
+                          file=sys.stderr)
+                    return next_url
+            return old_url
+
         while not stop.is_set():
             time.sleep(0.2)
             now = time.time()
@@ -1548,16 +1690,6 @@ def _run_strict_worker(node_id, parts, args):
                             ping_sent = True
                 except Exception:
                     pass
-                if not ping_sent and coordinator_peers:
-                    for peer in coordinator_peers:
-                        try:
-                            stub = get_grpc_stub(peer)
-                            if stub is not None:
-                                stub.WorkerPing(csdlpt_pb2.WorkerPingMsg(worker_id=node_id, timestamp=now), timeout=1)
-                                ping_sent = True
-                                break
-                        except Exception:
-                            continue
                 if ping_sent:
                     last_ping_time = now
 
@@ -1582,30 +1714,24 @@ def _run_strict_worker(node_id, parts, args):
                                 backpressure_partitions=hb.backpressure_partitions,
                                 kafka_offsets=worker_kafka_offsets,
                             )
-                            stub.WorkerHeartbeat(msg, timeout=2)
-                            sent = True
-                    except Exception as e:
-                        print(f"[worker-strict:{node_id}] grpc heartbeat failed: {e}", file=sys.stderr)
-                    if not sent and coordinator_peers:
-                        for peer in coordinator_peers:
-                            try:
-                                stub = get_grpc_stub(peer)
-                                if stub is not None:
-                                    msg = csdlpt_pb2.WorkerHeartbeatMsg(
-                                        worker_id=hb.worker_id,
-                                        partitions=hb.partitions,
-                                        max_event_time=hb.max_event_time,
-                                        timestamp=hb.timestamp,
-                                        fencing_token=hb.fencing_token,
-                                        idle_partitions=hb.idle_partitions,
-                                        backpressure_partitions=hb.backpressure_partitions,
-                                        kafka_offsets=worker_kafka_offsets,
-                                    )
-                                    stub.WorkerHeartbeat(msg, timeout=1)
-                                    sent = True
-                                    break
-                            except Exception:
-                                continue
+                            reply = stub.WorkerHeartbeat(msg, timeout=2)
+                            if reply.ok:
+                                sent = True
+                                _hb_failures = 0
+                            else:
+                                # ok=False → follower rejected → count as failure
+                                _hb_failures += 1
+                                if _hb_failures <= 1:
+                                    print(f"[worker-strict:{node_id}] grpc hb rejected by follower {coord_state['url']}", file=sys.stderr)
+                    except Exception:
+                        _hb_failures += 1
+                        if _hb_failures <= 1:
+                            print(f"[worker-strict:{node_id}] grpc heartbeat failed to {coord_state['url']}", file=sys.stderr)
+                    if _hb_failures >= 3:
+                        old_url = coord_state["url"]
+                        coord_state["url"] = _rediscover_leader(old_url)
+                        coord_state["failures"] = 0
+                        _hb_failures = 0
                 if not sent:
                     hb_dict = dataclasses.asdict(hb)
                     if worker_kafka_offsets:
@@ -1619,24 +1745,21 @@ def _run_strict_worker(node_id, parts, args):
                         )
                         urllib.request.urlopen(req, timeout=2)
                         sent = True
-                    except Exception as e:
-                        print(f"[worker-strict:{node_id}] http heartbeat failed: {e}", file=sys.stderr)
-                    if not sent and coordinator_peers:
-                        for peer in coordinator_peers:
-                            try:
-                                peer_url = f"http://{peer}"
-                                req = urllib.request.Request(
-                                    peer_url + "/punctuation",
-                                    data=data_bytes,
-                                    headers={"Content-Type": "application/json"},
-                                )
-                                urllib.request.urlopen(req, timeout=1)
-                                break
-                            except Exception:
-                                continue
-            for pid in worker.buffers:
+                        _hb_failures = 0
+                    except Exception:
+                        _hb_failures += 1
+                        if _hb_failures <= 1:
+                            print(f"[worker-strict:{node_id}] http heartbeat failed to {coord_state['url']}", file=sys.stderr)
+                        if _hb_failures >= 3:
+                            old_url = coord_state["url"]
+                            coord_state["url"] = _rediscover_leader(old_url)
+                            coord_state["failures"] = 0
+                            _hb_failures = 0
+            for pid in list(worker.buffers):
                 try:
-                    bp.report_buffer(node_id, pid, len(worker.buffers[pid]))
+                    buf = worker.buffers.get(pid)
+                    if buf is not None:
+                        bp.report_buffer(node_id, pid, len(buf))
                 except Exception:
                     pass
     threading.Thread(target=heartbeat_loop, daemon=True).start()
@@ -1757,11 +1880,8 @@ def _run_heuristic_worker(node_id, parts, args):
     kafka_broker_url = args.kafka_broker_url or os.environ.get("KAFKA_BROKER_URL", "")
     enable_kafka = args.enable_kafka or os.environ.get("KAFKA_ENABLE", "false").lower() in ("1", "true", "yes", "on")
     if enable_kafka and kafka_broker_url:
-        if os.environ.get("KAFKA_ENABLE_REAL", "false").lower() in ("1", "true", "yes", "on"):
-            from common.kafka_real import KafkaConsumer, KafkaProducer, ensure_topics
-            ensure_topics(kafka_broker_url, ["events", "heuristic_results"], num_partitions=12)
-        else:
-            from common.kafka_sim import KafkaConsumer, KafkaProducer
+        from common.kafka_real import KafkaConsumer, KafkaProducer, ensure_topics
+        ensure_topics(kafka_broker_url, ["events", "heuristic_results"], num_partitions=12)
         kafka_consumer = KafkaConsumer(broker_url=kafka_broker_url,
                                        group_id="heuristic-workers",
                                        client_id=f"heuristic-{node_id}")
@@ -2038,68 +2158,62 @@ def _run_heuristic_worker(node_id, parts, args):
 
     def report_loop():
         import urllib.request
+
+        # Push a worker watermark to one aggregator, preferring gRPC and
+        # falling back to HTTP. Returns True on success.
+        def _push_watermark(url, pid, w_h):
+            if grpc is not None:
+                try:
+                    stub = get_grpc_aggregator_stub(url)
+                    if stub is not None:
+                        stub.SendWorkerWatermark(
+                            csdlpt_pb2.WorkerWatermarkMsg(
+                                worker_id=node_id, partition_id=pid, W_h=w_h,
+                            ),
+                            timeout=1,
+                        )
+                        return True
+                except Exception:
+                    pass  # fall through to HTTP
+            try:
+                payload = json.dumps({
+                    "worker_id": node_id, "partition_id": pid, "W_h": w_h,
+                }).encode()
+                req = urllib.request.Request(
+                    url + "/punctuation", data=payload,
+                    headers={"Content-Type": "application/json"},
+                )
+                urllib.request.urlopen(req, timeout=1)
+                return True
+            except Exception:
+                return False
+
+        # Replicate to BOTH active and standby every cycle so the standby stays
+        # warm and can serve W_global the moment the active dies.
+        targets = [("active", aggregator_url)]
+        if aggregator_standby_url != aggregator_url:
+            targets.append(("standby", aggregator_standby_url))
+
+        _last_fail_log: dict[str, float] = {}
+        LOG_INTERVAL_S = 30.0
+
         while not stop.is_set():
             time.sleep(0.2)
             for pid, eng in engines.items():
                 if eng.W_h == float("-inf") or eng.is_idle():
                     continue
-                sent = False
-                if grpc is not None:
-                    try:
-                        stub = get_grpc_aggregator_stub(aggregator_url)
-                        if stub is not None:
-                            stub.SendWorkerWatermark(
-                                csdlpt_pb2.WorkerWatermarkMsg(
-                                    worker_id=node_id,
-                                    partition_id=pid,
-                                    W_h=eng.W_h,
-                                ),
-                                timeout=1
-                            )
-                            sent = True
-                    except Exception as e:
-                        logging.error(f"[worker-{mode}:{node_id}] gRPC SendWorkerWatermark to {aggregator_url} failed: {e}")
-                    if aggregator_standby_url != aggregator_url:
-                        try:
-                            stub = get_grpc_aggregator_stub(aggregator_standby_url)
-                            if stub is not None:
-                                stub.SendWorkerWatermark(
-                                    csdlpt_pb2.WorkerWatermarkMsg(
-                                        worker_id=node_id,
-                                        partition_id=pid,
-                                        W_h=eng.W_h,
-                                    ),
-                                    timeout=1
-                                )
-                        except Exception as e:
-                            logging.error(f"[worker-{mode}:{node_id}] gRPC SendWorkerWatermark to standby {aggregator_standby_url} failed: {e}")
-                if not sent:
-                    payload = json.dumps({
-                        "worker_id": node_id,
-                        "partition_id": pid,
-                        "W_h": eng.W_h,
-                    }).encode()
-                    headers = {"Content-Type": "application/json"}
-                    # Push to active aggregator
-                    try:
-                        req = urllib.request.Request(
-                            aggregator_url + "/punctuation",
-                            data=payload, headers=headers,
+                for which, url in targets:
+                    if _push_watermark(url, pid, eng.W_h):
+                        continue
+                    # Rate-limit failure logs (per target) to avoid flooding
+                    # when an aggregator is down — the peer still receives data.
+                    now = time.time()
+                    if now - _last_fail_log.get(which, 0.0) >= LOG_INTERVAL_S:
+                        logging.error(
+                            f"[worker-heuristic:{node_id}] watermark push to {which} "
+                            f"aggregator {url} failing; relying on peer"
                         )
-                        urllib.request.urlopen(req, timeout=1)
-                        sent = True
-                    except Exception as e:
-                        logging.error(f"[worker-{mode}:{node_id}] HTTP POST to {aggregator_url}/punctuation failed: {e}")
-                    # Push to standby aggregator (best-effort, fire-and-forget)
-                    if aggregator_standby_url != aggregator_url:
-                        try:
-                            req = urllib.request.Request(
-                                aggregator_standby_url + "/punctuation",
-                                data=payload, headers=headers,
-                            )
-                            urllib.request.urlopen(req, timeout=1)
-                        except Exception as e:
-                            logging.error(f"[worker-{mode}:{node_id}] HTTP POST to standby {aggregator_standby_url}/punctuation failed: {e}")
+                        _last_fail_log[which] = now
     threading.Thread(target=report_loop, daemon=True).start()
 
 
@@ -2214,27 +2328,38 @@ def _run_heuristic_worker(node_id, parts, args):
     # W_global_h fetch loop — pull global watermark from aggregator every 500ms
     def wglobal_fetch_loop():
         import urllib.request
+
+        def _fetch_state(url):
+            try:
+                req = urllib.request.Request(url + "/state")
+                with urllib.request.urlopen(req, timeout=2) as resp:
+                    return json.loads(resp.read().decode())
+            except Exception:
+                return None
+
         while not stop.is_set():
             time.sleep(0.5)
             W_global_h = None
-            try:
-                req = urllib.request.Request(aggregator_url + "/state")
-                with urllib.request.urlopen(req, timeout=2) as resp:
-                    data = json.loads(resp.read().decode())
-                    if data.get("ha_active", True) or aggregator_url == aggregator_standby_url:
-                        W_global_h = float(data["W_global_h"])
-            except Exception:
-                pass
 
+            # Primary: active aggregator (only trust it while it reports active).
+            data = _fetch_state(aggregator_url)
+            active_reachable = data is not None
+            if data is not None and (
+                data.get("ha_active", True) or aggregator_url == aggregator_standby_url
+            ):
+                W_global_h = float(data["W_global_h"])
+
+            # Fail over to standby when the active is unreachable or has stepped
+            # down. During an active outage we accept the standby's value even if
+            # it has not yet flipped ha_active=True — it is still computing
+            # W_global from the watermarks workers replicate to it, and a stale
+            # global watermark is far worse than a slightly conservative one.
             if W_global_h is None and aggregator_standby_url != aggregator_url:
-                try:
-                    req = urllib.request.Request(aggregator_standby_url + "/state")
-                    with urllib.request.urlopen(req, timeout=2) as resp:
-                        data = json.loads(resp.read().decode())
-                        if data.get("ha_active", True):
-                            W_global_h = float(data["W_global_h"])
-                except Exception:
-                    pass
+                data = _fetch_state(aggregator_standby_url)
+                if data is not None and (
+                    data.get("ha_active", True) or not active_reachable
+                ):
+                    W_global_h = float(data["W_global_h"])
 
             if W_global_h is not None and W_global_h > float("-inf"):
                 for eng in engines.values():
@@ -2243,164 +2368,6 @@ def _run_heuristic_worker(node_id, parts, args):
 
     print(f"[worker-heuristic:{node_id}] listening on :{port}, partitions={parts}")
     _wait_shutdown(stop, srv, state)
-
-
-def _run_hybrid_worker(node_id, parts, args):
-    """Hybrid worker: routes CRITICAL events to strict engine, STANDARD to heuristic engine.
-
-    Uses HybridRouter per partition for unified window results and loss accounting.
-    """
-    from common.config import Config
-    cfg = Config()
-    if not cfg.enable_hybrid_routing:
-        print("[worker-hybrid] ENABLE_HYBRID_ROUTING is disabled. Set ENABLE_HYBRID_ROUTING=true to enable hybrid mode.")
-        return
-
-    from hybrid.router import HybridRouter, EventPriority
-    from common.types import LogEvent, PunctuationToken
-    from strict.backpressure import BackpressureController
-
-    ckpt_dir = os.environ.get("CHECKPOINT_DIR", "/data/checkpoint")
-    mon_mgr = _create_monitoring()
-    bp = BackpressureController(
-        pause_threshold=int(os.environ.get("BP_PAUSE_THRESHOLD", "500")),
-        resume_threshold=int(os.environ.get("BP_RESUME_THRESHOLD", "100")),
-    )
-
-    routers = {
-        pid: HybridRouter(
-            partition_id=pid,
-            window_size_s=float(os.environ.get("WINDOW_SIZE_S", "5.0")),
-            delta_base_s=float(os.environ.get("DELTA_BASE_S", "10.0")),
-            checkpoint_dir=os.path.join(ckpt_dir, f"hybrid-{node_id}-p{pid}"),
-        )
-        for pid in parts
-    }
-
-    seen_event_ids = set()
-
-    def ingest_handler(events):
-        count = 0
-        for ev_raw in events:
-            ev = parse_and_deduplicate_event(ev_raw, seen_event_ids)
-            if ev is None:
-                continue
-            pid = ev.get("partition_id", parts[0])
-            if pid not in routers:
-                continue
-            router = routers[pid]
-            priority_val = ev.get("priority", None)
-            if priority_val is None:
-                status = int(ev.get("status", 200))
-                priority_val = "critical" if status >= 500 else "standard"
-            le = LogEvent(
-                event_id=str(ev.get("event_id", f"ev-{time.time_ns()}")),
-                event_time=float(ev.get("event_time", time.time())),
-                status=int(ev.get("status", 200)),
-                arrival_time=float(ev.get("arrival_time", time.time())),
-                poll_received_at=time.time(),
-                schema_version=int(ev.get("schema_version", 1)),
-            )
-            le.payload = {"priority": priority_val}
-            router.process(le)
-            count += 1
-        return count
-
-    def punctuation_handler(data):
-        token = PunctuationToken(
-            T_commit=float(data.get("T_commit", time.time())),
-            partition_id=int(data.get("partition_id", parts[0])),
-            ingestor_id=str(data.get("ingestor_id", "http")),
-        )
-        pid = token.partition_id
-        if pid in routers:
-            routers[pid].on_punctuation(token)
-
-    class HybridWorkerProxy:
-        def __init__(self, routers, node_id):
-            self.routers = routers
-            self.node_id = node_id
-
-        def summary(self):
-            result = {"node_id": self.node_id, "mode": "hybrid", "partitions": {}}
-            for pid, router in self.routers.items():
-                result["partitions"][pid] = router.summary()
-            return result
-
-        def broadcast(self):
-            result = {"node_id": self.node_id, "mode": "hybrid", "partitions": {}}
-            for pid, router in self.routers.items():
-                result["partitions"][pid] = {
-                    "strict_W": getattr(router.strict_engine, "W_local", 0.0),
-                    "heuristic_W": getattr(router.heuristic_engine, "W_h", 0.0),
-                    "route_distribution": router.summary().get("route_distribution", {}),
-                }
-            return result
-
-        @property
-        def engines(self):
-            return {pid: router for pid, router in self.routers.items()}
-
-    proxy = HybridWorkerProxy(routers, node_id)
-
-    state = {
-        "role": "worker",
-        "ready": True,
-        "component": proxy,
-        "ingest_handler": ingest_handler,
-        "punctuation_handler": punctuation_handler,
-        "backpressure_controller": bp,
-        "monitoring_manager": mon_mgr,
-        "tls_cert": args.tls_cert,
-        "tls_key": args.tls_key,
-    }
-
-    port = int(os.environ.get("PORT", args.port))
-    srv = start_http_server(port, state)
-
-    stop = threading.Event()
-
-    # Alerting
-    _start_alerting_thread(mon_mgr, stop)
-
-    # Flush closed windows periodically
-    def window_flush_loop():
-        while not stop.is_set():
-            time.sleep(0.5)
-            for router in routers.values():
-                try:
-                    router.close_windows()
-                except Exception:
-                    pass
-    threading.Thread(target=window_flush_loop, daemon=True).start()
-
-    # DLQ drain loop
-    def dlq_drain_loop():
-        while not stop.is_set():
-            time.sleep(1.0)
-            for router in routers.values():
-                try:
-                    router._drain_heuristic_dlq()
-                except Exception:
-                    pass
-    threading.Thread(target=dlq_drain_loop, daemon=True).start()
-
-    # Monitoring push loop
-    def monitoring_loop():
-        while not stop.is_set():
-            time.sleep(5.0)
-            _update_monitoring_from_component(mon_mgr, state)
-    threading.Thread(target=monitoring_loop, daemon=True).start()
-
-    print(f"[worker-hybrid:{node_id}] listening on :{port}, partitions={parts}")
-    _wait_shutdown(stop, srv, state)
-
-    # Flush on shutdown
-    for router in routers.values():
-        try:
-            router.flush()
-        except Exception:
-            pass
 
 
 # ---------------------------------------------------------------------------
@@ -2536,11 +2503,8 @@ def run_ingestor(args):
     kafka_broker_url = args.kafka_broker_url or os.environ.get("KAFKA_BROKER_URL", "")
     enable_kafka = args.enable_kafka or os.environ.get("KAFKA_ENABLE", "false").lower() in ("1", "true", "yes", "on")
     if enable_kafka and kafka_broker_url:
-        if os.environ.get("KAFKA_ENABLE_REAL", "false").lower() in ("1", "true", "yes", "on"):
-            from common.kafka_real import KafkaProducer, ensure_topics
-            ensure_topics(kafka_broker_url, ["events", "strict_results", "heuristic_results", "audit_results"], num_partitions=12)
-        else:
-            from common.kafka_sim import KafkaProducer
+        from common.kafka_real import KafkaProducer, ensure_topics
+        ensure_topics(kafka_broker_url, ["events", "strict_results", "heuristic_results", "audit_results"], num_partitions=12)
         kafka_producer = KafkaProducer(broker_url=kafka_broker_url)
         print(f"[ingestor] using Kafka producer -> {kafka_broker_url}", file=sys.stderr)
 

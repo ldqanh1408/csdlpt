@@ -6,8 +6,8 @@ out-of-order analysis, per-column describe, top zones, payment/amount dist) so
 the full report can be kept verbatim. Default target: the full Jan-2024 file.
 
 Usage:
-    python deploy/dataset_stats.py
-    python deploy/dataset_stats.py --src dataset/yellow_tripdata_2024-01.csv
+    python tools/dataset_stats.py
+    python tools/dataset_stats.py --src dataset/yellow_tripdata_2024-01.csv
 """
 from __future__ import annotations
 import argparse

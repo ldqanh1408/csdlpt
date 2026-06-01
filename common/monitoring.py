@@ -9,6 +9,7 @@ snake_case, _total suffix for counters, _seconds for time-valued gauges
 
 from __future__ import annotations
 
+import math
 import os
 import time
 from dataclasses import dataclass
@@ -436,7 +437,16 @@ class MonitoringManager:
         status_str = broadcast.get("combined_status", "Healthy")
         fencing = broadcast.get("fencing_violations", 0)
 
-        if wg > float("-inf"):
+        # Defensive: never let a non-finite (inf/NaN) value reach the gauges.
+        # A killed/restarted coordinator can emit lag=+inf or skew=NaN before
+        # its first watermark advances; those would corrupt Prometheus output
+        # and trip alert rules with garbage values.
+        if not math.isfinite(lag_s):
+            lag_s = 0.0
+        if not math.isfinite(skew_ms):
+            skew_ms = 0.0
+
+        if math.isfinite(wg):
             self.watermark_global.labels(mode=mode).set(wg)
         self.watermark_lag_s.labels(mode=mode).set(max(lag_s, 0.0))
         self.node_skew_ms.labels(mode=mode).set(skew_ms)

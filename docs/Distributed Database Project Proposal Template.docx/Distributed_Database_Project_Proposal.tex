@@ -69,6 +69,45 @@
 \vspace{0.5cm}
 
 % ─────────────────────────────────────────────────────────────────────────────
+\section{Bảng thuật ngữ và Ký hiệu (Glossary)}
+
+Bảng dưới đây tổng hợp các ký hiệu toán học, biến trạng thái và tham số cấu hình được sử dụng xuyên suốt đề xuất, làm tham chiếu nhanh cho các công thức và sơ đồ phía sau:
+
+\begin{longtable}{p{0.22\textwidth} p{0.56\textwidth} p{0.14\textwidth}}
+\toprule
+\textbf{Ký hiệu / Biến} & \textbf{Ý nghĩa} & \textbf{Giá trị / Phạm vi} \\
+\midrule
+\endhead
+$T_{event}$ & Mốc thời gian logic (event-time) khi sự kiện được sinh ra. & giây \\
+$T_{arrival}$ & Mốc thời gian vật lý khi Worker tiếp nhận sự kiện. & giây \\
+$\ell$ & Độ trễ truyền dẫn: $\ell = T_{arrival} - T_{event}$ (tương đương $\text{trip\_duration}/60$). & giây \\
+$t_{ref}$ & Mốc tham chiếu nén thời gian: $\min(\text{pickup\_timestamps})$. & --- \\
+$\text{DIV}$ & Hệ số nén thời gian (Time Compression). & 60 \\
+$[window\_start,\ window\_end]$ & Khoảng Tumbling Window định danh một cửa sổ tổng hợp. & 5 s \\
+$\text{PartitionID}$ & Phân mảnh ngang: $\text{hash}(host) \bmod 12$. & $0$--$11$ \\
+$LW_i(P_k)$ & Watermark cục bộ của Worker $i$ cho phân mảnh $P_k$ (chế độ Strict). & giây \\
+$W_{global}$ & Watermark toàn cục Strict: $\min(LW_i)$ trên partition active. & giây \\
+$W_{heur},\ W_h$ & Watermark thích ứng cục bộ (Heuristic). & giây \\
+$W_{global\_h}$ & Watermark toàn cục Heuristic: $\min(W_h)$. & giây \\
+$L_{eff}$ & Độ trễ hiệu dụng: phân vị $p$ của $\ell$, tức $Q_p(\{\ell\})$. & giây \\
+$Q_p,\ p$ & Hàm phân vị (quantile) và phân vị mục tiêu. & $p \in [0.5,\, 0.999]$ \\
+$\alpha$ & Sai số tương đối (relative error) của DDSketch. & 0.01 \\
+$\delta$ (\texttt{DELTA\_BASE\_S}) & Biên an toàn (Wait Time) cố định của chế độ Strict. & 10 s \\
+\texttt{IDLE\_TIMEOUT\_S} & Ngưỡng đánh dấu phân mảnh nhàn rỗi tường minh (\texttt{TEMPORARY\_IDLE}). & 30.0 s \\
+\texttt{HEARTBEAT\_TIMEOUT\_S} & Ngưỡng hết hạn nhịp tim để Coordinator xác nhận Worker lỗi. & 10 s \\
+\texttt{term} & Nhiệm kỳ Raft gắn vào Fencing Token (chống split-brain). & số nguyên \\
+\texttt{window\_id} & Định danh cửa sổ (idempotent output, key MinIO). & --- \\
+\texttt{host, event\_time, arrival\_time, response\_bytes, status} & Các trường schema của bản ghi sự kiện chuẩn hóa. & --- \\
+\bottomrule
+\caption{Bảng thuật ngữ, ký hiệu và tham số cấu hình của hệ thống Distributed Watermark Tracker.}
+\label{tab:glossary}
+\end{longtable}
+
+\newpage
+
+\vspace{0.5cm}
+
+% ─────────────────────────────────────────────────────────────────────────────
 \section{Objective \& Problem Statement (Mục tiêu \& Đặc tả bài toán)}
 % ─────────────────────────────────────────────────────────────────────────────
 \begin{itemize}[leftmargin=*]
@@ -83,13 +122,17 @@
     \item \textbf{Core Logic (Thuật toán cốt lõi):}
     \begin{itemize}[label={-}]
         \item \textbf{Strict Path}: Trục thời gian logic (event-time) được cập nhật thông qua thông điệp kiểm soát \textit{Punctuation Token} chứa mốc thời gian cam kết $T_{commit}$ phát đi từ nguồn. Worker duy trì một hàng đợi ưu tiên Min-Heap cục bộ (Min-Heap) để sắp xếp lại dòng log. Coordinator tính toán mốc thời gian Watermark toàn cục theo thuật toán hội tụ tối thiểu:
+        {\large
         \begin{equation}
-            W_{global}(t) = \min_{\forall P_k \in \text{Active}} LW_i(P_k)
+            \boxed{\displaystyle W_{global}(t) = \min_{\forall P_k \in \text{Active}} LW_i(P_k)}
         \end{equation}
+        }
         \item \textbf{Heuristic Path}: Sử dụng thuật toán \textit{DDSketch} với thang chia logarit (Log-Scale Buckets) nhằm ước lượng phân vị $p$ trực tuyến của độ trễ logic truyền dẫn $\ell = T_{arrival} - T_{event}$. Mốc thời gian Watermark thích ứng được tính theo công thức:
+        {\large
         \begin{equation}
-            W_{heur}(i, p) = \max_{j < i} T_{event\_max} - Q_p(\{\ell\})
+            \boxed{\displaystyle W_{heur}(i, p) = \max_{j < i} T_{event\_max} - Q_p(\{\ell\})}
         \end{equation}
+        }
         Các bản ghi trễ ($T_{event} < W_{global\_heur}$) được chuyển hướng vào hàng đợi DLQ (\texttt{late\_logs\_dlq}) để phục vụ quá trình đối chiếu đền bù trạng thái lịch sử (State Reconciliation).
     \end{itemize}
 \end{itemize}
@@ -109,17 +152,23 @@
     \item \textbf{Cơ chế nén thời gian phù hợp với Engine (Time Compression Design):} \\
     Do tập dữ liệu gốc trải dài trọn vẹn 31 ngày thực tế (khoảng 2,678,368 giây), việc chạy mô phỏng trực tiếp theo thời gian thực tế sẽ tốn rất nhiều thời gian và không khả thi cho môi trường kiểm thử. Vì vậy, hệ thống áp dụng kỹ thuật \textbf{Nén thời gian (Time Compression)} với hệ số nén $\text{DIV} = 60$. \\
     Cơ chế nén hoạt động bằng cách chọn mốc thời gian bắt đầu hành trình nhỏ nhất làm tham chiếu $t_{\text{ref}} = \min(\text{pickup\_timestamps})$, sau đó ánh xạ các thuộc tính thời gian như sau:
+    {\large
     \begin{equation}
-        T_{\text{event}} = \frac{\text{pickup\_timestamp} - t_{\text{ref}}}{60}
+        \boxed{\displaystyle T_{\text{event}} = \frac{\text{pickup\_timestamp} - t_{\text{ref}}}{60}}
     \end{equation}
+    }
+    {\large
     \begin{equation}
-        T_{\text{arrival}} = \frac{\text{dropoff\_timestamp} - t_{\text{ref}}}{60}
+        \boxed{\displaystyle T_{\text{arrival}} = \frac{\text{dropoff\_timestamp} - t_{\text{ref}}}{60}}
     \end{equation}
+    }
     \textbf{Đặc tính quan trọng của phép nén:} \\
     Độ trễ truyền dẫn (lateness) logic của bản ghi được bảo toàn một cách tự nhiên theo thời gian chuyến đi được nén:
+    {\large
     \begin{equation}
-        \ell = T_{\text{arrival}} - T_{\text{event}} = \frac{\text{dropoff\_timestamp} - \text{pickup\_timestamp}}{60} = \frac{\text{trip\_duration}}{60}
+        \boxed{\displaystyle \ell = T_{\text{arrival}} - T_{\text{event}} = \frac{\text{dropoff\_timestamp} - \text{pickup\_timestamp}}{60} = \frac{\text{trip\_duration}}{60}}
     \end{equation}
+    }
     Kỹ thuật này nén toàn bộ 31 ngày dữ liệu thực tế xuống còn \textbf{12.4 giờ} thời gian logic mô phỏng (giảm 60 lần), trong khi vẫn giữ nguyên các phân phối bất tuần tự đặc trưng:
     \begin{itemize}[label={-}]
         \item Thời gian phân phối trễ trung vị (p50): giảm từ 12 phút thực tế xuống còn \textbf{11.63 giây} mô phỏng.
@@ -149,9 +198,11 @@
 
     \item \textbf{Fragmentation Strategy (Chiến lược phân mảnh dọc/ngang):} \\
     Áp dụng chiến lược phân mảnh ngang (Horizontal Fragmentation) dựa trên phương pháp băm (Hash Partitioning) trên thuộc tính phân vùng \texttt{host} để đảm bảo sự cân bằng tải giữa các node phân tán:
+    {\large
     \begin{equation}
-        PartitionID = \text{hash}(host) \bmod 12
+        \boxed{\displaystyle PartitionID = \text{hash}(host) \bmod 12}
     \end{equation}
+    }
     Tổng số 12 phân mảnh logic này được ánh xạ đều lên 4 Worker Nodes (như thể hiện trong sơ đồ miền xử lý dữ liệu):
     \begin{itemize}[label={-}]
         \item Worker 0 (node0) quản lý các phân mảnh: 0, 1, 2.
@@ -161,44 +212,7 @@
     \end{itemize}
 \end{itemize}
 
-\newpage
 
-% ─────────────────────────────────────────────────────────────────────────────
-\section{Bảng thuật ngữ và Ký hiệu (Glossary)}
-
-Bảng dưới đây tổng hợp các ký hiệu toán học, biến trạng thái và tham số cấu hình được sử dụng xuyên suốt đề xuất, làm tham chiếu nhanh cho các công thức và sơ đồ phía sau:
-
-\begin{longtable}{p{0.22\textwidth} p{0.56\textwidth} p{0.14\textwidth}}
-\toprule
-\textbf{Ký hiệu / Biến} & \textbf{Ý nghĩa} & \textbf{Giá trị / Phạm vi} \\
-\midrule
-\endhead
-$T_{event}$ & Mốc thời gian logic (event-time) khi sự kiện được sinh ra. & giây \\
-$T_{arrival}$ & Mốc thời gian vật lý khi Worker tiếp nhận sự kiện. & giây \\
-$\ell$ & Độ trễ truyền dẫn: $\ell = T_{arrival} - T_{event}$ (tương đương $\text{trip\_duration}/60$). & giây \\
-$t_{ref}$ & Mốc tham chiếu nén thời gian: $\min(\text{pickup\_timestamps})$. & --- \\
-$\text{DIV}$ & Hệ số nén thời gian (Time Compression). & 60 \\
-$[window\_start,\ window\_end]$ & Khoảng Tumbling Window định danh một cửa sổ tổng hợp. & 5 s \\
-$\text{PartitionID}$ & Phân mảnh ngang: $\text{hash}(host) \bmod 12$. & $0$--$11$ \\
-$LW_i(P_k)$ & Watermark cục bộ của Worker $i$ cho phân mảnh $P_k$ (chế độ Strict). & giây \\
-$W_{global}$ & Watermark toàn cục Strict: $\min(LW_i)$ trên partition active. & giây \\
-$W_{heur},\ W_h$ & Watermark thích ứng cục bộ (Heuristic). & giây \\
-$W_{global\_h}$ & Watermark toàn cục Heuristic: $\min(W_h)$. & giây \\
-$L_{eff}$ & Độ trễ hiệu dụng: phân vị $p$ của $\ell$, tức $Q_p(\{\ell\})$. & giây \\
-$Q_p,\ p$ & Hàm phân vị (quantile) và phân vị mục tiêu. & $p \in [0.5,\, 0.999]$ \\
-$\alpha$ & Sai số tương đối (relative error) của DDSketch. & 0.01 \\
-$\delta$ (\texttt{DELTA\_BASE\_S}) & Biên an toàn (Wait Time) cố định của chế độ Strict. & 10 s \\
-\texttt{IDLE\_TIMEOUT\_S} & Ngưỡng đánh dấu phân mảnh nhàn rỗi tường minh (\texttt{TEMPORARY\_IDLE}). & 2.0 s \\
-\texttt{HEARTBEAT\_TIMEOUT\_S} & Ngưỡng hết hạn nhịp tim để Coordinator xác nhận Worker lỗi. & 10 s \\
-\texttt{term} & Nhiệm kỳ Raft gắn vào Fencing Token (chống split-brain). & số nguyên \\
-\texttt{window\_id} & Định danh cửa sổ (idempotent output, key MinIO). & --- \\
-\texttt{host, event\_time, arrival\_time, response\_bytes, status} & Các trường schema của bản ghi sự kiện chuẩn hóa. & --- \\
-\bottomrule
-\caption{Bảng thuật ngữ, ký hiệu và tham số cấu hình của hệ thống Distributed Watermark Tracker.}
-\label{tab:glossary}
-\end{longtable}
-
-\newpage
 
 \section{System Architecture (Kiến trúc Hệ thống)}
 % ─────────────────────────────────────────────────────────────────────────────
@@ -245,9 +259,11 @@ Sơ đồ mô tả luồng nạp dữ liệu:
 \begin{itemize}[leftmargin=*]
     \item \textbf{Local Watermark}: Các Worker Node nhận dữ liệu, tính toán Watermark cục bộ $LW_i(P_k)$ cho từng phân mảnh đang quản lý và gửi báo cáo thông qua luồng nhịp tim (heartbeat) về Coordinator.
     \item \textbf{High-Availability Coordinator Plane}: Cụm điều phối gồm 3 instance hoạt động theo thuật toán đồng thuận Raft (Leader-Follower). Coordinator Leader định kỳ tiếp nhận nhịp tim từ toàn bộ các Worker, tính toán Watermark toàn cục bằng giá trị nhỏ nhất của tất cả các phân mảnh hoạt động:
+    {\large
     \begin{equation}
-        W_{global}(t) = \min_{\forall P_k \in \text{Active}} LW_i(P_k)
+        \boxed{\displaystyle W_{global}(t) = \min_{\forall P_k \in \text{Active}} LW_i(P_k)}
     \end{equation}
+    }
     Mốc Watermark toàn cục $W_{global}$ sau đó được broadcast ngược lại cho các Worker Nodes làm căn cứ chốt và giải phóng trạng thái cửa sổ.
 \end{itemize}
 
@@ -269,7 +285,7 @@ Sơ đồ mô tả điều phối Strict:
         \midrule
         Worker Heartbeat & Worker $\to$ Coordinator Leader & gRPC \texttt{WorkerHeartbeat} (cổng HTTP+50), fallback HTTP \texttt{POST /punctuation} & Bản đồ partition $\to$ \texttt{LW\_i}, kèm \texttt{max\_event\_time}, \texttt{kafka\_offsets}, \texttt{fencing\_token}, \texttt{idle\_partitions}; chu kỳ 1s. \\
         Get Global State & Worker $\to$ Coordinator Leader & gRPC \texttt{GetGlobalState}, fallback HTTP \texttt{GET /state} & Trả \texttt{W\_global}, \texttt{term}, \texttt{partition\_types}; Worker pull mỗi 500ms. \\
-        Raft replication & Leader $\leftrightarrow$ Followers & gRPC \texttt{RaftState} / \texttt{RaftVote} & Sao chép \texttt{W\_global}, \texttt{partition\_assignment}, \texttt{failover\_history}, \texttt{term}; commit khi đa số (2/3) xác nhận. \\
+        Đồng thuận \& Bầu chọn HA & Leader $\leftrightarrow$ Followers / ZooKeeper & gRPC \texttt{RaftState}/\texttt{RaftVote} hoặc ZK Lock & Chế độ Raft: Sao chép \texttt{W\_global}, \texttt{partition\_assignment}, \texttt{term}; commit khi đa số (2/3) ack. Chế độ ZK: Leader sở hữu khóa tại \texttt{/csdlpt/coordinator-lock}, đồng bộ trạng thái qua gRPC/HTTP tới các follower. \\
         Failover / Failback & Coordinator $\to$ Worker & gRPC/HTTP kèm \texttt{(term, command\_id)} & Lệnh reassign / \texttt{PAUSE} / \texttt{RESUME} có fencing token; từ chối lệnh có \texttt{term} cũ. \\
         Broadcast \texttt{W\_global} & Coordinator (nội bộ) & Vòng lặp chủ động 200ms & Tính lại và đẩy \texttt{W\_global} + trạng thái partition phục vụ đồng bộ \& metrics. \\
         \bottomrule
@@ -281,7 +297,7 @@ Sơ đồ mô tả điều phối Strict:
 Đối với chế độ tối ưu hóa độ trễ, luồng Heuristic Watermark sử dụng cấu trúc gom hợp thống kê bất đồng bộ:
 \begin{itemize}[leftmargin=*]
     \item \textbf{Statistical Heartbeat}: Các Worker sử dụng cấu trúc dữ liệu DDSketch cục bộ để đo đạc độ trễ thực tế, báo cáo mốc Watermark thích ứng $W_h$ và bản chụp (snapshot) DDSketch cục bộ tới Aggregator.
-    \item \textbf{Active-Standby Control Plane}: Aggregator được duy trì qua cặp dự phòng nóng thông qua khóa phân tán trên ZooKeeper. Aggregator Primary nhận thông tin DDSketch từ các Worker để tổng hợp phân phối độ trễ toàn cục, điều phối Watermark thích ứng mà không làm tắc nghẽn dòng chảy dữ liệu. Các bản ghi muộn sẽ được định tuyến tự động vào hàng đợi đền bù (DLQ).
+    \item \textbf{Active-Standby Control Plane}: Cặp Aggregator dự phòng nóng (Primary-Standby). Việc tranh chấp Leader được thực hiện qua khóa phân tán ZooKeeper (\texttt{/csdlpt/aggregator-lock}) hoặc File Lock dùng chung (\texttt{FileLockLeader} hỗ trợ cross-platform \texttt{fcntl}/\texttt{msvcrt}). Standby liên tục theo dõi tệp nhịp tim của Active (\texttt{/tmp/aggregator-\{port\}-heartbeat} ghi mỗi 1s). Nếu nhịp tim mất hoặc quá hạn ($>1.5$\,s), Standby tự động chiếm khóa và được nâng lên làm Active, tải lại trạng thái phân mảnh và watermark từ RocksDB/JSON (\texttt{load\_state()}). Aggregator Active tổng hợp thông tin thu nhận để điều phối watermark thích ứng cục bộ, bản ghi muộn đi vào Dead-Letter Queue (DLQ).
 \end{itemize}
 
 Sơ đồ mô tả điều phối Heuristic:
@@ -302,7 +318,7 @@ Sơ đồ mô tả điều phối Heuristic:
         \midrule
         Heuristic Heartbeat & Worker $\to$ Aggregator Primary & gRPC \texttt{SendWorkerWatermark} (HTTP+50), fallback HTTP \texttt{POST /punctuation} & \texttt{worker\_id}, \texttt{partition\_id}, \texttt{W\_h} kèm \texttt{L\_eff} và snapshot DDSketch; chu kỳ khoảng 200ms. \\
         Tính watermark toàn cục & Aggregator (nội bộ) & Vòng lặp 500ms & $W_{global\_h} = \min(W_h)$ trên partition active; phân loại trạng thái \texttt{ACTIVE/STALE/IDLE/FAILED}. \\
-        HA Active--Standby & Primary $\leftrightarrow$ Standby & Khóa ZooKeeper/file lock + Shared Volume & Standby đồng bộ nóng metadata; Primary mất kết nối $>$ 3s $\Rightarrow$ Standby tiếp quản, RTO $\le$ 2s. \\
+        HA Active--Standby & Primary $\leftrightarrow$ Standby & Khóa ZooKeeper / File lock + Shared State & Standby theo dõi file nhịp tim ghi mỗi 1s. Mất nhịp tim $>$ 1.5s $\Rightarrow$ Standby chiếm khóa, khôi phục từ RocksDB/JSON và lên Active ($RTO\le 2$s). \\
         Broadcast \texttt{W\_global\_h} & Aggregator $\to$ Worker & HTTP \texttt{GET /state} (pull) & Worker nhận \texttt{W\_global\_h} thích ứng để chốt cửa sổ. \\
         Định tuyến dữ liệu muộn & Worker $\to$ Kafka \texttt{late\_logs\_dlq} & Kafka Producer & Sự kiện $T_{event} < W_h$ được đẩy DLQ; hạch toán \texttt{per\_window\_loss} thay vì chặn dòng chính. \\
         \bottomrule
@@ -313,7 +329,7 @@ Sơ đồ mô tả điều phối Heuristic:
 \subsubsection{Domain 4: Phối hợp Control \& Metadata Plane (Control \& Infrastructure Domain)}
 Mặt phẳng điều khiển và quản lý cấu hình hệ thống:
 \begin{itemize}[leftmargin=*]
-    \item \textbf{Ingestor Heartbeat}: Ingestor gửi thông tin tiến độ đọc dữ liệu và độ lệch đồng hồ vật lý (\texttt{clock skew}) tới Coordinator (Strict) hoặc Aggregator (Heuristic).
+    \item \textbf{Ingestor Heartbeat}: Ingestor định kỳ gửi thông tin tiến độ đọc dữ liệu và độ lệch đồng hồ vật lý (\texttt{clock skew}) để Coordinator giám sát health và clock skew. Để tránh gRPC Fan-in Bottleneck, Ingestor đẩy heartbeat trực tiếp qua Kafka topic \texttt{ingestor-heartbeats}, sử dụng gRPC/HTTP làm luồng fallback.
     \item \textbf{Metadata Plane (ZooKeeper)}: ZooKeeper đóng vai trò trung tâm lưu trữ thông tin cấu hình cluster Kafka, thực hiện Service Discovery và hỗ trợ bầu chọn Leader cho các thành phần điều phối phân tán.
 \end{itemize}
 
@@ -333,7 +349,7 @@ Sơ đồ mô tả Control \& Metadata Plane:
         \toprule
         \textbf{Luồng giao tiếp} & \textbf{Hướng} & \textbf{Giao thức / Cổng} & \textbf{Nội dung \& Tần suất} \\
         \midrule
-        Ingestor Heartbeat & Ingestor $\to$ Coordinator / Aggregator & gRPC \texttt{IngestorHeartbeat} (HTTP+50), fallback HTTP \texttt{POST /ingestor-heartbeat} & \texttt{ingestor\_id}, \texttt{T\_commit}, \texttt{partitions\_assigned}, \texttt{ingestor\_clock}, \texttt{offsets}; giám sát health \& clock skew. \\
+        Ingestor Heartbeat & Ingestor $\to$ Kafka / Coordinator & Hàng đợi Kafka (\texttt{ingestor-heartbeats}) hoặc gRPC \texttt{IngestorHeartbeat} (fallback) & \texttt{ingestor\_id}, \texttt{T\_commit}, \texttt{timestamp}, \texttt{partitions\_assigned}, \texttt{ingestor\_clock}, \texttt{offsets}; gửi mỗi 5s; Coordinator nhận RTT để giám sát health và clock skew. \\
         Truy vấn giám sát & Dashboard / Ops $\to$ Coordinator \& Worker & HTTP \texttt{GET /health}, \texttt{/state}, \texttt{/api/metrics}, \texttt{/ingestor-health} & Bảng health/clock-skew, metrics completeness/latency, trạng thái \texttt{W\_global}/term/failover. \\
         Discovery \& cấu hình & ZooKeeper $\leftrightarrow$ Kafka / Coordinator / Aggregator & ZooKeeper & Lưu cấu hình cluster Kafka, bầu chọn Leader và hỗ trợ Service Discovery. \\
         \bottomrule
@@ -428,9 +444,11 @@ Hiện tượng nút cổ chai xảy ra khi một hoặc một vài phân mảnh
     \item Khi Worker nhận được Empty Punctuation Token từ Kafka, nó sẽ tịnh tiến watermark cục bộ $LW_i(P_k)$ của phân mảnh đó lên.
     \item Nếu một phân mảnh nhàn rỗi quá thời gian quy định (\texttt{IDLE\_TIMEOUT\_S}), Worker sẽ tự động đánh dấu phân mảnh đó là \texttt{TEMPORARY\_IDLE} và gửi báo cáo danh sách này lên Coordinator.
     \item Coordinator Leader khi tính toán watermark toàn cục theo công thức hội tụ tối thiểu \emph{đơn điệu}:
+    {\large
     \begin{equation}
-        W_{global}(t) = \max\Big(W_{global}^{prev},\ \min_{P_k \notin \text{Idle}} LW_i(P_k)\Big)
+        \boxed{\displaystyle W_{global}(t) = \max\Big(W_{global}^{prev},\ \min_{P_k \notin \text{Idle}} LW_i(P_k)\Big)}
     \end{equation}
+    }
     Sẽ tạm thời loại trừ các phân mảnh nhàn rỗi tường minh ra khỏi hàm $\min$, cho phép $W_{global}$ tiếp tục tiến lên, giải phóng trạng thái cửa sổ của các phân mảnh hoạt động khác. Khi phân mảnh nhàn rỗi có dữ liệu trở lại, nó sẽ tự động được đưa trở lại danh sách tính toán.
     \item \textbf{Lưu ý đồng bộ mã hiện thực} (\texttt{strict/coordinator.py}): Empty Punctuation là cơ chế \emph{chính} giữ $W_{global}$ tịnh tiến nên hệ thống \textbf{không} loại bỏ ngầm các phân mảnh chỉ vì im lặng. Các phân mảnh phản hồi chậm (\texttt{STALE}) và nhàn rỗi ngầm (\texttt{IDLE}) vẫn nằm trong hàm $\min()$; chỉ phân mảnh xác nhận lỗi (\texttt{FAILED}) hoặc được Worker đánh dấu \texttt{is\_temporary\_idle} mới bị loại trừ, bảo toàn cam kết 0\% loss.
 \end{itemize}
@@ -438,7 +456,7 @@ Hiện tượng nút cổ chai xảy ra khi một hoặc một vài phân mảnh
 Sơ đồ trình tự xử lý phân mảnh nhàn rỗi bằng Empty Punctuation trong chế độ Strict:
 \begin{figure}[H]
     \centering
-    \includegraphics[width=\textwidth,height=11.0cm,keepaspectratio]{Empty Punctuation.pdf}
+    \includegraphics[width=\textwidth,height=15.0cm,keepaspectratio]{Empty Punctuation.pdf}
     \caption{Trình tự xử lý Straggler chế độ Strict: Empty Punctuation \& Idleness Bypass.}
     \label{fig:emptypunctuation}
 \end{figure}
@@ -504,14 +522,20 @@ Chúng tôi đã thực hiện chạy quét thực nghiệm (benchmark sweeps) t
 Trong dữ liệu thực tế, sự lệch thời gian (skew) giữa thời gian phát sinh sự kiện (event-time) và thời gian hệ thống nhận được dữ liệu (arrival-time) là cực kỳ nhỏ so với tổng thời gian của cả tập dữ liệu (khoảng 31 ngày). Nếu phát lại luồng dữ liệu theo tỷ lệ 1:1, đường cong độ hoàn thiện sẽ luôn phẳng ở mức 100\% do độ trễ đến muộn gần như bằng 0.
 
 Để mô phỏng hành vi bất tuần tự khốc liệt trong môi trường phân tán thực tế, chúng tôi áp dụng hệ số nén thời gian $\text{DIV} = 60$. Công thức ánh xạ mốc thời gian như sau:
-\begin{align}
-    T_{\text{event}} &= \frac{T_{\text{pickup}} - T_{\text{pickup,min}}}{\text{DIV}} \\
-    T_{\text{arrival}} &= \frac{T_{\text{dropoff}} - T_{\text{pickup,min}}}{\text{DIV}}
-\end{align}
-Theo đó, độ trễ đến muộn của mỗi sự kiện được bảo toàn nguyên vẹn về mặt tỷ lệ vật lý và chỉ bị co giãn theo hệ số nén:
+{\large
 \begin{equation}
-    \text{Lateness} = T_{\text{arrival}} - T_{\text{event}} = \frac{T_{\text{dropoff}} - T_{\text{pickup}}}{\text{DIV}}
+    \boxed{\displaystyle T_{\text{event}} = \frac{T_{\text{pickup}} - T_{\text{pickup,min}}}{\text{DIV}}}
 \end{equation}
+\begin{equation}
+    \boxed{\displaystyle T_{\text{arrival}} = \frac{T_{\text{dropoff}} - T_{\text{pickup,min}}}{\text{DIV}}}
+\end{equation}
+}
+Theo đó, độ trễ đến muộn của mỗi sự kiện được bảo toàn nguyên vẹn về mặt tỷ lệ vật lý và chỉ bị co giãn theo hệ số nén:
+{\large
+\begin{equation}
+    \boxed{\displaystyle \text{Lateness} = T_{\text{arrival}} - T_{\text{event}} = \frac{T_{\text{dropoff}} - T_{\text{pickup}}}{\text{DIV}}}
+\end{equation}
+}
 Với cấu hình $\text{DIV} = 60$, các đặc trưng của tập dữ liệu trở nên cực kỳ phù hợp để kiểm thử cơ chế Watermark với kích thước cửa sổ 5 giây:
 \begin{itemize}
     \item \textbf{Tỷ lệ bất tuần tự}: Có tới \textbf{49.41\%} tổng số sự kiện (1,463,199 dòng) đến lệch thứ tự so với sự kiện liền kề trước đó.
@@ -526,34 +550,51 @@ Kết quả so sánh trực tiếp giữa hai chiến lược Strict Watermark v
     \small
     \caption{Kết quả thực nghiệm so sánh sự đánh đổi giữa độ trễ chờ và tính hoàn thiện dữ liệu.}
     \label{tab:completeness_latency_tradeoff}
-    \resizebox{\textwidth}{!}{%
-    \begin{tabular}{rcc ccc}
+    \begin{tabular}{r r r r r r}
         \toprule
-        \textbf{Wait (s)}
-          & \textbf{Strict \%}
-          & \textbf{$p$}
+        \multicolumn{2}{c}{\textbf{Strict Watermark}} & \multicolumn{4}{c}{\textbf{Heuristic Watermark + DLQ}} \\
+        \cmidrule(lr){1-2} \cmidrule(lr){3-6}
+        \textbf{$\delta$ = Wait (s)}
+          & \textbf{Completeness (\%)}
+          & \textbf{Phân vị $p$}
           & \textbf{$L_{\text{eff}}$ (s)}
-          & \textbf{Imm.\,\%}
-          & \textbf{Eventual\,\%} \\
+          & \textbf{Tức thời (\%)}
+          & \textbf{Cuối cùng (\%)} \\
         \midrule
-        0    & \textbf{8.75}  & 0.500 & 11.63 & 64.21 & \textbf{100.00} \\
-        1    & \textbf{12.88} & 0.500 & 11.63 & 64.21 & \textbf{100.00} \\
-        2    & \textbf{17.86} & 0.500 & 11.63 & 64.21 & \textbf{100.00} \\
-        3    & \textbf{23.29} & 0.500 & 11.63 & 64.21 & \textbf{100.00} \\
-        5    & \textbf{34.66} & 0.500 & 11.63 & 64.21 & \textbf{100.00} \\
-        7    & \textbf{45.48} & 0.500 & 11.63 & 64.21 & \textbf{100.00} \\
-        10   & \textbf{59.17} & 0.500 & 11.63 & 64.21 & \textbf{100.00} \\
-        15   & \textbf{75.03} & 0.500 & 11.63 & 64.21 & \textbf{100.00} \\
-        20   & \textbf{84.44} & 0.750 & 18.67 & 81.26 & \textbf{100.00} \\
-        30   & \textbf{93.23} & 0.900 & 28.80 & 91.31 & \textbf{100.00} \\
-        40   & \textbf{96.72} & 0.950 & 37.78 & 94.77 & \textbf{100.00} \\
-        50   & \textbf{98.41} & 0.990 & 59.70 & 97.70 & \textbf{100.00} \\
-        60   & \textbf{99.27} & 0.990 & 59.70 & 97.70 & \textbf{100.00} \\
-        90   & \textbf{99.89} & 0.999 & 95.03 & 98.38 & \textbf{100.00} \\
-        120  & \textbf{99.97} & 0.999 & 95.03 & 98.38 & \textbf{100.00} \\
+        \rowcolor{white}
+        \textbf{0}
+          & \textbf{8.75}
+          & 0.500 & 11.63 & 64.21 & 100.00 \\
+        1   & 12.88 & 0.500 & 11.63 & 64.21 & 100.00 \\
+        2   & 17.86 & 0.500 & 11.63 & 64.21 & 100.00 \\
+        3   & 23.29 & 0.500 & 11.63 & 64.21 & 100.00 \\
+        5   & 34.66 & 0.500 & 11.63 & 64.21 & 100.00 \\
+        7   & 45.48 & 0.500 & 11.63 & 64.21 & 100.00 \\
+        10  & 59.17 & 0.500 & 11.63 & 64.21 & 100.00 \\
+        15  & 75.03 & 0.500 & 11.63 & 64.21 & 100.00 \\
+        \cmidrule{3-6}
+        20  & 84.44 & 0.750 & 18.67 & 81.26 & 100.00 \\
+        30  & 93.23 & 0.900 & 28.80 & 91.31 & 100.00 \\
+        40  & 96.72 & 0.950 & 37.78 & 94.77 & 100.00 \\
+        50  & 98.41 & 0.990 & 59.70 & 97.70 & 100.00 \\
+        60  & 99.27 & 0.990 & 59.70 & 97.70 & 100.00 \\
+        90  & 99.89 & 0.999 & 95.03 & 98.38 & 100.00 \\
+        120 & 99.97 & 0.999 & 95.03 & 98.38 & 100.00 \\
         \bottomrule
-    \end{tabular}}
+    \end{tabular}
+    \\[4pt]
+    {\footnotesize Ghi chú: Cột \textbf{Cuối cùng (\%)} luôn đạt 100\% nhờ cơ chế đối chiếu đền bù qua Hàng đợi xử lý muộn (DLQ).}
 \end{table}
+
+\textbf{Giải thích các cột trong Bảng~\ref{tab:completeness_latency_tradeoff}:}
+\begin{itemize}[leftmargin=*]
+    \item \textbf{Wait (s)}: Thời gian chờ (Wait Time) hay biên an toàn $\delta$ (DELTA\_BASE\_S) mà hệ thống Strict Watermark áp đặt sau khi cửa sổ logic kết thúc trước khi chốt kết quả. Đây chính là khoảng trễ nhân tạo để chờ các sự kiện đến muộn.
+    \item \textbf{Strict \%}: Độ hoàn thiện dữ liệu tức thời (Immediate Completeness) của chế độ Strict Watermark, tương ứng với mức Wait Time ở cột đầu tiên. Thể hiện tỷ lệ phần trăm dữ liệu được xử lý đúng hạn trong cửa sổ trước khi Watermark đóng.
+    \item \textbf{$p$}: Phân vị mục tiêu (Target Quantile) sử dụng trong chế độ Heuristic Watermark. $p = 0.50$ nghĩa là ước lượng trung vị của phân phối độ trễ; $p = 0.999$ nghĩa là gần như toàn bộ phân phối (99.9\%).
+    \item \textbf{$L_{\text{eff}}$ (s)}: Độ trễ hiệu dụng (Effective Latency) được ước lượng trực tuyến bởi cấu trúc DDSketch tại phân vị $p$ tương ứng. Đây là ngưỡng thời gian mà Heuristic Watermark dùng để chốt cửa sổ thay vì dùng giá trị cố định $\delta$ như chế độ Strict.
+    \item \textbf{Imm.\,\%}: Độ hoàn thiện dữ liệu tức thời (Immediate Completeness) của chế độ Heuristic Watermark tại phân vị $p$ và $L_{\text{eff}}$ tương ứng. Dữ liệu đến sau khi cửa sổ đã chốt sẽ bị định tuyến sang DLQ.
+    \item \textbf{Eventual\,\%}: Độ hoàn thiện dữ liệu cuối cùng (Eventual Completeness) của chế độ Heuristic Watermark sau khi đã đối chiếu đền bù toàn bộ dữ liệu từ Hàng đợi xử lý muộn (DLQ). Giá trị luôn đạt \textbf{100\%} chứng minh rằng cơ chế DLQ đảm bảo không mất mát dữ liệu.
+\end{itemize}
 
 \subsubsection{Các phát hiện và Phân tích chuyên sâu từ thực nghiệm}
 \begin{enumerate}

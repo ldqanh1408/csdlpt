@@ -92,7 +92,8 @@ class Config:
     enable_replay_sub_checkpointing: bool = _env_bool("ENABLE_REPLAY_SUB_CHECKPOINTING", True)
     enable_two_phase_eviction: bool = _env_bool("ENABLE_TWO_PHASE_EVICTION", True)
     enable_negative_lag_recalibration: bool = _env_bool("ENABLE_NEGATIVE_LAG_RECALIBRATION", True)
-    enable_hybrid_routing: bool = _env_bool("ENABLE_HYBRID_ROUTING", False)
+
+
 
     @property
     def minio_configured(self) -> bool:
