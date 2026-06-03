@@ -352,7 +352,12 @@ class StrictWorker:
         total_bp = 0
         partitions = {}
         proc_p50_vals, proc_p95_vals, proc_p99_vals = [], [], []
-        poll_p95_vals, dedup_p95_vals, state_p95_vals = [], [], []
+        timer_vals = {
+            "network_ingest": {"p50": [], "p95": [], "p99": []},
+            "poll_decode": {"p50": [], "p95": [], "p99": []},
+            "dedup": {"p50": [], "p95": [], "p99": []},
+            "state_write": {"p50": [], "p95": [], "p99": []},
+        }
         for pid, eng in list(self.engines.items()):
             eng.active_partitions = len(self.engines)
             lock = self._partition_locks.get(pid)
@@ -371,13 +376,15 @@ class StrictWorker:
                 (proc_p50_vals, "proc_latency_p50_us"),
                 (proc_p95_vals, "proc_latency_p95_us"),
                 (proc_p99_vals, "proc_latency_p99_us"),
-                (poll_p95_vals, "poll_decode_latency_p95_us"),
-                (dedup_p95_vals, "dedup_latency_p95_us"),
-                (state_p95_vals, "state_write_latency_p95_us"),
             ):
                 val = s.get(field, 0.0)
                 if val:
                     src.append(val)
+            for stage, percentiles in timer_vals.items():
+                for pct, target in percentiles.items():
+                    val = s.get(f"{stage}_latency_{pct}_us", 0.0)
+                    if val:
+                        target.append(val)
         unique = max(total_recv - total_dupes, 1)
         completeness = 100.0 * total_on_time / unique
         late_rate = 100.0 * total_late / max(total_recv, 1)
@@ -425,9 +432,18 @@ class StrictWorker:
             "proc_latency_p50_us": _avg(proc_p50_vals),
             "proc_latency_p95_us": _avg(proc_p95_vals),
             "proc_latency_p99_us": _max(proc_p99_vals),
-            "poll_decode_latency_p95_us": _avg(poll_p95_vals),
-            "dedup_latency_p95_us": _avg(dedup_p95_vals),
-            "state_write_latency_p95_us": _avg(state_p95_vals),
+            "network_ingest_latency_p50_us": _avg(timer_vals["network_ingest"]["p50"]),
+            "network_ingest_latency_p95_us": _avg(timer_vals["network_ingest"]["p95"]),
+            "network_ingest_latency_p99_us": _max(timer_vals["network_ingest"]["p99"]),
+            "poll_decode_latency_p50_us": _avg(timer_vals["poll_decode"]["p50"]),
+            "poll_decode_latency_p95_us": _avg(timer_vals["poll_decode"]["p95"]),
+            "poll_decode_latency_p99_us": _max(timer_vals["poll_decode"]["p99"]),
+            "dedup_latency_p50_us": _avg(timer_vals["dedup"]["p50"]),
+            "dedup_latency_p95_us": _avg(timer_vals["dedup"]["p95"]),
+            "dedup_latency_p99_us": _max(timer_vals["dedup"]["p99"]),
+            "state_write_latency_p50_us": _avg(timer_vals["state_write"]["p50"]),
+            "state_write_latency_p95_us": _avg(timer_vals["state_write"]["p95"]),
+            "state_write_latency_p99_us": _max(timer_vals["state_write"]["p99"]),
             "partitions": partitions,
             "resources": {
                 "ram_used_bytes": ram_used,

@@ -1,0 +1,9 @@
+mode,punctuation,sweep_var,sweep_value,wait_time_ms,wait_time_s,l_eff_ms,completeness_final_pct,completeness_avg_pct,late_rate_pct,total_received,on_time,late_dropped,proc_lat_p99_us,run_seconds,samples
+strict,max-event-time,DELTA_BASE_S,0.0,0,0.0,0.0,83.085,83.085,16.915,2961423,2460512,500911,7752.8,1509,2
+strict,max-event-time,DELTA_BASE_S,5.0,5000,5.0,0.0,88.153,88.153,11.847,2961423,2610595,350828,4666.4,1590,2
+strict,max-event-time,DELTA_BASE_S,10.0,10000,10.0,0.0,90.145,90.138,9.855,2852314,2571213,281101,8592.7,1861,2
+strict,max-event-time,DELTA_BASE_S,20.0,20000,20.0,0.0,91.378,91.373,8.622,2902616,2652356,250260,6443.7,1847,2
+strict,max-event-time,DELTA_BASE_S,40.0,40000,40.0,0.0,97.565,97.565,2.435,2961423,2889298,72125,5884.8,1722,2
+strict,max-event-time,DELTA_BASE_S,60.0,60000,60.0,0.0,97.874,97.873,2.126,2793032,2733641,59391,6257.8,1842,2
+strict,max-event-time,DELTA_BASE_S,90.0,90000,90.0,0.0,99.301,99.3,0.699,2864149,2844122,20027,5912.2,1842,2
+strict,max-event-time,DELTA_BASE_S,120.0,120000,120.0,0.0,98.739,98.738,1.261,2922572,2885713,36859,5101.1,1843,2

@@ -231,6 +231,22 @@ Heuristic Watermark được thiết kế nhằm tối ưu hóa hiệu năng b�
 - **Khi xảy ra phân mảnh mạng (P $\rightarrow$ A)**: Hệ thống chọn tính khả dụng (**A**) và chấp nhận giảm tính nhất quán (**C**). Nhờ nguyên tắc tự trị trạm (Site Autonomy), các Worker bị cô lập hoặc các Worker còn sống vẫn tiếp tục ước lượng watermark cục bộ bằng DDSketch và chốt cửa sổ để xuất kết quả ra downstream mà không bị block bởi Coordinator hay các phân mảnh bị mất kết nối mạng.
 - **Trong điều kiện bình thường (E $\rightarrow$ L)**: Hệ thống chọn giảm độ trễ (**L**) và chấp nhận hy sinh tính nhất quán tức thời (**C**). Dựa trên ước lượng phân vị của DDSketch, hệ thống đóng cửa sổ sớm để giảm thời gian chờ chốt. Dữ liệu đến muộn hơn watermark được chuyển hướng sang hàng đợi DLQ để sửa đổi đền bù bất đồng bộ sau (Eventual Consistency), giúp hệ thống đạt độ trễ đầu cuối cực thấp trong vận hành thực tế.
 
+### 5.5 Đặc tả Giao tiếp Phân tán & Biện minh theo Lý thuyết (Distributed Communication & Directory Justification)
+
+Để quản lý trạng thái phân mảnh và điều phối mốc thời gian logic toàn cụm, hệ thống thiết lập một hệ thống giao tiếp đa tầng hoàn chỉnh. Hệ thống giao tiếp này không chỉ thực thi các đường dẫn dữ liệu vật lý mà còn hiện thực hóa trực tiếp các khái niệm lý thuyết cốt lõi của Özsu và Valduriez về **Distributed Directory (Catalog) Management** (Quản lý Danh bạ/Thư mục Phân tán) và **Distribution Transparency** (Tính minh bạch Phân tán).
+
+### 5.5.1 gRPC Interface làm Giao thức Quản lý Danh bạ Phân tán
+Özsu và Valduriez chỉ ra rằng một hệ quản trị dữ liệu phân tán cần một bộ quản lý danh bạ để lưu trữ cấu trúc phân mảnh, vị trí lưu trữ thực tế và trạng thái của các site. Tệp giao tiếp `common/csdlpt.proto` của dự án đóng vai trò là giao thức truyền thông của bộ quản lý danh bạ này:
+- **Cập nhật Danh bạ Trạng thái (State Directory Updates)**: Thông qua thông điệp `WorkerHeartbeatMsg`, các Worker báo cáo định kỳ danh sách phân mảnh đang kiểm soát (`partitions`) kèm theo tiến độ thời gian cục bộ ($LW_i$) và danh sách phân mảnh nhàn rỗi (`idle_partitions`). Đây chính là cơ chế đồng bộ danh bạ động từ các site cục bộ về node điều phối trung tâm.
+- **Nhân bản Danh bạ chịu lỗi (Replicated Directory Consistency)**: Bằng cách tích hợp giao thức bầu chọn Raft (`RaftVoteMsg`) và nhân bản trạng thái (`RaftStateMsg`), cụm Coordinator duy trì một bản sao danh bạ nhất quán mạnh (Strong Consistency), loại bỏ điểm lỗi đơn lẻ (SPOF) nhưng vẫn đảm bảo tính đúng đắn của dữ liệu metadata phân tán.
+- **Tự trị Cục bộ Bất đồng bộ (Asynchronous Site Autonomy)**: Trong chế độ Heuristic, thông điệp `WorkerWatermarkMsg` cho phép các Worker tự trị gửi mốc $W_h$ cục bộ của từng phân mảnh lên Aggregator một cách bất đồng bộ qua cổng gRPC `SendWorkerWatermark`, giảm thiểu tối đa chi phí chặn truyền thông (non-blocking communication cost).
+
+### 5.5.2 HTTP REST APIs làm Giao diện Minh bạch Phân tán (Distribution Transparency)
+Một hệ thống dữ liệu phân tán lý tưởng phải che giấu sự phức tạp của việc phân mảnh và phân bổ dữ liệu khỏi ứng dụng phía trên (dashboard giám sát hoặc client tiêu thụ). Giao diện HTTP REST API của Health & Control Server (sử dụng `HealthHandler` trong `run.py`) hiện thực hóa các mức độ minh bạch này:
+1. **Minh bạch Phân mảnh (Fragmentation Transparency)**: Client truy vấn endpoint `GET /state` để lấy mốc thời gian Watermark toàn cục và danh sách phân mảnh mà không cần biết dữ liệu được phân chia ngang thành 12 phân mảnh logic.
+2. **Minh bạch Vị trí (Location Transparency)**: Client truy cập các chỉ số thông qua `GET /api/metrics` hoặc thông tin chuyển giao phân mảnh qua `GET /failover` từ bất kỳ node nào trong hệ thống mà không cần biết phân mảnh $P_k$ đang nằm vật lý tại Worker nào (`node0` hay `node3`).
+3. **Quản lý Danh mục Lược đồ Phân tán (Distributed Schema Catalog)**: Các endpoint `GET /schemas/subjects/...` và `GET /schemas/ids/...` truy vấn trực tiếp vào bộ đăng ký lược đồ (`SchemaRegistry`), đảm bảo tính nhất quán của định dạng bản ghi trên toàn cụm phân tán mà không bắt các Worker phải lưu trữ bản sao lược đồ cứng.
+
 ---
 
 ## 6. Phân tích so sánh trực tiếp

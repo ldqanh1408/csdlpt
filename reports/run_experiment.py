@@ -35,6 +35,8 @@ Usage (from repo root):
     python reports/run_experiment.py --dataset nyc_taxi_events_full.csv --deltas 0,5,10,20,40
 """
 from __future__ import annotations
+import os
+os.environ["PYTHONUTF8"] = "1"
 import argparse
 import csv
 import importlib.util
@@ -210,7 +212,7 @@ def run_point(mode: str, punctuation: str, dataset: str, sweep_var: str, sweep_v
     # (INGESTOR_REPLAY=arrival REPLAY_SPEED=50). Paced replay makes max_event_time
     # advance gradually → cleaner completeness-vs-wait curve (vs fast-send which
     # makes the watermark aggressive).
-    for k in ("INGESTOR_REPLAY", "REPLAY_SPEED", "INGESTOR_SLEEP_S", "PUNCTUATION_INTERVAL_S"):
+    for k in ("INGESTOR_REPLAY", "REPLAY_SPEED", "INGESTOR_SLEEP_S", "PUNCTUATION_INTERVAL_S", "HEURISTIC_WARMUP_SAMPLES", "HEURISTIC_WARMUP_S", "HEURISTIC_LOCAL_WATERMARK_CLOSE"):
         if os.environ.get(k):
             env[k] = os.environ[k]
     # The swept independent variable (DELTA_BASE_S for strict, HEURISTIC_P_NORMAL
@@ -244,7 +246,7 @@ def run_point(mode: str, punctuation: str, dataset: str, sweep_var: str, sweep_v
         else:
             stable = 0
             last_total = total
-        consumed_ok = (target_rows == 0) or (total >= 0.90 * target_rows)
+        consumed_ok = (target_rows == 0) or (total >= 0.9999 * target_rows)
         comp_str = f"{comp:6.2f}%" if comp >= 0 else "     N/A"
         print(f"    t={int(time.time()-t0):>4}s received={total:>9,}"
               f"{('/'+format(target_rows,',')) if target_rows else ''} "
@@ -296,7 +298,7 @@ def run_point(mode: str, punctuation: str, dataset: str, sweep_var: str, sweep_v
         "run_seconds": int(time.time() - t0),
         "samples": len(samples),
     }
-    print(f"  -> {sweep_var}={sweep_value}  wait≈{wait_ms}ms  "
+    print(f"  -> {sweep_var}={sweep_value}  wait~{wait_ms}ms  "
           f"completeness final={row['completeness_final_pct']}% avg={row['completeness_avg_pct']}%  "
           f"late={row['late_rate_pct']}%  received={row['total_received']:,}")
     return row

@@ -25,7 +25,7 @@ def _flag_enabled(name: str, default: bool = True) -> bool:
         return default
     return raw.lower() in ("1", "true", "yes", "on")
 
-from ddsketch import DDSketch, SlidingWindowDDSketch
+from local_ddsketch import DDSketch, SlidingWindowDDSketch
 from common.types import LogEvent, WindowResult
 from common.window import TumblingWindow
 from common.metrics import HighResTimer, SystemMetrics
@@ -81,6 +81,12 @@ class HeuristicWatermarkEngine:
         cfg["warmup_min_samples"] = int(os.environ.get("HEURISTIC_WARMUP_SAMPLES", cfg["warmup_min_samples"]))
         cfg["warmup_min_seconds"] = float(os.environ.get("HEURISTIC_WARMUP_S", cfg["warmup_min_seconds"]))
         cfg["wm_max_advance_rate"] = float(os.environ.get("HEURISTIC_WM_ADVANCE_RATE", cfg["wm_max_advance_rate"]))
+        # Swept percentile must reach the engine. Without this the worker never
+        # forwards HEURISTIC_P_NORMAL/SAFE (run.py constructs the engine without
+        # p_normal=), so every sweep point silently ran at the default p=0.99 —
+        # the percentile knob was a no-op and completeness stayed flat.
+        cfg["p_normal"] = float(os.environ.get("HEURISTIC_P_NORMAL", cfg["p_normal"]))
+        cfg["p_safe"] = float(os.environ.get("HEURISTIC_P_SAFE", cfg["p_safe"]))
         self.partition_id = partition_id
         self.worker_id = worker_id
 
@@ -442,7 +448,7 @@ class HeuristicWatermarkEngine:
     def _update_L_eff(self) -> None:
         """Update L_eff from sketch, with adaptive percentile and threshold."""
         # Cold start: use conservative prior until warm
-        self.cold_start.update(self.sketch.total_count)
+        self.cold_start.update(self.metrics.total_received)
         if not self.cold_start.is_warm:
             self.L_eff_prev = self.L_eff
             self.L_eff = self.cold_start.get_L_eff(
@@ -547,7 +553,20 @@ class HeuristicWatermarkEngine:
         if self.cold_start.phase.name == "PHASE_0":
             return
 
-        w_limit = self.W_global_h if self.W_global_h > float("-inf") else self.W_h
+        # Normally windows close on the GLOBAL watermark (min across all
+        # partitions) for cross-partition consistency when emitting results.
+        # For the completeness-vs-wait sweep (topic #112) that global min is
+        # dragged down by the slowest/least-warmed partition, so it lags the
+        # arrival frontier by far more than L_eff — windows never close in time,
+        # every event lands on_time, and completeness is a flat 100% at every
+        # percentile. HEURISTIC_LOCAL_WATERMARK_CLOSE makes window closing use
+        # the LOCAL per-partition watermark (max_event_time - L_eff), matching
+        # the offline analytical model (analyze_dataset.py) so the percentile
+        # knob actually trades immediate completeness against wait time.
+        if _flag_enabled("HEURISTIC_LOCAL_WATERMARK_CLOSE", False):
+            w_limit = self.W_h
+        else:
+            w_limit = self.W_global_h if self.W_global_h > float("-inf") else self.W_h
         to_close = [
             w for w in list(self.open_windows)
             if w + self.tumbling.size <= w_limit
@@ -664,15 +683,32 @@ class HeuristicWatermarkEngine:
         if arrival_time is None:
             arrival_time = getattr(event, "arrival_time", None) or time.time()
 
+        if arrival_time > 0:
+            poll_received_at = getattr(event, "poll_received_at", 0.0)
+            if poll_received_at > 0:
+                self.metrics.T_network_ingest_ns.append(
+                    (poll_received_at - event.event_time) * 1_000_000_000
+                )
+                self.metrics.T_poll_decode_ns.append(
+                    (arrival_time - poll_received_at) * 1_000_000_000
+                )
+            else:
+                self.metrics.T_network_ingest_ns.append(
+                    (arrival_time - event.event_time) * 1_000_000_000
+                )
+
         # Dedup (TTL-bounded — §6.5)
+        t_dedup = HighResTimer.now_ns()
         if event.event_id in self.seen_ids:
             self.metrics.duplicates += 1
+            self.metrics.T_deduplication_ns.append(HighResTimer.now_ns() - t_dedup)
             return None
         self.seen_ids[event.event_id] = arrival_time
         self._persist_seen_id(event.event_id)
 
         # Periodic RocksDB dedup compaction
         self._purge_seen_ids()
+        self.metrics.T_deduplication_ns.append(HighResTimer.now_ns() - t_dedup)
 
         # Periodic closed-window TTL purge (Gap 5)
         self._purge_old_closed_windows()
@@ -782,14 +818,18 @@ class HeuristicWatermarkEngine:
                 agg.count += 1
                 if event.status == 500:
                     agg.status_500 += 1
+                t_state = HighResTimer.now_ns()
                 self._persist_open_window(ws)
+                self.metrics.T_state_write_ns.append(HighResTimer.now_ns() - t_state)
                 self.metrics.on_time += 1
             else:
                 self.open_windows[ws] = WindowAggregate(
                     count=1,
                     status_500=1 if event.status == 500 else 0,
                 )
+                t_state = HighResTimer.now_ns()
                 self._persist_open_window(ws)
+                self.metrics.T_state_write_ns.append(HighResTimer.now_ns() - t_state)
                 self.metrics.on_time += 1
 
         # Periodic snapshot

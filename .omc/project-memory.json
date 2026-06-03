@@ -1,6 +1,6 @@
 {
   "version": "1.0.0",
-  "lastScanned": 1780296039681,
+  "lastScanned": 1780402282633,
   "projectRoot": "D:\\dev\\csdlpt",
   "techStack": {
     "languages": [
@@ -44,8 +44,8 @@
     "common": {
       "path": "common",
       "purpose": null,
-      "fileCount": 18,
-      "lastAccessed": 1780296039662,
+      "fileCount": 17,
+      "lastAccessed": 1780402281515,
       "keyFiles": [
         "alerting.py",
         "config.py",
@@ -57,21 +57,19 @@
     "dataset": {
       "path": "dataset",
       "purpose": null,
-      "fileCount": 8,
-      "lastAccessed": 1780296039663,
+      "fileCount": 3,
+      "lastAccessed": 1780402281518,
       "keyFiles": [
-        "data.csv",
-        "nyc_taxi_events.csv",
         "nyc_taxi_events_full.csv",
-        "nyc_taxi_preview.csv",
-        "oo_compressed.csv"
+        "yellow_tripdata_2024-01.csv",
+        "yellow_tripdata_2024-01.parquet"
       ]
     },
     "ddsketch": {
       "path": "ddsketch",
       "purpose": null,
       "fileCount": 3,
-      "lastAccessed": 1780296039663,
+      "lastAccessed": 1780402281518,
       "keyFiles": [
         "compat.py",
         "sketch.py",
@@ -81,34 +79,34 @@
     "deploy": {
       "path": "deploy",
       "purpose": null,
-      "fileCount": 14,
-      "lastAccessed": 1780296039663,
+      "fileCount": 8,
+      "lastAccessed": 1780402281519,
       "keyFiles": [
         "dashboard.py",
-        "dataset_stats.py",
-        "docker-compose.sim.yml",
         "docker-compose.yml",
-        "Dockerfile"
+        "Dockerfile",
+        "entrypoint.sh",
+        "grafana-dashboard.json"
       ]
     },
     "docs": {
       "path": "docs",
       "purpose": "Documentation",
-      "fileCount": 17,
-      "lastAccessed": 1780296039664,
+      "fileCount": 19,
+      "lastAccessed": 1780402281519,
       "keyFiles": [
         "Bao_Cao_Thiet_Ke_He_Thong_Watermark.tex",
         "dataset_stats_yellow_2024-01.txt",
-        "error.txt",
         "heuristic_sweep_20260531_123703.csv",
-        "heuristic_sweep_20260531_130204.csv"
+        "heuristic_sweep_20260531_130204.csv",
+        "heuristic_sweep_20260602_183227.csv"
       ]
     },
     "heuristic": {
       "path": "heuristic",
       "purpose": null,
       "fileCount": 8,
-      "lastAccessed": 1780296039664,
+      "lastAccessed": 1780402281520,
       "keyFiles": [
         "aggregator.py",
         "aggregator_ha.py",
@@ -120,10 +118,19 @@
     "hybrid": {
       "path": "hybrid",
       "purpose": null,
-      "fileCount": 2,
-      "lastAccessed": 1780296039664,
+      "fileCount": 0,
+      "lastAccessed": 1780402281520,
+      "keyFiles": []
+    },
+    "reports": {
+      "path": "reports",
+      "purpose": null,
+      "fileCount": 4,
+      "lastAccessed": 1780402281521,
       "keyFiles": [
-        "router.py",
+        "analyze_dataset.py",
+        "run_all.py",
+        "run_experiment.py",
         "__init__.py"
       ]
     },
@@ -131,7 +138,7 @@
       "path": "strict",
       "purpose": null,
       "fileCount": 11,
-      "lastAccessed": 1780296039665,
+      "lastAccessed": 1780402281521,
       "keyFiles": [
         "backpressure.py",
         "coordinator.py",
@@ -143,8 +150,8 @@
     "tests": {
       "path": "tests",
       "purpose": "Test files",
-      "fileCount": 17,
-      "lastAccessed": 1780296039665,
+      "fileCount": 15,
+      "lastAccessed": 1780402281521,
       "keyFiles": [
         "check_state.py",
         "test_backpressure.py",
@@ -153,11 +160,23 @@
         "test_docker_compose_chaos.py"
       ]
     },
+    "tools": {
+      "path": "tools",
+      "purpose": null,
+      "fileCount": 4,
+      "lastAccessed": 1780402281522,
+      "keyFiles": [
+        "dataset_stats.py",
+        "make_out_of_order.py",
+        "nyc_taxi_to_events.py",
+        "__init__.py"
+      ]
+    },
     "__pycache__": {
       "path": "__pycache__",
       "purpose": null,
       "fileCount": 4,
-      "lastAccessed": 1780296039665,
+      "lastAccessed": 1780402281522,
       "keyFiles": [
         "run.cpython-310.pyc",
         "run.cpython-314.pyc",
@@ -166,6 +185,121 @@
       ]
     }
   },
-  "hotPaths": [],
+  "hotPaths": [
+    {
+      "path": "docs\\hehe\\Distributed_Database_Project_Proposal.tex",
+      "accessCount": 45,
+      "lastAccessed": 1780439191584,
+      "type": "file"
+    },
+    {
+      "path": "docs\\hehe\\REPORT_OZSU_VALDURIEZ_DESIGN_JUSTIFICATION.tex",
+      "accessCount": 21,
+      "lastAccessed": 1780439178825,
+      "type": "file"
+    },
+    {
+      "path": "docs\\hehe\\Tom_Tat_Thiet_Ke_Watermark.tex",
+      "accessCount": 13,
+      "lastAccessed": 1780438486319,
+      "type": "file"
+    },
+    {
+      "path": "heuristic\\engine.py",
+      "accessCount": 9,
+      "lastAccessed": 1780437340464,
+      "type": "file"
+    },
+    {
+      "path": "run.py",
+      "accessCount": 7,
+      "lastAccessed": 1780437315623,
+      "type": "file"
+    },
+    {
+      "path": "reports\\run_heuristic_sweep.py",
+      "accessCount": 3,
+      "lastAccessed": 1780437202485,
+      "type": "file"
+    },
+    {
+      "path": "reports\\results\\task-313.log",
+      "accessCount": 2,
+      "lastAccessed": 1780436879157,
+      "type": "file"
+    },
+    {
+      "path": "deploy\\docker-compose.yml",
+      "accessCount": 2,
+      "lastAccessed": 1780437192082,
+      "type": "file"
+    },
+    {
+      "path": "common\\rocks_store.py",
+      "accessCount": 1,
+      "lastAccessed": 1780435474993,
+      "type": "file"
+    },
+    {
+      "path": "reports\\results\\task-621.log",
+      "accessCount": 1,
+      "lastAccessed": 1780435534118,
+      "type": "file"
+    },
+    {
+      "path": "tools\\make_out_of_order.py",
+      "accessCount": 1,
+      "lastAccessed": 1780435802890,
+      "type": "file"
+    },
+    {
+      "path": "reports\\run_experiment.py",
+      "accessCount": 1,
+      "lastAccessed": 1780435923344,
+      "type": "file"
+    },
+    {
+      "path": "heuristic\\cold_start.py",
+      "accessCount": 1,
+      "lastAccessed": 1780435936910,
+      "type": "file"
+    },
+    {
+      "path": "C:\\Users\\CYBORG\\.gemini\\antigravity-cli\\brain\\1cd8d09e-ebc3-4fa7-a4c6-c5c812b61b0b\\.system_generated\\tasks\\task-652.log",
+      "accessCount": 1,
+      "lastAccessed": 1780436289919,
+      "type": "file"
+    },
+    {
+      "path": "heuristic\\aggregator.py",
+      "accessCount": 1,
+      "lastAccessed": 1780437020099,
+      "type": "file"
+    },
+    {
+      "path": "tests\\test_heuristic.py",
+      "accessCount": 1,
+      "lastAccessed": 1780437214699,
+      "type": "file"
+    },
+    {
+      "path": "docs\\hehe\\REPORT_OZSU_VALDURIEZ_DESIGN_JUSTIFICATION.md",
+      "accessCount": 1,
+      "lastAccessed": 1780437381297,
+      "type": "file"
+    },
+    {
+      "path": "docs\\hehe\\project_proposal_summary.md",
+      "accessCount": 1,
+      "lastAccessed": 1780437418962,
+      "type": "file"
+    },
+    {
+      "path": "docs\\hehe",
+      "accessCount": 1,
+      "lastAccessed": 1780438635251,
+      "type": "directory"
+    }
+  ],
   "userDirectives": []
 }

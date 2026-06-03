@@ -7,7 +7,7 @@ legacy API so existing callers require no changes.
 
 import math
 import pytest
-from ddsketch import DDSketch, SlidingWindowDDSketch
+from local_ddsketch import DDSketch, SlidingWindowDDSketch
 
 
 class TestDDSketch:

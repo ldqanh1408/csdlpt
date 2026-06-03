@@ -41,7 +41,7 @@ services:
       COORDINATOR_ID: "coordinator-1:8000"
       DELTA_BASE_S: "${DELTA_BASE_S:-10.0}"
       WINDOW_SIZE_S: "5.0"
-      CHECKPOINT_DIR: /data/checkpoint
+      CHECKPOINT_DIR: /tmp/checkpoint
       PAGERDUTY_ROUTING_KEY: ""
       LOG_LEVEL: "${LOG_LEVEL:-debug}"
       RAFT_PEERS: "coordinator-1:8000,coordinator-2:8000,coordinator-3:8000"
@@ -55,6 +55,8 @@ services:
       - "9050:8050"
     volumes:
       - ./checkpoint/coordinator-1:/data
+    tmpfs:
+      - /tmp
     restart: unless-stopped
     logging: *default-logging
     depends_on:
@@ -91,7 +93,7 @@ services:
       COORDINATOR_ID: "coordinator-2:8000"
       DELTA_BASE_S: "${DELTA_BASE_S:-10.0}"
       WINDOW_SIZE_S: "5.0"
-      CHECKPOINT_DIR: /data/checkpoint-2
+      CHECKPOINT_DIR: /tmp/checkpoint-2
       PAGERDUTY_ROUTING_KEY: ""
       LOG_LEVEL: "${LOG_LEVEL:-debug}"
       RAFT_PEERS: "coordinator-1:8000,coordinator-2:8000,coordinator-3:8000"
@@ -116,7 +118,7 @@ services:
       COORDINATOR_ID: "coordinator-3:8000"
       DELTA_BASE_S: "${DELTA_BASE_S:-10.0}"
       WINDOW_SIZE_S: "5.0"
-      CHECKPOINT_DIR: /data/checkpoint-3
+      CHECKPOINT_DIR: /tmp/checkpoint-3
       PAGERDUTY_ROUTING_KEY: ""
       LOG_LEVEL: "${LOG_LEVEL:-debug}"
       RAFT_PEERS: "coordinator-1:8000,coordinator-2:8000,coordinator-3:8000"
@@ -137,7 +139,7 @@ services:
     command: ["python3", "-m", "refactor.run", "--role", "aggregator", "--mode", "heuristic"]
     environment:
       PYTHONUNBUFFERED: "1"
-      CHECKPOINT_DIR: /data/checkpoint-aggregator
+      CHECKPOINT_DIR: /tmp/checkpoint-aggregator
       LOG_LEVEL: "${LOG_LEVEL:-debug}"
       ROLE: aggregator
       MODE: heuristic
@@ -153,6 +155,8 @@ services:
       - "9007:8000"
     volumes:
       - ./checkpoint/aggregator:/data
+    tmpfs:
+      - /tmp
     profiles: ["heuristic"]
     restart: unless-stopped
     logging: *default-logging
@@ -182,7 +186,7 @@ services:
     command: ["python3", "-m", "refactor.run", "--role", "aggregator", "--mode", "heuristic"]
     environment:
       PYTHONUNBUFFERED: "1"
-      CHECKPOINT_DIR: /data/checkpoint-aggregator-standby
+      CHECKPOINT_DIR: /tmp/checkpoint-aggregator-standby
       LOG_LEVEL: "${LOG_LEVEL:-debug}"
       ROLE: aggregator
       MODE: heuristic
@@ -200,6 +204,8 @@ services:
     volumes:
       - ./checkpoint/aggregator-standby:/data
       - aggregator_lock:/lock
+    tmpfs:
+      - /tmp
     profiles: ["heuristic"]
     restart: unless-stopped
     logging: *default-logging
@@ -231,6 +237,7 @@ services:
     command: ["python3", "-m", "refactor.run", "--role", "worker", "--mode", "${MODE:-strict}"]
     environment:
       PYTHONUNBUFFERED: "1"
+      CHECKPOINT_DIR: /tmp/checkpoint
       NODE_ID: "0"
       ROLE: worker
       MODE: "${MODE:-strict}"
@@ -250,6 +257,7 @@ services:
       HEURISTIC_WARMUP_S: "${HEURISTIC_WARMUP_S:-10.0}"
       HEURISTIC_WARMUP_SAMPLES: "${HEURISTIC_WARMUP_SAMPLES:-50000}"
       HEURISTIC_WM_ADVANCE_RATE: "${HEURISTIC_WM_ADVANCE_RATE:-1000000000.0}"
+      HEURISTIC_LOCAL_WATERMARK_CLOSE: "${HEURISTIC_LOCAL_WATERMARK_CLOSE:-false}"
       BP_PAUSE_THRESHOLD: "${BP_PAUSE_THRESHOLD:-5000}"
       BP_RESUME_THRESHOLD: "${BP_RESUME_THRESHOLD:-1000}"
       STRICT_HARD_QUEUE_LIMIT: "${STRICT_HARD_QUEUE_LIMIT:-100000}"
@@ -267,6 +275,8 @@ services:
       # partitions (by NODE_ID + PARTITIONS), so a single-node restart never
       # wipes the RocksDB dirs the other live workers have open.
       - ./checkpoint/shared:/data
+    tmpfs:
+      - /tmp
     restart: unless-stopped
     logging: *default-logging
     depends_on:
@@ -310,6 +320,7 @@ services:
       HEURISTIC_WARMUP_S: "${HEURISTIC_WARMUP_S:-10.0}"
       HEURISTIC_WARMUP_SAMPLES: "${HEURISTIC_WARMUP_SAMPLES:-50000}"
       HEURISTIC_WM_ADVANCE_RATE: "${HEURISTIC_WM_ADVANCE_RATE:-1000000000.0}"
+      HEURISTIC_LOCAL_WATERMARK_CLOSE: "${HEURISTIC_LOCAL_WATERMARK_CLOSE:-false}"
       BP_PAUSE_THRESHOLD: "${BP_PAUSE_THRESHOLD:-5000}"
       BP_RESUME_THRESHOLD: "${BP_RESUME_THRESHOLD:-1000}"
       STRICT_HARD_QUEUE_LIMIT: "${STRICT_HARD_QUEUE_LIMIT:-100000}"
@@ -347,6 +358,7 @@ services:
       HEURISTIC_WARMUP_S: "${HEURISTIC_WARMUP_S:-10.0}"
       HEURISTIC_WARMUP_SAMPLES: "${HEURISTIC_WARMUP_SAMPLES:-50000}"
       HEURISTIC_WM_ADVANCE_RATE: "${HEURISTIC_WM_ADVANCE_RATE:-1000000000.0}"
+      HEURISTIC_LOCAL_WATERMARK_CLOSE: "${HEURISTIC_LOCAL_WATERMARK_CLOSE:-false}"
       BP_PAUSE_THRESHOLD: "${BP_PAUSE_THRESHOLD:-5000}"
       BP_RESUME_THRESHOLD: "${BP_RESUME_THRESHOLD:-1000}"
       STRICT_HARD_QUEUE_LIMIT: "${STRICT_HARD_QUEUE_LIMIT:-100000}"
@@ -384,6 +396,7 @@ services:
       HEURISTIC_WARMUP_S: "${HEURISTIC_WARMUP_S:-10.0}"
       HEURISTIC_WARMUP_SAMPLES: "${HEURISTIC_WARMUP_SAMPLES:-50000}"
       HEURISTIC_WM_ADVANCE_RATE: "${HEURISTIC_WM_ADVANCE_RATE:-1000000000.0}"
+      HEURISTIC_LOCAL_WATERMARK_CLOSE: "${HEURISTIC_LOCAL_WATERMARK_CLOSE:-false}"
       BP_PAUSE_THRESHOLD: "${BP_PAUSE_THRESHOLD:-5000}"
       BP_RESUME_THRESHOLD: "${BP_RESUME_THRESHOLD:-1000}"
       STRICT_HARD_QUEUE_LIMIT: "${STRICT_HARD_QUEUE_LIMIT:-100000}"

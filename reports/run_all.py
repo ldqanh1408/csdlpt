@@ -22,8 +22,10 @@ Output:
         comparison_report.md        — Combined summary with completeness curves
 """
 from __future__ import annotations
-import argparse
 import os
+os.environ["PYTHONUTF8"] = "1"
+os.environ["PYTHONUNBUFFERED"] = "1"
+import argparse
 import subprocess
 import sys
 import time
@@ -43,7 +45,7 @@ EXPERIMENT_SCRIPT = REPORTS_DIR / "run_experiment.py"
 CONVERTER_SCRIPT = PROJECT_ROOT / "tools" / "nyc_taxi_to_events.py"
 
 
-def _run(cmd: list[str], cwd=None, timeout=3600) -> int:
+def _run(cmd: list[str], cwd=None, timeout=86400) -> int:
     """Run a command, streaming output to stdout."""
     label = " ".join(str(c) for c in cmd)
     print(f"\n{'='*60}\n[run_all] {label}\n{'='*60}", flush=True)
@@ -107,13 +109,14 @@ def run_offline_analysis() -> Path | None:
     return None
 
 
-def run_docker_experiment(mode: str, deltas_or_ps: str, max_wait: int = 600) -> Path | None:
+def run_docker_experiment(mode: str, deltas_or_ps: str, max_wait: int = 600, punctuation: str = "max-event-time") -> Path | None:
     """Run one Docker experiment sweep. Returns path to report or None."""
     ts = datetime.now().strftime("%Y%m%d_%H%M%S")
 
     cmd = [
         sys.executable, str(EXPERIMENT_SCRIPT),
         "--mode", mode,
+        "--punctuation", punctuation,
         "--dataset", DATASET_READY.name,
         "--max-wait", str(max_wait),
         "--settle", "30",
@@ -127,11 +130,25 @@ def run_docker_experiment(mode: str, deltas_or_ps: str, max_wait: int = 600) -> 
 
     # experiment outputs CSV+MD to docs/
     docs_dir = PROJECT_ROOT / "docs"
-    pattern = f"completeness_vs_wait_{mode}_*"
-    reports = sorted(docs_dir.glob(f"{pattern}*"), key=os.path.getmtime, reverse=True)
-    if reports:
-        return reports[0]
-    return None
+    import shutil
+    latest_md = sorted(docs_dir.glob(f"completeness_vs_wait_{mode}_*.md"), key=os.path.getmtime, reverse=True)
+    latest_csv = sorted(docs_dir.glob(f"completeness_vs_wait_{mode}_*.csv"), key=os.path.getmtime, reverse=True)
+    
+    copied_md_path = None
+    if latest_md:
+        src_md = latest_md[0]
+        dest_md = ARTIFACTS_DIR / src_md.name
+        shutil.copy2(src_md, dest_md)
+        print(f"[run_all] Copied {mode} MD report -> {dest_md}")
+        copied_md_path = dest_md
+        
+    if latest_csv:
+        src_csv = latest_csv[0]
+        dest_csv = ARTIFACTS_DIR / src_csv.name
+        shutil.copy2(src_csv, dest_csv)
+        print(f"[run_all] Copied {mode} CSV report -> {dest_csv}")
+        
+    return copied_md_path
 
 
 def generate_comparison(strict_report: Path | None, heuristic_report: Path | None) -> Path:
@@ -199,13 +216,22 @@ def main():
                     help="Also run Docker-based experiments (requires Docker)")
     ap.add_argument("--strict-deltas", default="0,5,10,20,40,60,90,120",
                     help="Comma-separated delta values for strict mode (seconds)")
-    ap.add_argument("--heuristic-ps", default="0.50,0.75,0.90,0.95,0.99,0.999",
+    ap.add_argument("--heuristic-ps", default="0.10,0.20,0.30,0.40,0.50,0.75,0.90,0.95,0.99,0.999,0.9999",
                     help="Comma-separated percentile values for heuristic mode")
-    ap.add_argument("--max-wait", type=int, default=600,
+    ap.add_argument("--max-wait", type=int, default=1800,
                     help="Max wait seconds for Docker experiments")
     ap.add_argument("--rows", type=int, default=0,
                     help="Max rows for converter (0=all, 150000 for quick test)")
+    ap.add_argument("--output-dir", default=str(REPORTS_DIR / "results"),
+                    help="Directory to save all final reports and CSV files")
+    ap.add_argument("--punctuation", default="max-event-time",
+                    choices=["wall-clock", "data-driven", "max-event-time"],
+                    help="Punctuation mode for the stream processing engine")
     args = ap.parse_args()
+
+    global ARTIFACTS_DIR
+    ARTIFACTS_DIR = Path(args.output_dir).resolve()
+    ARTIFACTS_DIR.mkdir(parents=True, exist_ok=True)
 
     t0 = time.time()
 
@@ -222,10 +248,10 @@ def main():
     # 3. Docker experiments
     if args.docker:
         print("\n[run_all] Step 2/3: Strict mode Docker experiment...")
-        strict_report = run_docker_experiment("strict", args.strict_deltas, args.max_wait)
+        strict_report = run_docker_experiment("strict", args.strict_deltas, args.max_wait, args.punctuation)
 
         print("\n[run_all] Step 3/3: Heuristic mode Docker experiment...")
-        heuristic_report = run_docker_experiment("heuristic", args.heuristic_ps, args.max_wait)
+        heuristic_report = run_docker_experiment("heuristic", args.heuristic_ps, args.max_wait, args.punctuation)
 
     # 4. Generate comparison
     comparison = generate_comparison(strict_report, heuristic_report)

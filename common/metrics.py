@@ -61,8 +61,33 @@ class SystemMetrics:
         total = max(self.total_received, 1)
         return 100.0 * self.late_dropped / total
 
+    @staticmethod
+    def _latency_us(values: list[float], percentile: float) -> float:
+        values = [v for v in values if v >= 0]
+        if not values:
+            return 0.0
+        sorted_v = sorted(values)
+        idx = min(int(len(sorted_v) * percentile), len(sorted_v) - 1)
+        return round(sorted_v[idx] / 1000.0, 2)
+
+    def latency_summary(self) -> dict:
+        stages = {
+            "network_ingest": self.T_network_ingest_ns,
+            "poll_decode": self.T_poll_decode_ns,
+            "dedup": self.T_deduplication_ns,
+            "state_write": self.T_state_write_ns,
+            "sketch_update": self.T_sketch_update_ns,
+            "sketch_query": self.T_sketch_query_ns,
+        }
+        result = {}
+        for name, values in stages.items():
+            result[f"{name}_latency_p50_us"] = self._latency_us(values, 0.50)
+            result[f"{name}_latency_p95_us"] = self._latency_us(values, 0.95)
+            result[f"{name}_latency_p99_us"] = self._latency_us(values, 0.99)
+        return result
+
     def summary(self) -> dict:
-        return {
+        result = {
             "total_received": self.total_received,
             "on_time": self.on_time,
             "late_dropped": self.late_dropped,
@@ -88,3 +113,5 @@ class SystemMetrics:
             "watermark_lag_s": round(self.watermark_lag_s, 3),
             "fencing_token_violations": self.fencing_token_violations,
         }
+        result.update(self.latency_summary())
+        return result

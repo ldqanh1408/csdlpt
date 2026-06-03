@@ -373,6 +373,8 @@ Toàn bộ cấu hình qua biến môi trường — không cần file `.env`. T
 | `TOTAL_PARTITIONS` | `12` | Số Kafka partition |
 | `DATASET_FILE` | `nyc_taxi_events_full.csv` | File dataset cho ingestor |
 | `LOG_LEVEL` | `debug` | `debug`, `info`, `warning` |
+| `PUNCTUATION_MODE` | `data-driven` | Chế độ phát Punctuation: `data-driven`, `max-event-time`, `wall-clock` |
+| `PUNCTUATION_INTERVAL_S` | `1.0` | Chu kỳ phát Punctuation Token (Empty/Progress) |
 
 ### 5.2 Strict Mode
 
@@ -380,7 +382,6 @@ Toàn bộ cấu hình qua biến môi trường — không cần file `.env`. T
 |---|---|---|
 | `DELTA_BASE_S` | `10.0` | Biên an toàn (giây) |
 | `HEARTBEAT_TIMEOUT_S` | `10.0` | Ngưỡng timeout heartbeat worker |
-| `PUNCTUATION_INTERVAL_S` | `1.0` | Chu kỳ Empty Punctuation khi partition idle |
 | `FAILOVER_ENABLED` | `false` | Bật failover tự động |
 | `COORDINATOR_PEERS` | `""` | Danh sách peer (cách nhau `,`) |
 
@@ -394,6 +395,48 @@ Toàn bộ cấu hình qua biến môi trường — không cần file `.env`. T
 | `HEURISTIC_L_MAX` | `60.0` | Trần L_eff (giây) |
 | `DLQ_RETENTION_DAYS` | `7` | Thời gian giữ DLQ |
 | `AGGREGATOR_HA_ENABLED` | `false` | Bật Active-Standby HA |
+
+### 5.4 Cấu hình Chế độ Punctuation (`PUNCTUATION_MODE`)
+
+Hệ thống hỗ trợ 3 chế độ phát thông điệp kiểm soát mốc thời gian (**Punctuation**) từ Ingestor để cập nhật Watermark. Cấu hình thông qua biến môi trường `PUNCTUATION_MODE`:
+
+1. **`data-driven` (Mặc định)**:
+   * **Nguyên lý**: Trong quá trình nạp (ingestion), watermark toàn cục được giữ ở $-\infty$. Khi kết thúc luồng dữ liệu (EOF), Ingestor sẽ phát một xung Punctuation có mốc thời gian bằng $T_{max\_event} + \delta + \text{window}$ để chốt và giải phóng toàn bộ các cửa sổ cùng một lúc.
+   * **Ưu điểm**: Đảm bảo độ hoàn thiện dữ liệu (Data Completeness) đạt tuyệt đối **100%** khi chạy lại (replay) tập dữ liệu CSV thô, không có bản ghi nào bị đánh dấu trễ.
+   * **Nhược điểm**: Không chốt cửa sổ lũy tiến trong khi chạy; tất cả các cửa sổ được giữ trong RocksDB và chỉ chốt ở cuối luồng (tốn bộ nhớ RAM/RocksDB hơn).
+
+2. **`max-event-time`**:
+   * **Nguyên lý**: Watermark cục bộ của mỗi phân mảnh tịnh tiến lũy tiến dựa trên mốc thời gian sự kiện lớn nhất thực tế ghi nhận được trên phân mảnh đó ($T_{\text{commit}} = T_{\text{event\_max}}$).
+   * **Ưu điểm**: Cho phép đóng cửa sổ một cách liên tục và lũy tiến (progressive) theo dòng chảy thời gian của dữ liệu, giảm thiểu bộ nhớ đệm. Không có sự lây nhiễm chéo độ trễ giữa các phân mảnh (cross-partition contamination).
+   * **Nhược điểm**: Nếu dữ liệu bị đảo lộn thứ tự mạnh vượt quá biên an toàn, một số bản ghi có thể bị coi là đến muộn và bị loại bỏ (Strict) hoặc định tuyến sang DLQ (Heuristic).
+
+3. **`wall-clock`**:
+   * **Nguyên lý**: Watermark tịnh tiến dựa trên thời gian vật lý của hệ thống phát ($T_{\text{commit}} = \text{now} - \delta$).
+   * **Ưu điểm**: Phù hợp cho môi trường streaming thời gian thực (real-time streaming) khi Ingestor nhận dữ liệu live liên tục từ Web Server.
+   * **Nhược điểm**: Phụ thuộc vào tốc độ phát lại và đồng bộ đồng hồ (clock skew) giữa các node.
+
+#### Hướng dẫn chạy cụ thể cho các chế độ Punctuation:
+
+* **Khi chạy bằng Docker Compose**:
+  Thiết lập biến môi trường `PUNCTUATION_MODE` trước khi khởi chạy lệnh compose:
+  ```bash
+  # Chạy Strict Mode với punctuation dựa trên thời gian sự kiện lớn nhất
+  PUNCTUATION_MODE=max-event-time MODE=strict docker compose --profile strict up --build
+
+  # Chạy Heuristic Mode với punctuation dựa trên thời gian thực hệ thống
+  PUNCTUATION_MODE=wall-clock MODE=heuristic docker compose --profile heuristic up --build
+  ```
+
+* **Khi chạy quét thực nghiệm (Experiment Sweeps)**:
+  Sử dụng tham số `--punctuation` của script `reports/run_experiment.py`:
+  ```bash
+  # Chạy quét Strict
+  python reports/run_experiment.py --mode strict --punctuation max-event-time --dataset nyc_taxi_events_sliced.csv
+
+  # Chạy quét Heuristic
+  python reports/run_experiment.py --mode heuristic --punctuation max-event-time --dataset nyc_taxi_events_sliced.csv
+  ```
+
 
 ---
 
@@ -452,39 +495,101 @@ Tất cả service có HTTP REST API. gRPC endpoint tại `port + 50`.
 
 ---
 
-## 8. Sinh báo cáo tự động (`reports/`)
+## 8. Chạy thực nghiệm & Sinh báo cáo (`reports/`)
 
-Một lệnh duy nhất chạy toàn bộ pipeline phân tích và sinh báo cáo so sánh Strict vs Heuristic:
+Hệ thống hỗ trợ chạy thực nghiệm trên môi trường Docker để quét và đo lường đường cong **Completeness % vs Wait Time (ms)** giữa **Strict Mode** và **Heuristic Mode** bằng cờ `--mode`.
 
+### 8.1 Chuẩn bị dữ liệu rút gọn (Sliced Dataset - Khuyên dùng)
+Dữ liệu gốc `nyc_taxi_events_full.csv` có gần 3 triệu dòng và mất khoảng 30 phút cho mỗi điểm chạy. Để chạy thử nghiệm nhanh (chỉ mất 2-3 phút cho mỗi cấu hình), hãy cắt ra **200,000 dòng đầu tiên** làm tập test:
+* **Windows (PowerShell):**
+  ```powershell
+  python -c "with open('dataset/nyc_taxi_events_full.csv','r',encoding='utf-8') as f: h=f.readline(); r=[f.readline() for _ in range(200000)]; open('dataset/nyc_taxi_events_sliced.csv','w',encoding='utf-8',newline='').write(h+''.join(r))"
+  ```
+* **Linux/macOS (Bash):**
+  ```bash
+  head -n 200001 dataset/nyc_taxi_events_full.csv > dataset/nyc_taxi_events_sliced.csv
+  ```
+
+---
+
+### 8.2 Chạy thực nghiệm trên cụm phân tán (Docker)
+
+#### Bước 1: Chạy quét các điểm của Strict Mode
+Strict Mode chốt cửa sổ dựa trên Watermark toàn cục. Ta tiến hành quét biên an toàn `DELTA_BASE_S` (giây):
 ```bash
-# Offline — phân tích số + vẽ đường cong (không cần Docker, ~3 phút)
-python reports/run_all.py
-
-# Docker — chạy thực nghiệm đầy đủ với cụm phân tán (~30 phút)
-python reports/run_all.py --docker
-```
-
-**Kết quả lưu trong `reports/artifacts/`:**
-
-| File | Mô tả |
-|---|---|
-| `analysis_report.md` | Phân tích offline toàn bộ dataset |
-| `comparison_report.md` | So sánh Strict vs Heuristic |
-
-**Chạy từng bước riêng lẻ:**
-
-```bash
-# Phân tích offline dataset
-python reports/analyze_dataset.py
-
-# Chạy thực nghiệm Strict (Docker)
 python reports/run_experiment.py --mode strict \
-    --dataset nyc_taxi_events_full.csv --deltas 0,5,10,20,40,60
-
-# Chạy thực nghiệm Heuristic (Docker)
-python reports/run_experiment.py --mode heuristic \
-    --dataset nyc_taxi_events_full.csv --ps 0.50,0.75,0.90,0.95,0.99
+    --punctuation max-event-time \
+    --dataset nyc_taxi_events_sliced.csv \
+    --deltas 0,2,5,10,20,40,60,90,120 \
+    --max-wait 2000 --settle 30
 ```
+
+#### Bước 2: Chạy quét các điểm của Heuristic Mode
+Để Heuristic Mode hoạt động đúng và vẽ được đường cong suy giảm completeness thực tế (không bị tràn dữ liệu hoặc kích hoạt cơ chế BOO fallback do trễ âm), ta **bắt buộc** phải cấu hình các biến môi trường để kích hoạt **Paced Replay** (phát lại theo nhịp độ thời gian thực) và cho phép **đóng cửa sổ theo watermark cục bộ**:
+
+* **Windows (PowerShell):**
+  ```powershell
+  # 1. Thiết lập cấu hình phát lại và thu hẹp warmup
+  $env:INGESTOR_REPLAY = "arrival"
+  $env:REPLAY_SPEED = "50"
+  $env:HEURISTIC_LOCAL_WATERMARK_CLOSE = "true"
+  $env:HEURISTIC_WARMUP_SAMPLES = "2000"
+  $env:HEURISTIC_WARMUP_S = "5.0"
+  $env:PYTHONUNBUFFERED = "1"
+
+  # 2. Chạy sweep thực nghiệm heuristic
+  python reports/run_experiment.py --mode heuristic \
+      --punctuation max-event-time \
+      --dataset nyc_taxi_events_sliced.csv \
+      --ps 0.1,0.2,0.3,0.4,0.5,0.75,0.9,0.95,0.99,0.999,0.9999 \
+      --max-wait 2000 --settle 30
+  ```
+
+* **Linux/macOS (Bash):**
+  ```bash
+  # Chạy sweep heuristic kèm thiết lập biến môi trường
+  INGESTOR_REPLAY="arrival" \
+  REPLAY_SPEED="50" \
+  HEURISTIC_LOCAL_WATERMARK_CLOSE="true" \
+  HEURISTIC_WARMUP_SAMPLES="2000" \
+  HEURISTIC_WARMUP_S="5.0" \
+  PYTHONUNBUFFERED="1" \
+  python reports/run_experiment.py --mode heuristic \
+      --punctuation max-event-time \
+      --dataset nyc_taxi_events_sliced.csv \
+      --ps 0.1,0.2,0.3,0.4,0.5,0.75,0.9,0.95,0.99,0.999,0.9999 \
+      --max-wait 2000 --settle 30
+  ```
+
+---
+
+### 8.3 Chạy phân tích offline và sinh báo cáo tổng hợp
+
+Hệ thống cung cấp sẵn các script để tự động hóa việc tổng hợp dữ liệu hoặc phân tích offline:
+
+* **Tự động hóa chạy Heuristic Sweep bằng script bọc sẵn:**
+  ```bash
+  # Tự động cấu hình các biến môi trường và chạy sweep heuristic lên full dataset
+  python reports/run_heuristic_sweep.py
+  ```
+
+* **Phân tích offline toàn bộ dataset:**
+  ```bash
+  python reports/analyze_dataset.py
+  ```
+
+* **Chạy toàn bộ pipeline tích hợp (Offline):**
+  ```bash
+  # Chạy phân tích toán học và vẽ biểu đồ lý thuyết (không cần khởi tạo cụm Docker)
+  python reports/run_all.py
+  ```
+
+### 8.4 Kết quả đầu ra
+Tất cả các tệp thống kê và báo cáo markdown so sánh sẽ được tạo ra tại thư mục `docs/` dưới dạng:
+* `completeness_vs_wait_strict_<timestamp>.csv` và `.md`
+* `completeness_vs_wait_heuristic_<timestamp>.csv` và `.md`
+
+Bạn có thể copy/di chuyển các tệp này vào thư mục kết quả chính thức: **`reports/results/`** hoặc **`reports/artifacts/`**.
 
 ---
 
@@ -588,5 +693,5 @@ csdlpt/
 
 <p align="center">
   <strong>Team StreamPioneers</strong><br>
-  Le Dang Quynh Anh · Nguyen Van An
+  Lê Đắc Quốc Anh
 </p>

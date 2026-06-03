@@ -12,8 +12,8 @@ This document summarizes the Distributed Database Project Proposal compiled from
 ## 1. Project Identity (Thông tin Dự án)
 * **Team Name (Tên nhóm):** StreamPioneers
 * **Team Members (Thành viên nhóm):**
-  * Lê Đăng Quỳnh Anh (MSSV: `[Insert ID 1]` | Email: `[Insert Email 1]`)
-  * Nguyễn Văn An (MSSV: `[Insert ID 2]` | Email: `[Insert Email 2]`)
+  * Lê Đắc Quốc Anh (MSSV: `22021408` | Email: `ldqanh1408@gmail.com`)
+  * Nguyễn Văn An (MSSV: `22021409` | Email: `nvan1409@gmail.com`)
 * **Project Title (Tên đề tài):**
   * *Hiện thực hóa Hệ thống định thời logic phân tán và so sánh hiệu quả giữa chiến lược Strict Watermark và Heuristic Watermark với Dead-Letter Queue (DLQ).*
 
@@ -344,6 +344,53 @@ Hiện tượng nút cổ chai xảy ra khi một hoặc một vài phân mảnh
       W3->>SINK: 4. Xử lý cửa sổ nhanh chóng và emit kết quả tức thời
       Note over DLQ: Khôi phục/đền bù trạng thái lịch sử bất đồng bộ
   ```
+### 4.5 Đặc tả Giao tiếp Chi tiết (gRPC Contracts & HTTP REST APIs)
+
+Hệ thống thiết lập một cơ chế giao tiếp đồng bộ và bất đồng bộ hai tầng vững chắc bao gồm: (1) các giao dịch gRPC hiệu năng cao phục vụ trao đổi siêu dữ liệu, đồng thuận Raft và nhịp tim trạng thái; và (2) giao diện REST HTTP dùng để kiểm tra sức khỏe (health checks), thu thập chỉ số Prometheus, và cung cấp kênh giao tiếp dự phòng (fallback paths).
+
+#### 4.5.1 Giao diện gRPC (Protocol Buffers Contracts)
+Toàn bộ đặc tả dịch vụ và cấu trúc dữ liệu được biên dịch từ tệp `common/csdlpt.proto`. Hệ thống định nghĩa hai Dịch vụ gRPC chính:
+
+1. **CoordinatorService (Strict Control Plane)**: Chịu trách nhiệm tiếp nhận báo cáo tiến trình từ Worker/Ingestor, điều phối phân mảnh, đồng bộ trạng thái Raft và bầu cử Leader. Các phương thức giao tiếp cốt lõi bao gồm:
+    * `rpc WorkerHeartbeat (WorkerHeartbeatMsg) returns (EmptyReply)`: Worker gửi nhịp tim định kỳ (1s), báo cáo mốc thời gian logic của từng phân mảnh để Coordinator tính $W_{global}$.
+    * `rpc WorkerPing (WorkerPingMsg) returns (EmptyReply)`: Worker ping kiểm tra liveness và đăng ký danh mục phân mảnh với Coordinator.
+    * `rpc IngestorHeartbeat (IngestorHeartbeatMsg) returns (EmptyReply)`: Ingestor gửi tiến độ nạp dữ liệu và mốc cam kết $T_{commit}$ của nguồn.
+    * `rpc GetGlobalState (StateRequest) returns (StateReply)`: Worker truy vấn định kỳ (500ms) để lấy mốc $W_{global}$ toàn cục mới nhất.
+    * `rpc RaftVote` và `rpc RaftState`: Phục vụ bầu chọn Leader và nhân bản nhật ký đồng thuận giữa 3 thực thể Coordinator HA.
+    * `rpc ZkVote` và `rpc ZkState`: Cơ chế dự phòng bầu chọn và sao chép cấu hình trạng thái qua ZooKeeper.
+    
+2. **AggregatorService (Heuristic Control Plane)**:
+    * `rpc SendWorkerWatermark (WorkerWatermarkMsg) returns (EmptyReply)`: Worker thích ứng gửi mốc $W_h$ cục bộ của từng phân mảnh lên Aggregator để tổng hợp $W_{global\_h}$ bất đồng bộ.
+
+**Cấu trúc các thông điệp trao đổi chính:**
+
+| Thông điệp (Message) | Trường dữ liệu | Ý nghĩa chức năng |
+| :--- | :--- | :--- |
+| `WorkerHeartbeatMsg` | `string worker_id` <br> `map<int32, double> partitions` <br> `double max_event_time` <br> `int64 fencing_token` <br> `repeated int32 idle_partitions` | Định danh Worker, bản đồ $P_k \to LW_i(P_k)$, mốc event-time lớn nhất đã đọc, nhiệm kỳ điều phối hiện tại, và danh sách các phân mảnh tạm thời nhàn rỗi. |
+| `IngestorHeartbeatMsg` | `string ingestor_id` <br> `double T_commit` <br> `double timestamp` <br> `repeated int32 partitions_assigned` | Định danh Ingestor, mốc cam kết thời gian của nguồn, timestamp vật lý lúc gửi, và danh sách các phân mảnh được gán. |
+| `StateReply` | `double W_global` <br> `int64 term` <br> `map<int32, string> partition_types` | Trả về Watermark toàn cục hiện tại, nhiệm kỳ coordinator hoạt động, và sơ đồ ánh xạ loại phân mảnh thực tế. |
+| `WorkerWatermarkMsg` | `string worker_id` <br> `int32 partition_id` <br> `double W_h` | Báo cáo watermark thích ứng $W_h$ cục bộ của phân mảnh đích từ Worker lên Aggregator. |
+
+#### 4.5.2 Giao diện HTTP REST API (Health & Control Server)
+Mỗi thực thể (Worker, Coordinator, Aggregator) đều khởi chạy một HTTP server nội bộ sử dụng trình xử lý `HealthHandler` kế thừa từ `BaseHTTPRequestHandler` để phục vụ giám sát và điều khiển. Các endpoint được mô tả chi tiết như sau:
+
+* **Cơ chế giám sát sức khỏe và Chỉ số (Metrics & Health Endpoints)**:
+    * `GET /health`: Trả về trạng thái hoạt động hiện tại của tiến trình và vai trò cụ thể (`worker`, `coordinator`, `aggregator`).
+    * `GET /ready`: Trả về mã HTTP 200 nếu tiến trình đã sẵn sàng tiếp nhận dòng dữ liệu hoặc HTTP 503 nếu đang trong pha khởi động/khôi phục trạng thái.
+    * `GET /metrics`: Cung cấp các chỉ số hiệu năng định dạng chuẩn Prometheus (phục vụ thu thập dữ liệu tự động).
+    * `GET /api/metrics`: API trả về tài liệu JSON chứa chi tiết các chỉ số nội bộ của Worker (RAM, CPU, kích thước hàng đợi Min-Heap, số lần kích hoạt backpressure, dung lượng RocksDB).
+    
+* **Đặc tả Giao diện Điều khiển & Metadata (Control & Metadata Endpoints)**:
+    * `GET /state`: Trả về trạng thái logic toàn cục bao gồm $W_{global}$, nhiệm kỳ hiện tại, trạng thái các phân mảnh được phân bổ.
+    * `GET /failover`: Trả về thông tin tóm tắt của bộ quản lý failover (`FailoverManager`), bao gồm bảng phân bổ phân mảnh hiện tại và trạng thái sức khỏe của từng Worker.
+    * `GET /backpressure`: Trả về thông tin tóm tắt trạng thái nghẽn dòng và cấu hình ngưỡng kích hoạt ngược của các phân mảnh.
+    * `GET /ingestor-health`: Trả về danh sách Ingestor đang hoạt động, tiến độ đọc dữ liệu ($T_{commit}$), độ lệch đồng hồ vật lý (`clock skew`) và độ trễ mạng mạng tròn (Network RTT).
+    
+* **Giao tiếp nạp dữ liệu và Nhịp tim dự phòng (Data Ingestion & Fallback POST Endpoints)**:
+    * `POST /ingest`: Kênh REST dự phòng cho phép nạp trực tiếp một hoặc nhiều sự kiện log Web Server định dạng JSON vào hàng đợi nội bộ của Worker.
+    * `POST /punctuation`: Nhận thông điệp kiểm soát mốc thời gian logic từ Ingestor gửi về hệ thống (trong chế độ Strict).
+    * `POST /ingestor-heartbeat`: Nhận báo cáo nhịp tiến độ đọc và đo đạc RTT từ Ingestor khi giao tiếp gRPC bị gián đoạn.
+    * `POST /reassign`: Tiếp nhận chỉ thị thay đổi sơ đồ phân mảnh ngang trực tiếp từ bộ điều phối failover của Coordinator.
 
 ---
 

@@ -41,7 +41,7 @@ from typing import Dict, List, Optional, Tuple
 
 # Always use our own pure-Python implementation — no pip-package dependency,
 # no sys.path / sys.modules shadowing issues.
-from ddsketch.sketch import DDSketch as _PureDDSketch, SlidingWindowDDSketch as _PureSlidingWindow
+from local_ddsketch.sketch import DDSketch as _PureDDSketch, SlidingWindowDDSketch as _PureSlidingWindow
 
 
 # ---------------------------------------------------------------------------

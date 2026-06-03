@@ -422,8 +422,14 @@ def aggregate_worker_metrics(metrics: dict) -> dict:
     proc_p50_vals, proc_p95_vals, proc_p99_vals = [], [], []
     sketch_p50_vals, sketch_p95_vals, sketch_p99_vals = [], [], []
     wm_lag_vals = []
-    poll_decode_p95_vals, dedup_p95_vals, state_write_p95_vals = [], [], []
-    sketch_update_p95_vals, sketch_query_p95_vals = [], []
+    timer_vals = {
+        "network_ingest": {"p50": [], "p95": [], "p99": []},
+        "poll_decode": {"p50": [], "p95": [], "p99": []},
+        "dedup": {"p50": [], "p95": [], "p99": []},
+        "state_write": {"p50": [], "p95": [], "p99": []},
+        "sketch_update": {"p50": [], "p95": [], "p99": []},
+        "sketch_query": {"p50": [], "p95": [], "p99": []},
+    }
 
     def _collect_latency_from(d: dict):
         """Extract latency fields from a partition or engine metrics dict."""
@@ -457,16 +463,11 @@ def aggregate_worker_metrics(metrics: dict) -> dict:
         if wl > 0:
             wm_lag_vals.append(wl)
 
-        for field, target in (
-            ("poll_decode_latency_p95_us", poll_decode_p95_vals),
-            ("dedup_latency_p95_us", dedup_p95_vals),
-            ("state_write_latency_p95_us", state_write_p95_vals),
-            ("sketch_update_latency_p95_us", sketch_update_p95_vals),
-            ("sketch_query_latency_p95_us", sketch_query_p95_vals),
-        ):
-            val = _get_float(field)
-            if val > 0:
-                target.append(val)
+        for stage, percentiles in timer_vals.items():
+            for pct, target in percentiles.items():
+                val = _get_float(f"{stage}_latency_{pct}_us")
+                if val > 0:
+                    target.append(val)
 
     for wname, wdata in metrics.get("workers", {}).items():
         m = wdata.get("metrics")
@@ -482,14 +483,15 @@ def aggregate_worker_metrics(metrics: dict) -> dict:
             total_dlq += m.get("dlq_backlog", 0)
             total_sketch += m.get("sketch_total_count", 0)
             total_extreme_lag += m.get("extreme_lag_count", 0)
-            _collect_latency_from(m)
-            if not any(m.get(f, 0.0) for f in (
-                "proc_latency_p95_us",
-                "sketch_update_latency_p95_us",
-                "dedup_latency_p95_us",
-            )):
-                for pdata in m.get("partitions", {}).values():
+            partition_metrics = [
+                pdata for pdata in m.get("partitions", {}).values()
+                if isinstance(pdata, dict)
+            ]
+            if partition_metrics:
+                for pdata in partition_metrics:
                     _collect_latency_from(pdata)
+            else:
+                _collect_latency_from(m)
         elif "partitions" in m:
             for pid, pdata in m.get("partitions", {}).items():
                 if not isinstance(pdata, dict):
@@ -529,11 +531,36 @@ def aggregate_worker_metrics(metrics: dict) -> dict:
         "proc_lat_p95_us": _avg(proc_p95_vals),
         "proc_lat_p99_us": _avg(proc_p99_vals),
         "proc_lat_p99_max_us": _max(proc_p99_vals),
-        "poll_decode_p95_us": _avg(poll_decode_p95_vals),
-        "dedup_p95_us": _avg(dedup_p95_vals),
-        "state_write_p95_us": _avg(state_write_p95_vals),
-        "sketch_update_p95_us": _avg(sketch_update_p95_vals),
-        "sketch_query_p95_us": _avg(sketch_query_p95_vals),
+        "network_ingest_p50_us": _avg(timer_vals["network_ingest"]["p50"]),
+        "network_ingest_p95_us": _avg(timer_vals["network_ingest"]["p95"]),
+        "network_ingest_p99_us": _avg(timer_vals["network_ingest"]["p99"]),
+        "network_ingest_p95_max_us": _max(timer_vals["network_ingest"]["p95"]),
+        "network_ingest_p99_max_us": _max(timer_vals["network_ingest"]["p99"]),
+        "poll_decode_p50_us": _avg(timer_vals["poll_decode"]["p50"]),
+        "poll_decode_p95_us": _avg(timer_vals["poll_decode"]["p95"]),
+        "poll_decode_p99_us": _avg(timer_vals["poll_decode"]["p99"]),
+        "poll_decode_p95_max_us": _max(timer_vals["poll_decode"]["p95"]),
+        "poll_decode_p99_max_us": _max(timer_vals["poll_decode"]["p99"]),
+        "dedup_p50_us": _avg(timer_vals["dedup"]["p50"]),
+        "dedup_p95_us": _avg(timer_vals["dedup"]["p95"]),
+        "dedup_p99_us": _avg(timer_vals["dedup"]["p99"]),
+        "dedup_p95_max_us": _max(timer_vals["dedup"]["p95"]),
+        "dedup_p99_max_us": _max(timer_vals["dedup"]["p99"]),
+        "state_write_p50_us": _avg(timer_vals["state_write"]["p50"]),
+        "state_write_p95_us": _avg(timer_vals["state_write"]["p95"]),
+        "state_write_p99_us": _avg(timer_vals["state_write"]["p99"]),
+        "state_write_p95_max_us": _max(timer_vals["state_write"]["p95"]),
+        "state_write_p99_max_us": _max(timer_vals["state_write"]["p99"]),
+        "sketch_update_p50_us": _avg(timer_vals["sketch_update"]["p50"]),
+        "sketch_update_p95_us": _avg(timer_vals["sketch_update"]["p95"]),
+        "sketch_update_p99_us": _avg(timer_vals["sketch_update"]["p99"]),
+        "sketch_update_p95_max_us": _max(timer_vals["sketch_update"]["p95"]),
+        "sketch_update_p99_max_us": _max(timer_vals["sketch_update"]["p99"]),
+        "sketch_query_p50_us": _avg(timer_vals["sketch_query"]["p50"]),
+        "sketch_query_p95_us": _avg(timer_vals["sketch_query"]["p95"]),
+        "sketch_query_p99_us": _avg(timer_vals["sketch_query"]["p99"]),
+        "sketch_query_p95_max_us": _max(timer_vals["sketch_query"]["p95"]),
+        "sketch_query_p99_max_us": _max(timer_vals["sketch_query"]["p99"]),
         # Event-time lag from DDSketch (milliseconds)
         "sketch_p50_ms": _avg(sketch_p50_vals),
         "sketch_p95_ms": _avg(sketch_p95_vals),
@@ -581,11 +608,26 @@ def _collect_partition_data(metrics: dict):
                 "proc_p50": pdata.get("proc_latency_p50_us", 0.0),
                 "proc_p95": pdata.get("proc_latency_p95_us", 0.0),
                 "proc_p99": pdata.get("proc_latency_p99_us", 0.0),
+                "network_ingest_p50": pdata.get("network_ingest_latency_p50_us", 0.0),
+                "network_ingest_p95": pdata.get("network_ingest_latency_p95_us", 0.0),
+                "network_ingest_p99": pdata.get("network_ingest_latency_p99_us", 0.0),
+                "poll_decode_p50": pdata.get("poll_decode_latency_p50_us", 0.0),
                 "poll_decode_p95": pdata.get("poll_decode_latency_p95_us", 0.0),
+                "poll_decode_p99": pdata.get("poll_decode_latency_p99_us", 0.0),
+                "dedup_p50": pdata.get("dedup_latency_p50_us", 0.0),
                 "dedup_p95": pdata.get("dedup_latency_p95_us", 0.0),
+                "dedup_p99": pdata.get("dedup_latency_p99_us", 0.0),
+                "state_write_p50": pdata.get("state_write_latency_p50_us", 0.0),
                 "state_write_p95": pdata.get("state_write_latency_p95_us", 0.0),
+                "state_write_p99": pdata.get("state_write_latency_p99_us", 0.0),
+                "sketch_update_p50": pdata.get("sketch_update_latency_p50_us", 0.0),
                 "sketch_update_p95": pdata.get("sketch_update_latency_p95_us", 0.0),
+                "sketch_update_p99": pdata.get("sketch_update_latency_p99_us", 0.0),
+                "sketch_query_p50": pdata.get("sketch_query_latency_p50_us", 0.0),
                 "sketch_query_p95": pdata.get("sketch_query_latency_p95_us", 0.0),
+                "sketch_query_p99": pdata.get("sketch_query_latency_p99_us", 0.0),
+                "clock_skew_ms": pdata.get("clock_skew_ms", pdata.get("node_skew_ms", 0.0)),
+                "punctuation_total": pdata.get("punctuation_total", pdata.get("punctuation_count", 0)),
                 "neg_lag_rate": pdata.get("negative_lag_rate", 0.0),
                 "est_drift": pdata.get("estimator_drift", 0.0),
                 "open_windows": pdata.get("open_windows", 0),
@@ -703,6 +745,233 @@ def _heuristic_kpi_row(metrics: dict, agg: dict):
 
 
 # ---------------------------------------------------------------------------
+# Profiling / bottleneck helpers
+# ---------------------------------------------------------------------------
+
+PROFILE_STAGE_SPECS = [
+    ("network_ingest", "T_network_ingest_ns", "Network/Kafka inbound", "Network and Kafka receive delay"),
+    ("poll_decode", "T_poll_decode_ns", "Poll/decode", "Kafka poll + JSON/schema decode"),
+    ("dedup", "T_deduplication_ns", "Deduplication", "ID filter and RocksDB dedup log check"),
+    ("state_write", "T_state_write_ns", "State write", "Window/RocksDB state update"),
+    ("sketch_update", "T_sketch_update_ns", "DDSketch update", "Insert observed lag into DDSketch"),
+    ("sketch_query", "T_sketch_query_ns", "DDSketch query", "Estimate effective watermark lag"),
+]
+
+
+def _positive_float(value) -> float:
+    try:
+        f = float(value)
+    except (TypeError, ValueError):
+        return 0.0
+    if f != f or f in (float("inf"), float("-inf")):
+        return 0.0
+    return max(0.0, f)
+
+
+def _fmt_us(value: float) -> str:
+    value = _positive_float(value)
+    if value <= 0:
+        return "—"
+    if value >= 1000:
+        return f"{value / 1000.0:.2f} ms"
+    return f"{value:.0f} µs"
+
+
+def _partition_bottleneck(partition_row: dict) -> tuple[str, float, str]:
+    candidates = []
+    for key, _raw_metric, label, hint in PROFILE_STAGE_SPECS:
+        p99 = _positive_float(partition_row.get(f"{key}_p99"))
+        p95 = _positive_float(partition_row.get(f"{key}_p95"))
+        val = p99 if p99 > 0 else p95
+        if val > 0:
+            candidates.append((label, val, hint))
+    if not candidates:
+        proc = _positive_float(partition_row.get("proc_p95"))
+        if proc > 0:
+            return "Overall processing", proc, "End-to-end event handling"
+        return "—", 0.0, "Waiting for timer samples"
+    return max(candidates, key=lambda item: item[1])
+
+
+def _build_bottleneck_profile(metrics: dict, mode: str, agg: dict) -> tuple[list[dict], list[dict]]:
+    parts = _collect_partition_data(metrics)
+    stage_rows = []
+
+    for key, raw_metric, label, hint in PROFILE_STAGE_SPECS:
+        p50_values = [_positive_float(p.get(f"{key}_p50")) for p in parts]
+        p95_values = [_positive_float(p.get(f"{key}_p95")) for p in parts]
+        p99_values = [_positive_float(p.get(f"{key}_p99")) for p in parts]
+        p50_values = [v for v in p50_values if v > 0]
+        p95_values = [v for v in p95_values if v > 0]
+        p99_values = [v for v in p99_values if v > 0]
+        score_values = p99_values or p95_values
+
+        if not score_values:
+            avg_p50 = _positive_float(agg.get(f"{key}_p50_us"))
+            avg_p95 = _positive_float(agg.get(f"{key}_p95_us"))
+            avg_p99 = _positive_float(agg.get(f"{key}_p99_us"))
+            max_p95 = _positive_float(agg.get(f"{key}_p95_max_us"))
+            max_p99 = _positive_float(agg.get(f"{key}_p99_max_us"))
+            score = max_p99 if max_p99 > 0 else max_p95
+            if avg_p50 <= 0 and avg_p95 <= 0 and avg_p99 <= 0 and score <= 0:
+                continue
+            stage_rows.append({
+                "Stage": label,
+                "Raw Timer": raw_metric,
+                "Avg p50 (µs)": round(avg_p50, 1),
+                "Avg p95 (µs)": round(avg_p95, 1),
+                "Avg p99 (µs)": round(avg_p99, 1),
+                "Max p99 (µs)": round(max(score, avg_p99), 1),
+                "Slowest Worker": "—",
+                "Slowest Partition": "—",
+                "Diagnosis": hint,
+            })
+            continue
+
+        slowest = max(parts, key=lambda p: _positive_float(p.get(f"{key}_p99")) or _positive_float(p.get(f"{key}_p95")))
+        max_p99 = max(p99_values) if p99_values else max(p95_values)
+        stage_rows.append({
+            "Stage": label,
+            "Raw Timer": raw_metric,
+            "Avg p50 (µs)": round(sum(p50_values) / len(p50_values), 1) if p50_values else 0.0,
+            "Avg p95 (µs)": round(sum(p95_values) / len(p95_values), 1) if p95_values else 0.0,
+            "Avg p99 (µs)": round(sum(p99_values) / len(p99_values), 1) if p99_values else 0.0,
+            "Max p99 (µs)": round(max_p99, 1),
+            "Slowest Worker": slowest.get("worker", "—"),
+            "Slowest Partition": slowest.get("partition", "—"),
+            "Diagnosis": hint,
+        })
+
+    if not stage_rows:
+        proc_vals = [_positive_float(p.get("proc_p95")) for p in parts]
+        proc_vals = [v for v in proc_vals if v > 0]
+        if proc_vals:
+            slowest = max(parts, key=lambda p: _positive_float(p.get("proc_p95")))
+            stage_rows.append({
+                "Stage": "Overall processing",
+                "Raw Timer": "process() elapsed",
+                "Avg p50 (µs)": 0.0,
+                "Avg p95 (µs)": round(sum(proc_vals) / len(proc_vals), 1),
+                "Avg p99 (µs)": 0.0,
+                "Max p99 (µs)": round(max(proc_vals), 1),
+                "Slowest Worker": slowest.get("worker", "—"),
+                "Slowest Partition": slowest.get("partition", "—"),
+                "Diagnosis": "End-to-end event handling",
+            })
+
+    total_max = sum(_positive_float(r.get("Max p99 (µs)")) for r in stage_rows)
+    for row in stage_rows:
+        max_p99 = _positive_float(row.get("Max p99 (µs)"))
+        share = (100.0 * max_p99 / total_max) if total_max > 0 else 0.0
+        row["Bottleneck Share"] = f"{share:.1f}%"
+        if share >= 45:
+            row["Impact"] = "Dominant"
+        elif share >= 25:
+            row["Impact"] = "High"
+        else:
+            row["Impact"] = "Watch"
+
+    top_partitions = []
+    for p in parts:
+        stage, val, hint = _partition_bottleneck(p)
+        if val <= 0:
+            continue
+        top_partitions.append({
+            "Worker": p.get("worker", "—"),
+            "Partition": p.get("partition", "—"),
+            "Bottleneck": stage,
+            "Stage p99/p95 (µs)": round(val, 1),
+            "Proc p95 (µs)": round(_positive_float(p.get("proc_p95")), 1),
+            "Received": p.get("received", 0),
+            "Diagnosis": hint,
+        })
+    top_partitions.sort(key=lambda row: row["Stage p99/p95 (µs)"], reverse=True)
+
+    stage_rows.sort(key=lambda row: _positive_float(row.get("Max p99 (µs)")), reverse=True)
+    return stage_rows, top_partitions[:8]
+
+
+def _current_bottleneck_snapshot(metrics: dict, mode: str, agg: dict) -> dict:
+    stage_rows, top_partitions = _build_bottleneck_profile(metrics, mode, agg)
+    top_stage = stage_rows[0] if stage_rows else {}
+    top_part = top_partitions[0] if top_partitions else {}
+    return {
+        "stage": top_stage.get("Stage", "—"),
+        "stage_p95_us": _positive_float(top_stage.get("Avg p95 (µs)")),
+        "stage_p99_us": _positive_float(top_stage.get("Max p99 (µs)")),
+        "partition": top_part.get("Partition", "—"),
+        "worker": top_part.get("Worker", "—"),
+    }
+
+
+def render_high_res_timer_profile(mode: str, metrics: dict, agg: dict, compact: bool = False):
+    stage_rows, top_partitions = _build_bottleneck_profile(metrics, mode, agg)
+    bottleneck = _current_bottleneck_snapshot(metrics, mode, agg)
+    proc_p95 = agg.get("proc_lat_p95_us", 0.0)
+    proc_p99 = agg.get("proc_lat_p99_us", 0.0)
+
+    st.markdown("##### ⏱️ High-Resolution Timers & Bottlenecks")
+    st.caption(
+        "Worker stages are measured with `time.perf_counter_ns()` and shown as p95/p99 latency. "
+        "The dashboard ranks stages and partitions by p95 to identify bottlenecks."
+    )
+
+    c1, c2, c3, c4 = st.columns(4)
+    c1.metric("Timer Source", "perf_counter_ns")
+    c2.metric("Overall p95", _fmt_us(proc_p95))
+    c3.metric("Overall p99", _fmt_us(proc_p99))
+    c4.metric("Top Bottleneck", bottleneck["stage"])
+
+    if not stage_rows:
+        st.info("Waiting for high-resolution timer samples. They appear after workers process events.")
+        return
+
+    if compact:
+        st.caption(
+            f"Slowest stage: **{bottleneck['stage']}** at **{_fmt_us(bottleneck['stage_p99_us'])} p99**"
+            + (
+                f" on {bottleneck['worker']} / partition {bottleneck['partition']}."
+                if bottleneck["worker"] != "—" else "."
+            )
+        )
+        return
+
+    if bottleneck["stage"] == "State write":
+        st.warning(
+            "State write is the current bottleneck. On Windows Docker hosts, high "
+            "`state_write_latency_p99_us` often points to RocksDB writes through a "
+            "host-mounted NTFS/WSL2 path; use the `/tmp` tmpfs checkpoint workspace "
+            "to reduce WAL/SST write overhead."
+        )
+
+    st.dataframe(pd.DataFrame(stage_rows), use_container_width=True, hide_index=True)
+    if top_partitions:
+        st.markdown("##### Slowest Partitions")
+        st.dataframe(pd.DataFrame(top_partitions), use_container_width=True, hide_index=True)
+
+    with st.expander("Metric Reference"):
+        st.markdown("""
+- `T_network_ingest_ns`: network/Kafka inbound delay.
+- `T_poll_decode_ns`: Kafka poll and JSON/schema decode.
+- `T_deduplication_ns`: duplicate filter and RocksDB dedup log check.
+- `T_state_write_ns`: local window/RocksDB write.
+- `T_sketch_update_ns`: DDSketch update.
+- `T_sketch_query_ns`: effective watermark lag query.
+""")
+
+
+def render_dashboard_fault_injection(mode: str):
+    st.markdown("##### 🛑 Kill Node / Recover")
+    st.caption("Fault-injection control is available here and in the dedicated **Kill Node / Recover** tab.")
+    render_quick_fault_injection(
+        mode,
+        key_prefix="dash_nc",
+        title="",
+        caption_text="Choose a node, kill it, watch the metrics/failover response, then recover it.",
+    )
+
+
+# ---------------------------------------------------------------------------
 # UI — Sidebar
 # ---------------------------------------------------------------------------
 
@@ -814,6 +1083,8 @@ def render_sidebar():
             s.update(label="Stopped", state="complete")
 
     st.sidebar.markdown("---")
+    if st.session_state.running:
+        st.sidebar.info("Kill Node: use the Dashboard panel or the 🛑 Kill Node / Recover tab.")
     st.sidebar.caption("🟢 **Real-time Auto-refresh enabled.** Stats update every 3 seconds while running.")
 
     # Service status
@@ -873,13 +1144,14 @@ def render_dashboard(mode: str, metrics: dict):
     else:
         st.markdown(f"### {label} — Aggregated Metrics ({worker_count} workers, 12 partitions)")
 
-    # Define the 5 tabs/pages per specification section §3.3
+    # Dashboard sub-pages. Keep labels concise so first-time users can scan them.
     tab_names = [
-        "📈 Page 1: Executive Summary",
-        "🔀 Page 2: Per-Partition Detail",
-        "🔒 Page 3: Strict Specific",
-        "⚡ Page 4: Heuristic Specific",
-        "🖥️ Page 5: Resources"
+        "📈 Overview",
+        "⏱️ Timers & Bottlenecks",
+        "🔀 Partitions",
+        "🔒 Strict Mode",
+        "⚡ Heuristic Mode",
+        "🖥️ Resources",
     ]
     selected_page = st.radio(
         "Select Dashboard Page",
@@ -892,8 +1164,10 @@ def render_dashboard(mode: str, metrics: dict):
     # -----------------------------------------------------------------------
     # Page 1: Executive Summary
     # -----------------------------------------------------------------------
-    if selected_page == "📈 Page 1: Executive Summary":
+    if selected_page == "📈 Overview":
         st.markdown("#### System Executive Summary")
+        render_dashboard_fault_injection(mode)
+        st.markdown("---")
         render_export_panel(mode, metrics, agg)
         st.markdown("---")
         c1, c2, c3, c4, c5, c6, c7, c8 = st.columns(8)
@@ -954,13 +1228,17 @@ def render_dashboard(mode: str, metrics: dict):
         lc5.metric("Event Lag p99", f"{sp99:.1f} ms" if sp99 else "—")
         lc6.metric("WM Lag (avg)", f"{wlag_avg:.1f}s" if wlag_avg else "—")
 
+        st.markdown("---")
+        render_high_res_timer_profile(mode, metrics, agg, compact=True)
+
         # Trend charts
         if len(history) >= 2:
             st.markdown("---")
             st.markdown("##### Aggregated Trends")
             df = pd.DataFrame(history)
             df["time_s"] = df["elapsed_s"].round(0)
-            df = df.groupby("time_s").mean().reset_index()
+            numeric_cols = [c for c in df.select_dtypes(include="number").columns if c != "time_s"]
+            df = df.groupby("time_s")[numeric_cols].mean().reset_index()
 
             ch1, ch2 = st.columns(2)
             with ch1:
@@ -981,10 +1259,26 @@ def render_dashboard(mode: str, metrics: dict):
                 df_tp["throughput_s"] = df_tp["throughput_s"].fillna(0.0).clip(lower=0.0)
                 st.line_chart(df_tp.set_index("time_s")["throughput_s"], height=200)
 
+            if {"proc_p95_us", "proc_p99_us"}.issubset(df.columns):
+                st.markdown("**High-resolution processing latency (µs)**")
+                latency_cols = ["proc_p95_us", "proc_p99_us"]
+                if "bottleneck_p99_us" in df.columns:
+                    latency_cols.append("bottleneck_p99_us")
+                if "bottleneck_p95_us" in df.columns:
+                    latency_cols.append("bottleneck_p95_us")
+                st.line_chart(df.set_index("time_s")[latency_cols], height=220)
+
     # -----------------------------------------------------------------------
-    # Page 2: Per-Partition Detail
+    # Page 2: Timers & Bottlenecks
     # -----------------------------------------------------------------------
-    elif selected_page == "🔀 Page 2: Per-Partition Detail":
+    elif selected_page == "⏱️ Timers & Bottlenecks":
+        st.markdown("#### High-Resolution Timer Profiling")
+        render_high_res_timer_profile(mode, metrics, agg, compact=False)
+
+    # -----------------------------------------------------------------------
+    # Page 3: Per-Partition Detail
+    # -----------------------------------------------------------------------
+    elif selected_page == "🔀 Partitions":
         st.markdown("#### Per-Partition Detailed Statistics")
         
         parts = _collect_partition_data(metrics)
@@ -1024,6 +1318,7 @@ def render_dashboard(mode: str, metrics: dict):
                 p_status = "BACKPRESSURE"
             elif p.get("negative_lag", {}).get("tier") == "critical":
                 p_status = "CRITICAL_LAG"
+            bottleneck_stage, bottleneck_p95, _ = _partition_bottleneck(p)
 
             if isinstance(w_val, (int, float)) and w_val != float("-inf"):
                 try:
@@ -1040,6 +1335,9 @@ def render_dashboard(mode: str, metrics: dict):
                 "LW_i (Local WM)": w_str,
                 "WM Skew (ms)": round(wm_skew_ms, 1),
                 "Clock Skew (ms)": round(clk_skew, 1),
+                "Proc p95 (µs)": round(p.get("proc_p95", 0.0), 1),
+                "Bottleneck": bottleneck_stage,
+                "Bottleneck p99/p95 (µs)": round(bottleneck_p95, 1),
                 "BP Drops": p["bp_drops"],
                 "Punctuation Total": p.get("punctuation_total", 0),
                 "Received": p["received"],
@@ -1067,9 +1365,9 @@ def render_dashboard(mode: str, metrics: dict):
             st.bar_chart(chart_data.set_index("Partition")[["On-Time", "Late"]], height=240)
 
     # -----------------------------------------------------------------------
-    # Page 3: Strict Specific
+    # Page 4: Strict Specific
     # -----------------------------------------------------------------------
-    elif selected_page == "🔒 Page 3: Strict Specific":
+    elif selected_page == "🔒 Strict Mode":
         st.markdown("#### Strict Mode Operational Specifics")
         if mode == "strict":
             sc1, sc2 = st.columns([1, 2])
@@ -1162,9 +1460,9 @@ def render_dashboard(mode: str, metrics: dict):
             st.info("Strict-specific metrics are only available in Strict mode.")
 
     # -----------------------------------------------------------------------
-    # Page 4: Heuristic Specific
+    # Page 5: Heuristic Specific
     # -----------------------------------------------------------------------
-    elif selected_page == "⚡ Page 4: Heuristic Specific":
+    elif selected_page == "⚡ Heuristic Mode":
         st.markdown("#### Heuristic Mode Operational Specifics")
         if mode == "heuristic":
             hc1, hc2 = st.columns([1, 2])
@@ -1243,9 +1541,9 @@ def render_dashboard(mode: str, metrics: dict):
             st.info("Heuristic-specific metrics are only available in Heuristic mode.")
 
     # -----------------------------------------------------------------------
-    # Page 5: Resources
+    # Page 6: Resources
     # -----------------------------------------------------------------------
-    elif selected_page == "🖥️ Page 5: Resources":
+    elif selected_page == "🖥️ Resources":
         st.markdown("#### Infrastructure & Node System Resources")
         
         resource_rows = []
@@ -1356,7 +1654,7 @@ def render_sim_stats(mode: str, metrics: dict):
     st.markdown("---")
 
     # Interactive tabs inside stats
-    tab_names = ["Partition Metrics", "DDSketch & Latency (Heuristic)", "Load Balance & Skew"]
+    tab_names = ["Partition Metrics", "High-Res Timers & Bottlenecks", "Load Balance & Skew"]
     selected_tab = st.radio(
         "Select Stat Tab",
         tab_names,
@@ -1399,62 +1697,36 @@ def render_sim_stats(mode: str, metrics: dict):
             tbl.append(row)
         st.dataframe(pd.DataFrame(tbl), use_container_width=True, hide_index=True)
 
-    elif selected_tab == "DDSketch & Latency (Heuristic)":
-        if mode == "heuristic":
-            st.markdown("#### Heuristic Latency & Profiling")
-            ds_tbl = []
-            for p in sorted(parts, key=lambda x: int(x["partition"])):
-                ds_tbl.append({
-                    "Partition": p["partition"],
-                    "Worker": p["worker"],
-                    "Effective Lag (s)": p["L_eff_s"],
-                    "Percentile (p)": p["p_current"],
-                    "Lag p50 (ms)": round(p["sketch_p50"], 1),
-                    "Lag p99 (ms)": round(p["sketch_p99"], 1),
-                    "Proc p50 (\u03bcs)": round(p["proc_p50"], 1),
-                    "Proc p99 (\u03bcs)": round(p["proc_p99"], 1),
-                    "Sketch Update p95 (us)": round(p["sketch_update_p95"], 1),
-                    "Sketch Query p95 (us)": round(p["sketch_query_p95"], 1),
-                    "Negative Lag Rate": f"{p['neg_lag_rate'] * 100:.3f}%",
-                    "Estimator Drift": p["est_drift"],
-                })
-            st.dataframe(pd.DataFrame(ds_tbl), use_container_width=True, hide_index=True)
-
-            # Show summary metrics
-            p50s = [p["sketch_p50"] for p in parts if p["sketch_p50"] > 0]
-            p95s = [p["sketch_p95"] for p in parts if p["sketch_p95"] > 0]
-            proc_p50s = [p["proc_p50"] for p in parts if p["proc_p50"] > 0]
-
-            col_l1, col_l2, col_l3 = st.columns(3)
-            col_l1.metric("Max Lag p95", f"{max(p95s):.1f} ms" if p95s else "—")
-            col_l2.metric("Avg Lag p50", f"{sum(p50s)/len(p50s):.1f} ms" if p50s else "—")
-            col_l3.metric("Avg Proc p50", f"{sum(proc_p50s)/len(proc_p50s):.1f} \u03bcs" if proc_p50s else "—")
-        else:
-            st.markdown("#### Strict Profiling & Event Processing Latency")
-            strict_tbl = []
-            for p in sorted(parts, key=lambda x: int(x["partition"])):
-                strict_tbl.append({
-                    "Partition": p["partition"],
-                    "Worker": p["worker"],
-                    "Proc p50 (\u03bcs)": round(p["proc_p50"], 1),
-                    "Proc p95 (\u03bcs)": round(p["proc_p95"], 1),
-                    "Proc p99 (\u03bcs)": round(p["proc_p99"], 1),
-                    "Poll Decode p95 (us)": round(p["poll_decode_p95"], 1),
-                    "Dedup p95 (us)": round(p["dedup_p95"], 1),
-                    "State Write p95 (us)": round(p["state_write_p95"], 1),
-                    "Dedup TTL Entries": p["dedup_ttl"],
-                    "Fencing Violations": p["fencing_violations"],
-                })
-            st.dataframe(pd.DataFrame(strict_tbl), use_container_width=True, hide_index=True)
-
-            proc_p50s = [p["proc_p50"] for p in parts if p["proc_p50"] > 0]
-            proc_p99s = [p["proc_p99"] for p in parts if p["proc_p99"] > 0]
-            fencing_viols = [p["fencing_violations"] for p in parts]
-
-            col_l1, col_l2, col_l3 = st.columns(3)
-            col_l1.metric("Avg Proc p50", f"{sum(proc_p50s)/len(proc_p50s):.1f} \u03bcs" if proc_p50s else "—")
-            col_l2.metric("Max Proc p99", f"{max(proc_p99s):.1f} \u03bcs" if proc_p99s else "—")
-            col_l3.metric("Total Fencing Violations", f"{sum(fencing_viols)}" if fencing_viols else "0")
+    elif selected_tab == "High-Res Timers & Bottlenecks":
+        st.markdown("#### Per-Partition High-Resolution Timers")
+        st.caption("Raw timers are stored in nanoseconds and summarized here as microsecond p50/p95/p99 values.")
+        timer_tbl = []
+        for p in sorted(parts, key=lambda x: int(x["partition"])):
+            bottleneck_stage, bottleneck_value, bottleneck_hint = _partition_bottleneck(p)
+            row = {
+                "Partition": p["partition"],
+                "Worker": p["worker"],
+                "Bottleneck": bottleneck_stage,
+                "Bottleneck p99/p95 (us)": round(bottleneck_value, 1),
+                "Diagnosis": bottleneck_hint,
+                "Proc p50 (us)": round(p["proc_p50"], 1),
+                "Proc p95 (us)": round(p["proc_p95"], 1),
+                "Proc p99 (us)": round(p["proc_p99"], 1),
+                "Network p99 (us)": round(p["network_ingest_p99"], 1),
+                "Poll Decode p99 (us)": round(p["poll_decode_p99"], 1),
+                "Dedup p99 (us)": round(p["dedup_p99"], 1),
+                "State Write p99 (us)": round(p["state_write_p99"], 1),
+                "Sketch Update p99 (us)": round(p["sketch_update_p99"], 1),
+                "Sketch Query p99 (us)": round(p["sketch_query_p99"], 1),
+            }
+            if mode == "heuristic":
+                row["Lag p99 (ms)"] = round(p["sketch_p99"], 1)
+                row["Negative Lag Rate"] = f"{p['neg_lag_rate'] * 100:.3f}%"
+            else:
+                row["Dedup TTL Entries"] = p["dedup_ttl"]
+                row["Fencing Violations"] = p["fencing_violations"]
+            timer_tbl.append(row)
+        st.dataframe(pd.DataFrame(timer_tbl), use_container_width=True, hide_index=True)
 
     elif selected_tab == "Load Balance & Skew":
         st.markdown("#### Event Load Balance & Skew")
@@ -1503,7 +1775,17 @@ def render_export_panel(mode: str, metrics: dict, agg: dict):
 
     # Aggregated KPIs
     agg_export = dict(agg)
-    agg_export.update({"mode": mode, "exported_at": datetime.now().isoformat()})
+    bottleneck = _current_bottleneck_snapshot(metrics, mode, agg)
+    agg_export.update({
+        "mode": mode,
+        "exported_at": datetime.now().isoformat(),
+        "timer_source": "time.perf_counter_ns",
+        "bottleneck_stage": bottleneck["stage"],
+        "bottleneck_stage_p95_us": bottleneck["stage_p95_us"],
+        "bottleneck_stage_p99_us": bottleneck["stage_p99_us"],
+        "bottleneck_worker": bottleneck["worker"],
+        "bottleneck_partition": bottleneck["partition"],
+    })
     e1.download_button(
         "Aggregated KPIs (JSON)",
         data=json.dumps(agg_export, indent=2, default=str),
@@ -2107,32 +2389,43 @@ def _exec_node_action(action: str, service: str, display: str):
 
 
 
-def render_quick_fault_injection(mode: str):
+def render_quick_fault_injection(
+    mode: str,
+    key_prefix: str = "nc",
+    title: str = "#### ⚡ Quick Fault Injection",
+    caption_text: str = None,
+):
     """Prominent one-click Kill / Recover panel for the selected node."""
     flat = [node for _, nodes in _node_control_groups(mode) for node in nodes]
     labels = [f"{x['display']}  ·  {x['role']}" for x in flat]
+    controls_enabled = bool(st.session_state.get("running", False))
 
-    st.markdown("#### ⚡ Quick Fault Injection")
-    sel = st.selectbox("Target node", labels, key="nc_quick_sel")
+    if title:
+        st.markdown(title)
+    sel = st.selectbox("Target node", labels, key=f"{key_prefix}_quick_sel")
     target = flat[labels.index(sel)]
-    status = check_node_status(target["service"], target["port"])
+    status = check_node_status(target["service"], target["port"]) if controls_enabled else "unknown"
 
     badge = "🟢 :green[Running]" if status == "running" else (
         "🔴 :red[Stopped]" if status == "stopped" else "⚪ :gray[Unknown]")
     st.markdown(f"**{target['display']}** — {badge}"
                 + (f"  (:{target['port']})" if target["port"] else ""))
 
+    if not controls_enabled:
+        st.info("Start the cluster from the sidebar to enable Kill / Recover controls.")
+
     b_kill, b_recover, b_refresh = st.columns(3)
-    if b_kill.button("💥 Kill node", key="nc_quick_kill", type="primary",
-                     disabled=(status != "running"), width="stretch"):
+    if b_kill.button("💥 Kill node", key=f"{key_prefix}_quick_kill", type="primary",
+                     disabled=(not controls_enabled) or (status != "running"), width="stretch"):
         _exec_node_action("kill", target["service"], target["display"])
-    if b_recover.button("♻️ Recover node", key="nc_quick_recover",
-                        disabled=(status == "running"), width="stretch"):
+    if b_recover.button("♻️ Recover node", key=f"{key_prefix}_quick_recover",
+                        disabled=(not controls_enabled) or (status == "running"), width="stretch"):
         _exec_node_action("start", target["service"], target["display"])
-    if b_refresh.button("🔄 Refresh status", key="nc_quick_refresh", width="stretch"):
+    if b_refresh.button("🔄 Refresh status", key=f"{key_prefix}_quick_refresh",
+                        disabled=not controls_enabled, width="stretch"):
         st.rerun()
 
-    st.caption("Kill a worker → watch the Dashboard tab react → Recover it. "
+    st.caption(caption_text or "Kill a worker → watch the Dashboard tab react → Recover it. "
                "Killed nodes stay down (restart policy disabled) until you recover them.")
 
 
@@ -2300,14 +2593,19 @@ def render_failover_test(mode: str):
 
 
 def render_node_control(mode: str):
-    st.markdown("### Node Control / Fault Injection")
-    st.markdown("Abruptly kill, gracefully stop, or start individual system services to verify fault-tolerance.")
+    st.markdown("### Kill Node / Recover")
+    st.markdown("Choose a target service, kill or stop it, then recover it to verify fault-tolerance.")
+
+    render_quick_fault_injection(
+        mode,
+        key_prefix="node_nc",
+        title="#### Quick Kill / Recover",
+    )
 
     if not st.session_state.running:
         st.warning("⚠️ Press **Start** in the sidebar to launch the cluster first. "
                    "The Kill / Recover buttons activate once containers are running.")
     else:
-        render_quick_fault_injection(mode)
         st.divider()
         render_failover_test(mode)
         st.divider()
@@ -2426,6 +2724,7 @@ def main():
 
                 if new_metrics.get("workers"):
                     agg = aggregate_worker_metrics(new_metrics)
+                    bottleneck = _current_bottleneck_snapshot(new_metrics, mode, agg)
                     elapsed = time.time() - (st.session_state.start_time or time.time())
                     st.session_state.metrics_history.append({
                         "elapsed_s": elapsed,
@@ -2436,6 +2735,8 @@ def main():
                         "late_rate": agg["late_arrival_rate_pct"],
                         "proc_p95_us": agg.get("proc_lat_p95_us", 0.0),
                         "proc_p99_us": agg.get("proc_lat_p99_us", 0.0),
+                        "bottleneck_p95_us": bottleneck.get("stage_p95_us", 0.0),
+                        "bottleneck_p99_us": bottleneck.get("stage_p99_us", 0.0),
                         "wm_lag_max_s": agg.get("wm_lag_max_s", 0.0),
                         "event_lag_p95_ms": agg.get("sketch_p95_ms", 0.0),
                     })
@@ -2446,10 +2747,10 @@ def main():
             metrics = st.session_state.last_metrics or {}
         return metrics or {}
 
-    # Build the tab bar once. Node Control sits right after Dashboard and carries
-    # a distinct icon so the kill/recover controls are easy to find.
+    # Build the tab bar once. Kill Node sits right after Dashboard and carries
+    # a distinct label so the fault-injection controls are easy to find.
     TAB_DASH = "📊 Dashboard"
-    TAB_NODE = "🛑 Node Control · Kill / Recover"
+    TAB_NODE = "🛑 Kill Node / Recover"
     TAB_LAB = "📐 Completeness vs Wait"
     TAB_LOGS = "📜 Logs"
     TAB_CMP = "⚖️ Compare"
@@ -2464,7 +2765,7 @@ def main():
         @st.fragment(run_every=3.0 if st.session_state.running else None)
         def _dashboard_fragment():
             if st.session_state.running:
-                st.info("🛑 To **kill / recover a node**, open the **Node Control · Kill / Recover** tab above.")
+                st.info("🛑 Kill / Recover controls are at the top of this Dashboard and in the **Kill Node / Recover** tab above.")
                 _render_refresh_bar("dash_refresh")
             metrics = _refresh_metrics()
             if st.session_state.running and metrics.get("workers"):
@@ -2484,7 +2785,7 @@ def main():
 2. Choose a **dataset** CSV file
 3. Click **Start** to build & launch the simulation containers
 4. Watch live metrics on the Dashboard tab, dataset replay progress on Sim Stats
-5. **Kill / recover any node** in the **🛑 Node Control · Kill / Recover** tab to test fault-tolerance
+5. Use the **🛑 Kill Node / Recover** tab to test fault-tolerance
 6. Click **Stop** when done — results are saved for comparison
 
 **Modes:**
@@ -2503,7 +2804,7 @@ def main():
 3. Configure **Log Level** and **Punctuation Mode** (see below)
 4. Click **Start** to build & launch all Docker containers
 5. Watch aggregated metrics from all 4 workers (click **Refresh data** to update)
-6. **Kill / recover any node** in the **🛑 Node Control · Kill / Recover** tab to test fault-tolerance
+6. Use the **🛑 Kill Node / Recover** tab, or the Kill Node panel shown at the top of Dashboard after Start
 7. Click **Stop** when done — results are saved for comparison
 
 **Pipeline Settings:**
