@@ -1,11 +1,7 @@
-"""Refactor - Stateful Stream Processing: Strict + Heuristic Watermark System.
+"""
+Gói chính của Distributed Watermark Tracker.
 
-Implements the full 3-document design specification:
-  - Strict Watermark  (0% loss, Coordinator HA, Tiered Storage)
-  - Heuristic Watermark + DDSketch (bounded loss, low latency, DLQ correction)
-  - Deployment / Operations guide
-
-Scaled down to single-machine Python for academic project use.
+File này định vị nhanh các package lõi: `common`, `strict`, `heuristic`, `local_ddsketch`, `reports`, `tools` và `tests`.
 """
 
 __all__ = ["common", "ddsketch", "strict", "heuristic", "tests"]

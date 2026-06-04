@@ -1,0 +1,14 @@
+%% Domain 2 - Strict Coordination (Raft, W_global = min(LW_i))
+%% Render: mmdc -i domain2_strict_coordination.mmd -o domain2.svg
+flowchart TB
+    WK["Worker N0-N3"]
+    L["Coordinator Leader"]
+    F["Follower (2)"]
+    ZK["ZooKeeper"]
+
+    WK -->|"gRPC WorkerHeartbeat - 1 giây<br/>{partition -> LW_i, max_event_time, offset, fencing_token, idle}"| L
+    L -->|"StateReply{W_global, term} - worker pull 500ms"| WK
+    L -->|"W_global = min(LW_i) - tính lại mỗi 200ms"| L
+    L <-->|"RaftVote / RaftState - commit khi đạt 2/3"| F
+    L -->|"lệnh failover/failback - (term, command_id)"| WK
+    L <-->|"bầu chọn (election) / khóa (lock) (chế độ ZK)"| ZK

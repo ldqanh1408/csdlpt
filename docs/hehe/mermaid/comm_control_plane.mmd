@@ -1,0 +1,10 @@
+%% Giao tiếp tầng điều khiển (out-of-band): Worker <-> Coordinator / Aggregator
+flowchart TB
+    W["Worker"]
+    CO["Coordinator (Strict)"]
+    AG["Aggregator (Heuristic)"]
+    W -->|"PUSH heartbeat mỗi 1 giây: map LW_i + fencing_token"| CO
+    CO -->|"Worker PULL W_global mỗi 500ms (+ term)"| W
+    CO -->|"lệnh failover kèm (term, command_id)"| W
+    W -->|"PUSH W_h mỗi ~200ms"| AG
+    AG -->|"Worker PULL W_global_h (HTTP)"| W

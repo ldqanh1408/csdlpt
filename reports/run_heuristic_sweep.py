@@ -1,45 +1,52 @@
+"""
+Script bọc sẵn để chạy sweep heuristic trên full dataset.
+
+Nó đặt biến môi trường cho warmup, local-watermark close và paced replay, gọi `reports/run_experiment.py`, rồi copy báo cáo heuristic mới nhất sang `reports/results`.
+"""
+
 import subprocess
 import glob
 import shutil
 import os
 import sys
 
-# Ensure UTF-8 output and prevent buffering
+# Bảo đảm output UTF-8 và tắt buffering để log hiện ngay khi chạy sweep.
 os.environ["PYTHONUTF8"] = "1"
 os.environ["PYTHONUNBUFFERED"] = "1"
 
-# --- Warmup fix (topic #112) ---------------------------------------------
-# The default warmup (10s AND 50,000 samples/partition = 600K events across 12
-# partitions) freezes the heuristic watermark at L_max for nearly the entire
-# measured run. While frozen no window closes => every event is on_time =>
-# completeness is a flat 100% at every percentile and late=0.0% — the sweep
-# cannot produce a trade-off curve. Lower the warmup so the heuristic watermark
-# governs almost the whole 2.96M-row run. compose interpolates these via
-# ${HEURISTIC_WARMUP_*}; run_experiment.py copies os.environ into `docker
-# compose up`, so setting them here reaches the worker containers.
+# --- Sửa warmup (topic #112) ----------------------------------------------
+# Warmup mặc định (10s và 50.000 mẫu/partition = 600K event trên 12 partition)
+# giữ heuristic watermark ở L_max gần như suốt lần đo. Khi watermark bị đóng băng
+# thì không cửa sổ nào đóng, mọi event đều on_time, completeness phẳng 100% và
+# sweep không tạo được đường cong trade-off. Hạ warmup để watermark heuristic
+# chi phối gần như toàn bộ 2.96M dòng; docker compose nội suy các biến này qua
+# ${HEURISTIC_WARMUP_*}, còn run_experiment.py chuyển env vào worker container.
 os.environ.setdefault("HEURISTIC_WARMUP_SAMPLES", "2000")
 os.environ.setdefault("HEURISTIC_WARMUP_S", "5.0")
 
-# --- Local-watermark close (topic #112, ROOT CAUSE of the flat 100% curve) ---
-# Heuristic normally closes windows on W_global_h = min(per-partition W_h), which
-# lags the arrival frontier far more than L_eff (dragged down by the slowest /
-# least-warmed partition), so every event lands on_time and completeness is a
-# flat 100% at every percentile. This flag makes _close_windows use the LOCAL
-# per-partition watermark (max_event_time - L_eff), matching the offline model so
-# the percentile sweep produces the real immediate-completeness trade-off curve.
+# --- Đóng cửa sổ bằng local watermark (nguyên nhân chính của đường 100%) ----
+# Heuristic mặc định đóng cửa sổ bằng W_global_h = min(W_h từng partition).
+# Giá trị này thường tụt xa hơn L_eff vì bị partition chậm nhất kéo xuống, nên
+# event vẫn on_time và completeness tiếp tục phẳng 100%. Flag dưới đây buộc
+# _close_windows dùng watermark cục bộ (max_event_time - L_eff), khớp mô hình
+# offline để sweep percentile tạo đúng đường trade-off immediate-completeness.
 os.environ.setdefault("HEURISTIC_LOCAL_WATERMARK_CLOSE", "true")
 os.environ.setdefault("INGESTOR_REPLAY", "arrival")
-os.environ.setdefault("REPLAY_SPEED", "50")
+os.environ.setdefault("REPLAY_SPEED", "150")
 
-print("[run_heuristic] Starting heuristic sweep...")
+# Allow passing dataset as first argument, default to nyc_taxi_events_full.csv
+dataset = sys.argv[1] if len(sys.argv) > 1 else "nyc_taxi_events_full.csv"
+
+print(f"[run_heuristic] Starting heuristic sweep on dataset: {dataset}...")
 print(f"[run_heuristic] HEURISTIC_WARMUP_SAMPLES={os.environ['HEURISTIC_WARMUP_SAMPLES']} "
-      f"HEURISTIC_WARMUP_S={os.environ['HEURISTIC_WARMUP_S']}")
+      f"HEURISTIC_WARMUP_S={os.environ['HEURISTIC_WARMUP_S']} "
+      f"REPLAY_SPEED={os.environ['REPLAY_SPEED']}")
 
 cmd = [
     sys.executable, "reports/run_experiment.py",
     "--mode", "heuristic",
     "--punctuation", "max-event-time",
-    "--dataset", "nyc_taxi_events_full.csv",
+    "--dataset", dataset,
     "--ps", "0.10,0.20,0.30,0.40,0.50,0.75,0.90,0.95,0.99,0.999,0.9999",
     "--max-wait", "2000",
     "--settle", "30"
@@ -52,7 +59,7 @@ if result.returncode != 0:
     print(f"[run_heuristic] Error: experiment runner returned {result.returncode}")
     sys.exit(result.returncode)
 
-# Find latest generated files in docs/
+# Tìm bộ file mới nhất sinh trong docs/ rồi copy sang reports/results.
 docs_dir = "docs"
 csv_files = glob.glob(os.path.join(docs_dir, "completeness_vs_wait_heuristic_*.csv"))
 md_files = glob.glob(os.path.join(docs_dir, "completeness_vs_wait_heuristic_*.md"))

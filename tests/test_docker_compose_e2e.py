@@ -1,6 +1,7 @@
 """
-E2E docker-compose test runner for both Strict and Heuristic watermark modes.
-Captures 100-line logs per service and verifies watermark advancement.
+Runner end-to-end Docker Compose cho cả Strict và Heuristic.
+
+Script bật/tắt cụm, theo dõi health, đọc state worker/ingestor, capture log và xác nhận luồng xử lý hoàn tất trên môi trường container.
 """
 
 import subprocess
@@ -15,6 +16,7 @@ COMPOSE_FILE = os.path.join(DEPLOY_DIR, "docker-compose.yml")
 
 
 def run_cmd(cmd, env=None, cwd=DEPLOY_DIR, check=True, timeout=600):
+    """Chạy luồng xử lý `run cmd` theo cấu hình hiện tại."""
     print(f"Running: {' '.join(cmd)}")
     res = subprocess.run(cmd, capture_output=True, text=True, encoding="utf-8",
                          errors="replace", env=env, cwd=cwd, timeout=timeout)
@@ -27,6 +29,7 @@ def run_cmd(cmd, env=None, cwd=DEPLOY_DIR, check=True, timeout=600):
 
 
 def cleanup():
+    """Hàm `cleanup` thực hiện phần xử lý liên quan đến cleanup."""
     print("\n=== Cleaning up ===")
     cmd = ["docker", "compose", "-f", COMPOSE_FILE,
            "--profile", "strict", "--profile", "heuristic",
@@ -35,6 +38,7 @@ def cleanup():
 
 
 def wait_for_healthy(services_with_ports, timeout=120):
+    """Chờ điều kiện `wait for healthy` hoàn tất trước khi tiếp tục."""
     print(f"=== Waiting for {list(services_with_ports.keys())} to be healthy ===")
     start = time.time()
     pending = list(services_with_ports.items())
@@ -60,6 +64,7 @@ def wait_for_healthy(services_with_ports, timeout=120):
 
 
 def get_state(port):
+    """Trả về thông tin `state` từ trạng thái hiện tại."""
     try:
         r = requests.get(f"http://127.0.0.1:{port}/state", timeout=3)
         if r.status_code == 200:
@@ -70,6 +75,7 @@ def get_state(port):
 
 
 def get_worker_state(port):
+    """Trả về thông tin `worker state` từ trạng thái hiện tại."""
     try:
         r = requests.get(f"http://127.0.0.1:{port}/api/metrics", timeout=3)
         if r.status_code == 200:
@@ -80,6 +86,7 @@ def get_worker_state(port):
 
 
 def get_ingestor_logs(tail=30):
+    """Trả về thông tin `ingestor logs` từ trạng thái hiện tại."""
     res = run_cmd(["docker", "compose", "-f", COMPOSE_FILE,
                    "logs", "--tail", str(tail), "--no-color", "ingestor"],
                   check=False, timeout=15)
@@ -87,6 +94,7 @@ def get_ingestor_logs(tail=30):
 
 
 def monitor_run(coordinator_or_aggregator_port, is_strict, timeout=300):
+    """Hàm `monitor_run` thực hiện phần xử lý liên quan đến monitor run."""
     print("=== Monitoring progress ===")
     start = time.time()
     eof_reached = False
@@ -165,6 +173,7 @@ def monitor_run(coordinator_or_aggregator_port, is_strict, timeout=300):
 
 
 def capture_logs(mode_name, services):
+    """Hàm `capture_logs` thực hiện phần xử lý liên quan đến capture logs."""
     print(f"\n=== Capturing 100-line logs for {mode_name} ===")
     log_dir = os.path.join(DEPLOY_DIR, "test_logs", mode_name)
     os.makedirs(log_dir, exist_ok=True)
@@ -185,6 +194,7 @@ def capture_logs(mode_name, services):
 
 
 def run_test_strict():
+    """Chạy luồng xử lý `run test strict` theo cấu hình hiện tại."""
     print("\n" + "=" * 60)
     print("STRICT WATERMARK E2E TEST")
     print("=" * 60)
@@ -222,6 +232,7 @@ def run_test_strict():
 
 
 def run_test_heuristic():
+    """Chạy luồng xử lý `run test heuristic` theo cấu hình hiện tại."""
     print("\n" + "=" * 60)
     print("HEURISTIC WATERMARK E2E TEST")
     print("=" * 60)

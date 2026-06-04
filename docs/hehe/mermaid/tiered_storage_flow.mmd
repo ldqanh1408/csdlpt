@@ -1,0 +1,14 @@
+%% Tier-1 nhận event và lưu; Tier-2 checkpoint các Tier-1 vào Shared Volume
+flowchart LR
+    EV["Event đến<br/>(theo từng partition)"]
+    subgraph T1G["Tier-1: RocksDB cục bộ (local) trên nút sở hữu (node owner)"]
+        A["RocksDB P0/P1/P2 - nút (node) W1"]
+        B["RocksDB P3/P4/P5 - nút (node) W2"]
+    end
+    SV[("Tier-2: Shared Volume<br/>/data/checkpoint/partition_k/")]
+    T3[("Tier-3: MinIO<br/>(cửa sổ - window đã đóng)")]
+
+    EV -->|"ghi ngay, dưới 1ms"| T1G
+    T1G -->|"mỗi 10 giây: chụp checkpoint từng Tier-1 + Kafka offset"| SV
+    SV -->|"nút (node) mới mount khi failover/failback"| T1G
+    T1G ==>|"cửa sổ (window) đã đóng"| T3

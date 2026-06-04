@@ -1,0 +1,15 @@
+%% Strict Watermark - chu kỳ tính và chốt cửa sổ
+sequenceDiagram
+    autonumber
+    participant ING as Ingestor
+    participant K as Kafka (events)
+    participant W as Worker (engine P_k)
+    participant C as Coordinator Leader
+    ING->>K: LogEvent + Punctuation(T_commit); Empty Punctuation 1 giây khi rảnh (idle)
+    W->>K: poll(events)
+    Note over W: LW_i(P_k) = T_commit (đơn điệu - monotonic, chỉ tiến)
+    W->>C: WorkerHeartbeat 1 giây {partition -> LW_i, offset, fencing_token}
+    Note over C: W_global = min(LW_i) trên mọi phân vùng hoạt động (active partition)
+    W->>C: GetGlobalState (worker pull 500ms)
+    C-->>W: W_global, term
+    Note over W: window_end <= W_global thì chốt + phát kết quả (exactly-once)

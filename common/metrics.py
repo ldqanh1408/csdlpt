@@ -1,21 +1,29 @@
-"""High-resolution profiling and system metrics collection."""
+"""
+Thu thập metric hệ thống và đo thời gian xử lý độ phân giải cao.
+
+`HighResTimer` đo latency; `SystemMetrics` lưu số event, late event, cửa sổ đã đóng, queue depth và các chỉ số cho dashboard/report.
+"""
 
 import time
 from dataclasses import dataclass, field
 
 
 class HighResTimer:
+    """Lớp `HighResTimer` gom dữ liệu và hành vi liên quan đến HighResTimer."""
     @staticmethod
     def now_ns() -> int:
+        """Hàm `now_ns` thực hiện phần xử lý liên quan đến now ns của `HighResTimer`."""
         return time.perf_counter_ns()
 
     @staticmethod
     def elapsed_ms(start_ns: int) -> float:
+        """Hàm `elapsed_ms` thực hiện phần xử lý liên quan đến elapsed ms của `HighResTimer`."""
         return (time.perf_counter_ns() - start_ns) / 1_000_000.0
 
 
 @dataclass
 class SystemMetrics:
+    """Lớp `SystemMetrics` gom dữ liệu và hành vi liên quan đến SystemMetrics."""
     T_network_ingest_ns: list[float] = field(default_factory=list)
     T_poll_decode_ns: list[float] = field(default_factory=list)
     T_deduplication_ns: list[float] = field(default_factory=list)
@@ -54,15 +62,18 @@ class SystemMetrics:
     sub_checkpoint_count: int = 0
 
     def data_completeness(self) -> float:
+        """Hàm `data_completeness` thực hiện phần xử lý liên quan đến data completeness của `SystemMetrics`."""
         unique = max(self.total_received - self.duplicates, 1)
         return 100.0 * self.on_time / unique
 
     def late_arrival_rate(self) -> float:
+        """Hàm `late_arrival_rate` thực hiện phần xử lý liên quan đến late arrival rate của `SystemMetrics`."""
         total = max(self.total_received, 1)
         return 100.0 * self.late_dropped / total
 
     @staticmethod
     def _latency_us(values: list[float], percentile: float) -> float:
+        """Hàm `_latency_us` thực hiện phần xử lý liên quan đến latency us của `SystemMetrics`."""
         values = [v for v in values if v >= 0]
         if not values:
             return 0.0
@@ -71,6 +82,7 @@ class SystemMetrics:
         return round(sorted_v[idx] / 1000.0, 2)
 
     def latency_summary(self) -> dict:
+        """Tạo bản tóm tắt trạng thái `latency summary` để trả về API hoặc báo cáo."""
         stages = {
             "network_ingest": self.T_network_ingest_ns,
             "poll_decode": self.T_poll_decode_ns,
@@ -87,6 +99,7 @@ class SystemMetrics:
         return result
 
     def summary(self) -> dict:
+        """Tạo bản tóm tắt trạng thái `summary` để trả về API hoặc báo cáo."""
         result = {
             "total_received": self.total_received,
             "on_time": self.on_time,

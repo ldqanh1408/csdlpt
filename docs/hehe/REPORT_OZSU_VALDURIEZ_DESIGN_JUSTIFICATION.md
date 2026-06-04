@@ -134,17 +134,36 @@ Hệ thống sử dụng các cơ chế dự phòng ở nhiều tầng để lo�
 3. Khi xảy ra lỗi, Worker tải checkpoint, thực hiện `seek(offset + 1)` để phục hồi đúng trạng thái cũ.
 4. Cơ chế lọc trùng (Deduplication) thông điệp đầu vào bằng bảng băm ID sự kiện cục bộ, bảo đảm tính Exactly-Once Processing.
 
-### 3.9. Lưu trữ trạng thái phân tầng (Tiered State Storage)
-Trạng thái xử lý được tổ chức thành 3 tầng lưu trữ chuyên biệt:
-- **Tier-1: Local RocksDB** (Đọc/ghi nhanh trên đĩa cục bộ SSD NVMe): Đảm bảo độ trễ truy xuất thấp dưới 1ms cho các phép cập nhật cửa sổ nóng.
-- **Tier-2: Shared Volume** (Sao lưu checkpoint định kỳ 10 giây): Cung cấp khả năng bàn giao trạng thái nhanh chóng giữa các trạm khi xảy ra lỗi.
-- **Tier-3: Object Storage** (Lưu trữ nén lâu dài trên Object Storage): Đảm bảo lưu trữ dữ liệu lịch sử bền vững và khôi phục khi toàn bộ cluster local bị lỗi.
+### 3.9. Phản biện: Vì sao cần 3 tầng lưu trữ (Tiered State Storage)?
 
-### 3.10. Đánh đổi chi phí truyền thông (Communication Cost)
-Strict Watermark yêu cầu các luồng heartbeat liên tục từ Worker về Coordinator, các punctuation tokens truyền tải trong dòng sự kiện Kafka và cơ chế đồng thuận Raft. Điều này làm tăng chi phí băng thông mạng. Tuy nhiên, theo lý thuyết Özsu và Valduriez, chi phí truyền thông này hoàn toàn được biện minh vì nó là điều kiện bắt buộc để hệ thống đạt được tính nhất quán nghiêm ngặt và không mất mát dữ liệu.
+> **Phản đề**: Hệ thống đã có RocksDB cục bộ vừa nhanh (< 1ms) vừa bền (WAL). Tại sao phải "vẽ" thêm hai tầng nữa cho phức tạp? Liệu đây có phải là over-engineering?
 
-### 3.11. Kết luận cho Strict Watermark
-Strict Watermark được biện minh theo lý thuyết Özsu và Valduriez vì nó sử dụng fragmentation để mở rộng, allocation để quản lý partition ownership, replication để tăng reliability, distributed coordination để duy trì global watermark consistency, recovery protocols để chịu lỗi, exactly-once semantics để bảo toàn correctness, và transparency để che giấu sự phức tạp phân tán. Thiết kế này phù hợp khi correctness quan trọng hơn latency.
+Mỗi tầng giải quyết một yêu cầu mà **không tầng nào khác thay thế được**; loại bỏ bất kỳ tầng nào đều phá vỡ một thuộc tính bắt buộc theo trục **Reliability & Recovery** của Özsu–Valduriez. Lần lượt bác bỏ từng phương án đơn giản hơn:
+
+**Bác bỏ phương án 1 — "Chỉ cần 1 tầng RocksDB cục bộ":**
+RocksDB cục bộ **chết theo node**. Khi node sập, toàn bộ state nằm trên đĩa cục bộ của node đã chết; node gánh hộ **không thể** mở nó (RocksDB giữ `LOCK` độc quyền trên thư mục dữ liệu, và đĩa thuộc về máy khác). Hệ quả: **không thể failover** → vi phạm cam kết HA; mất đĩa = mất sạch state, không có đường khôi phục. ⇒ 1 tầng bất khả thi cho một hệ chịu lỗi.
+
+**Bác bỏ phương án 2 — "Thêm Tier-2 Shared Volume là đủ (2 tầng)":**
+Shared Volume cho phép failover (node khác mount thư mục `partition_k/`, nạp checkpoint rồi `seek(offset + 1)`), nhưng:
+- Nó là **một điểm lỗi vật lý đơn**: volume hỏng → mất checkpoint của **mọi** phân mảnh cùng lúc (correlated failure), không một bản sao bền vững nào sống sót ⇒ **không đạt Disaster Recovery** (không bảo đảm được RPO/RTO).
+- Dung lượng **hữu hạn**: giữ kết quả cửa sổ lịch sử lâu dài sẽ gây **phình đĩa** (disk swelling), đặc biệt khi một node replay backlog và sinh ra hàng loạt cửa sổ quá khứ dồn dập.
+
+⇒ 2 tầng chống được lỗi node, nhưng **không** chống được lỗi storage và không kiểm soát được tăng trưởng dung lượng.
+
+**Bác bỏ phương án 3 — "Vậy dùng 1 tầng Object Storage (MinIO) cho tất cả — bền, vô hạn, có DR sẵn":**
+MinIO/S3 có **độ trễ hàng chục–trăm mili-giây mỗi round-trip** và throughput ghi ngẫu nhiên kém. Hot path cập nhật cửa sổ xảy ra **theo từng sự kiện** và đòi hỏi **< 1ms**; đặt hot state lên Object Storage sẽ **giết latency** của cả hai chế độ (Strict lẫn Heuristic) ⇒ phá vỡ chính mục tiêu của hệ thống.
+
+**Tổng hợp — ba tầng là phân rã theo 3 trục yêu cầu trực giao:**
+
+| Tầng | Giải bài toán mà tầng khác không giải được | Điểm yếu (được tầng khác bù) |
+| :--- | :--- | :--- |
+| **Tier-1: RocksDB cục bộ** | Tốc độ hot-path **< 1ms** | Chết theo node; có `LOCK` độc quyền |
+| **Tier-2: Shared Volume** | **Failover nhanh** (mount + seek) | Single volume; dung lượng hữu hạn |
+| **Tier-3: MinIO/S3** | **Bền vững + DR + dung lượng vô hạn** | Latency cao; không dùng cho hot path |
+
+Không tồn tại một công nghệ lưu trữ nào **đồng thời** nhanh-mili-giây, failover-được, và bền-vững-có-DR — đây chính là biểu hiện của nguyên lý **phân cấp bộ nhớ (memory hierarchy)** áp dụng cho trạng thái phân tán. Ba tầng không **dư thừa** mà tạo thành một **đường ống vòng đời dữ liệu**: state nóng sống ở Tier-1; checkpoint định kỳ 10s xuống Tier-2 để bàn giao khi sự cố; cửa sổ đã chốt và bản sao trạng thái hoạt động (sao lưu mỗi 5 phút, phục vụ DR với RPO ≤ 5 phút) được đẩy lên Tier-3 rồi **purge khỏi Tier-1** để giữ đĩa cục bộ phẳng lì — qua đó triệt tiêu luôn bài toán disk-swelling nêu ở phương án 2.
+
+⇒ Loại bỏ bất kỳ tầng nào đều đánh mất một thuộc tính **không thể thương lượng** (tốc độ, hoặc khả năng failover, hoặc khả năng chống thảm họa). Do đó kiến trúc 3 tầng là **tối thiểu cần thiết**, không phải over-engineering.
 
 ---
 
@@ -206,12 +225,6 @@ Trong môi trường phân tán, sự lệch đồng hồ vật lý (Clock Skew)
 Khi một Worker phục hồi và thực hiện replay dòng sự kiện cũ từ Kafka offset cũ, tốc độ nạp dữ liệu rất nhanh khiến độ trễ đo đạc vật lý tạm thời bị phóng đại cực lớn (do sự kiện sinh ra trong quá khứ được xử lý ở hiện tại). Nếu đưa các mẫu này vào DDSketch, phân phối độ trễ sẽ bị nhiễm bẩn nghiêm trọng, đẩy Watermark dừng lại vô lý.
 
 Hệ thống giải quyết tại công cụ xử lý chính bằng cơ chế chụp ảnh trạng thái DDSketch (Snapshot) trước khi ghi checkpoint. Khi khôi phục, Worker khôi phục DDSketch từ bản chụp sạch đó và tạm dừng việc thu thập mẫu thống kê trong suốt quá trình replay, chỉ kích hoạt lại khi Worker đã đuổi kịp dòng sự kiện thời gian thực (catch-up).
-
-### 4.10. Đánh đổi chi phí truyền thông (Communication Cost)
-So với Strict Watermark, Heuristic Watermark giảm đáng kể sự phụ thuộc vào Punctuation Tokens và phối hợp đồng thuận toàn cục của các trạm. Chi phí giảm trễ chờ đợi là tính nhất quán tức thời yếu hơn, nhưng hệ thống hoàn toàn bù đắp được nhờ cơ chế DLQ bất đồng bộ. Đây là một sự đánh đổi chi phí truyền thông vô cùng hợp lý dưới góc nhìn lý thuyết Özsu và Valduriez khi nghiệp vụ cho phép thực hiện sửa lỗi muộn.
-
-### 4.11. Kết luận cho Heuristic Watermark
-Heuristic Watermark được biện minh theo lý thuyết Özsu và Valduriez vì nó sử dụng fragmentation để mở rộng, site autonomy cục bộ nâng cao hiệu năng, cấu trúc DDSketch làm xấp xỉ metadata tối ưu, và mô hình nhất quán sau cùng phối hợp DLQ/Correction đền bù trạng thái. Chế độ này tối ưu nhất cho các nghiệp vụ ưu tiên độ trễ chờ thấp.
 
 ---
 

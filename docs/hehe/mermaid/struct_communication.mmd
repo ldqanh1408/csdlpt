@@ -1,0 +1,6 @@
+%% Ví dụ cấu trúc: các loại thông điệp giữa tầng (layer)
+flowchart TB
+    M1["WorkerHeartbeat (Strict)<br/>worker_id, partitions(pid:LW), offset, fencing_token"]
+    M2["WorkerWatermark (Heuristic)<br/>worker_id, partition_id, W_h"]
+    M3["StateReply (trả về nút Worker)<br/>W_global, term, partition_types"]
+    M4["Sự kiện trễ (Late event) → DLQ<br/>window_id, partition_id, event_time, payload"]

@@ -1,0 +1,13 @@
+%% Domain 5 - State & Storage (Tiered, eviction state machine)
+%% Render: mmdc -i domain5_state_storage.mmd -o domain5.svg
+flowchart LR
+    WK["Worker"]
+    T1[("Tier1 - RocksDB cục bộ (local)<br/>ow/cw/si/meta - dưới 1ms")]
+    T2[("Tier2 - Phân vùng chia sẻ (Shared Volume)<br/>metadata.json + state.db + sketch.bin")]
+    T3[("Tier3 - MinIO (S3)")]
+
+    WK -->|"đọc/ghi dưới 1ms"| T1
+    T1 -->|"checkpoint 10 giây - state + Kafka offset"| T2
+    T2 -->|"failover: mount + seek(offset+1)"| WK
+    T1 -->|"window đã chốt: CLOSED -> UPLOADING -> UPLOADED -> PURGED"| T3
+    T3 -->|"sao lưu hoạt động (active backup) 5 phút - DR (RPO <= 5 phút)"| T3

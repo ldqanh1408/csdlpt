@@ -1,13 +1,8 @@
 #!/usr/bin/env python3
-"""Comprehensive statistics report for a NYC-taxi trip CSV.
+"""
+In báo cáo thống kê chi tiết cho dataset NYC Taxi thô.
 
-Prints EVERY useful number (row counts, datetime range, duration distribution,
-out-of-order analysis, per-column describe, top zones, payment/amount dist) so
-the full report can be kept verbatim. Default target: the full Jan-2024 file.
-
-Usage:
-    python tools/dataset_stats.py
-    python tools/dataset_stats.py --src dataset/yellow_tripdata_2024-01.csv
+Script tính range thời gian, duration percentile, lateness sau nén, out-of-order, phân bố zone và thống kê tiền cước để kiểm tra chất lượng dữ liệu.
 """
 from __future__ import annotations
 import argparse
@@ -25,10 +20,12 @@ pd.set_option("display.float_format", lambda x: f"{x:,.4f}")
 
 
 def hr(t):
+    """Hàm `hr` thực hiện phần xử lý liên quan đến hr."""
     print("\n" + "=" * 78 + f"\n{t}\n" + "=" * 78, flush=True)
 
 
 def main():
+    """Điểm vào CLI của script, đọc tham số và điều phối các bước xử lý."""
     ap = argparse.ArgumentParser()
     ap.add_argument("--src", default=str(DEFAULT_SRC))
     args = ap.parse_args()

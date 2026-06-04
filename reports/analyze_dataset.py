@@ -1,27 +1,8 @@
 #!/usr/bin/env python3
 """
-Full-Dataset Watermark Analysis — Topic #112 "Log Delay Compensator"
-ULTRA-DETAILED edition.
+Phân tích offline toàn bộ dataset cho chủ đề Log Delay Compensator.
 
-Analyzes the FULL nyc_taxi_events_full.csv (2.96M rows) with:
-- Time-compression documentation (DIV=60 design)
-- Partition-level breakdown (12 partitions, hash%12)
-- Per-window event/loss distribution
-- Lateness vs event-time correlation
-- Inter-arrival gap analysis
-- Host/partition-key skew analysis
-- Sensitivity to window size (1,5,10,30,60s)
-- DDSketch convergence tracking
-- δ vs completeness curve fitting
-- DLQ backlog simulation
-- Cost-per-completeness analysis
-- Extreme-latency edge cases
-
-No Docker, no cluster — pure analytical replay of engine watermark logic.
-
-Usage:
-    python deploy/full_dataset_analysis.py
-    python deploy/full_dataset_analysis.py --window-size 5 --extra-sweeps
+Script đọc CSV đã chuẩn hóa, tính phân phối lateness, sweep strict/heuristic, phân tích mất mát theo cửa sổ/partition, fit completeness curve và xuất báo cáo.
 """
 from __future__ import annotations
 
@@ -35,6 +16,10 @@ from typing import Optional
 import numpy as np
 
 ROOT = Path(__file__).parent.parent
+sys.path.insert(0, str(ROOT))
+
+from common.partitioning import stable_partition
+
 OUT_DIR = ROOT / "docs"
 DEFAULT_DATASET = ROOT / "dataset" / "nyc_taxi_events_full.csv"
 
@@ -43,18 +28,25 @@ DEFAULT_DATASET = ROOT / "dataset" / "nyc_taxi_events_full.csv"
 # ═══════════════════════════════════════════════════════════════════════════════
 
 def _p(sorted_vals, pct: float) -> float:
-    """pct-th percentile (0-100) from sorted values."""
+    """Hàm `_p` thực hiện phần xử lý liên quan đến p.
+    
+    Ghi chú gốc:
+    pct-th percentile (0-100) from sorted values.
+    """
     if not sorted_vals: return 0.0
     idx = max(0, min(len(sorted_vals)-1, int(len(sorted_vals)*pct/100.0)))
     return sorted_vals[idx]
 
 def _pc(n: float, total: float) -> str:
+    """Hàm `_pc` thực hiện phần xử lý liên quan đến pc."""
     return f"{100.0*n/total:.3f}" if total else "0.000"
 
 def _pc2(n: float, total: float) -> str:
+    """Hàm `_pc2` thực hiện phần xử lý liên quan đến pc2."""
     return f"{100.0*n/total:.2f}" if total else "0.00"
 
 def _k(n: float) -> str:
+    """Hàm `_k` thực hiện phần xử lý liên quan đến k."""
     if abs(n) >= 1e6: return f"{n/1e6:.2f}M"
     if abs(n) >= 1e3: return f"{n/1e3:.1f}K"
     return f"{n:.1f}"
@@ -65,6 +57,7 @@ def _k(n: float) -> str:
 
 @dataclass
 class LoadedDataset:
+    """Lớp `LoadedDataset` gom dữ liệu và hành vi liên quan đến LoadedDataset."""
     event_times: np.ndarray          # float64, file order
     arrivals: np.ndarray             # float64, file order
     lateness: np.ndarray             # arrival - event_time
@@ -76,6 +69,7 @@ class LoadedDataset:
     n_hosts: int
 
 def load_dataset(path: str) -> tuple[LoadedDataset, dict]:
+    """Nạp dữ liệu/trạng thái `load dataset` từ lưu trữ hoặc cấu hình."""
     t0 = time.time()
     print(f"[load] Reading {path} ...", flush=True)
     et_list, arr_list, lat_list = [], [], []
@@ -146,10 +140,10 @@ def load_dataset(path: str) -> tuple[LoadedDataset, dict]:
         hist.append((lo, hi, cnt))
     stats["lat_hist"] = hist
 
-    # Host (partition key) skew — use hash%12
+    # Host (partition key) skew — match the runtime ingestor's stable hash.
     part_map = defaultdict(int)
     for h in host_list:
-        part_map[hash(h) % 12] += 1
+        part_map[stable_partition(h, 12)] += 1
     stats["partition_counts"] = dict(sorted(part_map.items()))
     part_vals = list(part_map.values())
     stats["partition_skew_ratio"] = round(max(part_vals)/np.mean(part_vals), 2) if part_vals else 0
@@ -199,14 +193,16 @@ def load_dataset(path: str) -> tuple[LoadedDataset, dict]:
 
 def sweep_strict_all(ds: LoadedDataset, deltas: list[float],
                      window_size_s: float = 5.0) -> list[dict]:
-    """
+    """Hàm `sweep_strict_all` thực hiện phần xử lý liên quan đến sweep strict all.
+    
+    Ghi chú gốc:
     Process the whole dataset ONCE, computing on_time/late for EVERY δ simultaneously.
-    This is O(n * len(deltas)) but vectorized via numpy for efficiency.
-
-    Algorithm per-event:
-      window_start = floor(et / window_size) * window_size
-      watermark_at_i = max_et_seen_before_i - delta
-      event is ON TIME for delta if: window_start + window_size > watermark_at_i
+        This is O(n * len(deltas)) but vectorized via numpy for efficiency.
+    
+        Algorithm per-event:
+          window_start = floor(et / window_size) * window_size
+          watermark_at_i = max_et_seen_before_i - delta
+          event is ON TIME for delta if: window_start + window_size > watermark_at_i
     """
     n = ds.n
     nd = len(deltas)
@@ -253,7 +249,11 @@ def sweep_strict_all(ds: LoadedDataset, deltas: list[float],
 
 def strict_window_loss_analysis(ds: LoadedDataset, deltas: list[float],
                                  window_size_s: float = 5.0) -> dict:
-    """For each δ, compute per-window: total events, late events, loss %."""
+    """Hàm `strict_window_loss_analysis` thực hiện phần xử lý liên quan đến strict window loss analysis.
+    
+    Ghi chú gốc:
+    For each δ, compute per-window: total events, late events, loss %.
+    """
     n = ds.n
     et = ds.event_times
     ws = np.floor(et / window_size_s) * window_size_s
@@ -308,14 +308,18 @@ def strict_window_loss_analysis(ds: LoadedDataset, deltas: list[float],
 
 def strict_partition_analysis(ds: LoadedDataset, deltas: list[float],
                                window_size_s: float = 5.0) -> list[dict]:
-    """Break down strict completeness by partition (hash(host)%12)."""
+    """Hàm `strict_partition_analysis` thực hiện phần xử lý liên quan đến strict partition analysis.
+    
+    Ghi chú gốc:
+    Break down strict completeness by partition (stable hash(host) % 12).
+    """
     n = ds.n
     et = ds.event_times
     ws = np.floor(et / window_size_s) * window_size_s
     we = ws + window_size_s
 
     # Partition assignment per row
-    parts = np.array([hash(h) % 12 for h in ds.hosts], dtype=np.int32)
+    parts = np.array([stable_partition(h, 12) for h in ds.hosts], dtype=np.int32)
 
     max_et_before = np.empty(n, dtype=np.float64)
     max_et_before[0] = float("-inf")
@@ -356,13 +360,15 @@ def strict_partition_analysis(ds: LoadedDataset, deltas: list[float],
 
 def sweep_heuristic_all(ds: LoadedDataset, ps: list[float],
                         window_size_s: float = 5.0) -> list[dict]:
-    """
+    """Hàm `sweep_heuristic_all` thực hiện phần xử lý liên quan đến sweep heuristic all.
+    
+    Ghi chú gốc:
     Simulate heuristic watermark with streaming L_eff updates.
-
-    L_eff is recomputed every UPDATE_INTERVAL events using numpy.percentile
-    on all lateness values seen so far (simulates DDSketch convergence).
-
-    Events classified as "late" by the watermark go to DLQ — eventual completeness = 100%.
+    
+        L_eff is recomputed every UPDATE_INTERVAL events using numpy.percentile
+        on all lateness values seen so far (simulates DDSketch convergence).
+    
+        Events classified as "late" by the watermark go to DLQ — eventual completeness = 100%.
     """
     n = ds.n
     et = ds.event_times
@@ -429,7 +435,11 @@ def sweep_heuristic_all(ds: LoadedDataset, ps: list[float],
 
 def window_size_sensitivity(ds: LoadedDataset, deltas: list[float],
                              window_sizes: list[float]) -> list[dict]:
-    """How does window_size affect the completeness curve?"""
+    """Hàm `window_size_sensitivity` thực hiện phần xử lý liên quan đến window size sensitivity.
+    
+    Ghi chú gốc:
+    How does window_size affect the completeness curve?
+    """
     results = []
     for wsz in window_sizes:
         sr = sweep_strict_all(ds, deltas, wsz)
@@ -454,7 +464,11 @@ def window_size_sensitivity(ds: LoadedDataset, deltas: list[float],
 # ═══════════════════════════════════════════════════════════════════════════════
 
 def completeness_cost_analysis(strict_results: list[dict]) -> dict:
-    """Marginal cost: how many ms of extra wait buys 1% more completeness?"""
+    """Hàm `completeness_cost_analysis` thực hiện phần xử lý liên quan đến completeness cost analysis.
+    
+    Ghi chú gốc:
+    Marginal cost: how many ms of extra wait buys 1% more completeness?
+    """
     sr = sorted(strict_results, key=lambda x: x["delta_s"])
     costs = []
     for i in range(1, len(sr)):
@@ -481,7 +495,11 @@ def completeness_cost_analysis(strict_results: list[dict]) -> dict:
 # ═══════════════════════════════════════════════════════════════════════════════
 
 def fit_completeness_curve(strict_results: list[dict], lateness_arr: np.ndarray) -> dict:
-    """Fit analytical model: completeness(δ) = % events with lateness <= δ"""
+    """Hàm `fit_completeness_curve` thực hiện phần xử lý liên quan đến fit completeness curve.
+    
+    Ghi chú gốc:
+    Fit analytical model: completeness(δ) = % events with lateness <= δ
+    """
     n = len(lateness_arr)
     deltas = np.array([r["delta_s"] for r in strict_results])
     empirical_comp = np.array([r["completeness_pct"] for r in strict_results])
@@ -516,11 +534,18 @@ def fit_completeness_curve(strict_results: list[dict], lateness_arr: np.ndarray)
 def build_report(ds_stats, ds, strict_results, heuristic_results,
                  win_loss, part_analysis, sensitivity, cost_analysis,
                  curve_fit, window_size_s, ts):
+    """Xây dựng cấu trúc dữ liệu hoặc payload `build report`."""
     n = ds_stats["n"]
     L = []  # lines accumulator
 
-    def h(s=""): L.append(s)
-    def hr(): h("---"); h()
+    def h(s=""):
+        """Thêm một dòng Markdown vào buffer báo cáo."""
+        L.append(s)
+
+    def hr():
+        """Thêm đường phân cách Markdown và một dòng trống vào báo cáo."""
+        h("---")
+        h()
 
     # ── Title ────────────────────────────────────────────────────────────────
     h(f"# Report — Data Completeness % vs Wait Time (ms)")
@@ -672,7 +697,7 @@ def build_report(ds_stats, ds, strict_results, heuristic_results,
     h("### 2.7 Partition Key (Host) Distribution")
     h()
     h(f"- **Unique hosts**: {ds_stats['n_hosts']:,}")
-    h(f"- **Partition scheme**: `hash(host) % 12` → 12 partitions")
+    h(f"- **Partition scheme**: `stable_partition(host, 12)` → 12 partitions")
     h(f"- **Skew ratio (max/avg)**: {ds_stats['partition_skew_ratio']}×")
     h()
     h("| Partition | Event Count | % |")
@@ -1082,6 +1107,7 @@ def build_report(ds_stats, ds, strict_results, heuristic_results,
 
 def write_csvs(strict, heuristic, out_dir, ts):
     # Strict
+    """Hàm `write_csvs` thực hiện phần xử lý liên quan đến write csvs."""
     with open(out_dir / f"strict_sweep_{ts}.csv", "w", newline="", encoding="utf-8") as f:
         w = csv.writer(f)
         w.writerow(["delta_s","wait_time_ms","completeness_pct","late_rate_pct","total","on_time","late"])
@@ -1104,6 +1130,7 @@ def write_csvs(strict, heuristic, out_dir, ts):
 # ═══════════════════════════════════════════════════════════════════════════════
 
 def main():
+    """Điểm vào CLI của script, đọc tham số và điều phối các bước xử lý."""
     ap = argparse.ArgumentParser()
     ap.add_argument("--dataset", default=str(DEFAULT_DATASET))
     ap.add_argument("--window-size", type=float, default=5.0)

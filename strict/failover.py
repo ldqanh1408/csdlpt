@@ -1,10 +1,7 @@
-"""Partition Failover Manager — dynamic reassignment on worker failure.
+"""
+Quản lý failover/failback partition khi worker lỗi hoặc phục hồi.
 
-Spec §8.2-8.5:
-  - Partition state machine: ASSIGNED -> REASSIGNING -> ORPHANED -> PAUSED
-  - Even redistribution: N alive workers each get 12/N partitions
-  - Cascading failure protocol
-  - 5-step Strict Failback Protocol
+Module phát hiện heartbeat timeout, phân phối lại partition cho worker còn sống, lưu state vào RocksDB và thực hiện quy trình failback 5 bước có fencing token.
 """
 
 import logging
@@ -19,7 +16,7 @@ logger = logging.getLogger("failover")
 
 
 class FailbackStep(Enum):
-    """Five-step Strict Failback Protocol (Spec §8.4)."""
+    """Năm bước của giao thức Strict Failback."""
     PAUSE = "pause"
     FLUSH_ACK = "flush_ack"
     KAFKA_REASSIGN = "kafka_reassign"
@@ -28,6 +25,7 @@ class FailbackStep(Enum):
 
 
 class FailoverEvent(Enum):
+    """Lớp `FailoverEvent` định nghĩa các trạng thái/hằng số dùng trong luồng xử lý."""
     WORKER_FAILED = "worker_failed"
     WORKER_RECOVERED = "worker_recovered"
     PARTITION_REASSIGNED = "partition_reassigned"
@@ -41,6 +39,7 @@ class FailoverEvent(Enum):
 
 @dataclass
 class WorkerRecord:
+    """Lớp `WorkerRecord` gom dữ liệu và hành vi liên quan đến WorkerRecord."""
     worker_id: str
     last_heartbeat: float = 0.0
     status: WorkerStatus = WorkerStatus.ACTIVE
@@ -50,6 +49,7 @@ class WorkerRecord:
 
 @dataclass
 class FailoverEventRecord:
+    """Lớp `FailoverEventRecord` gom dữ liệu và hành vi liên quan đến FailoverEventRecord."""
     event: FailoverEvent
     worker_id: str = ""
     partition_ids: list[int] = field(default_factory=list)
@@ -59,7 +59,7 @@ class FailoverEventRecord:
 
 @dataclass
 class FailbackState:
-    """Tracks the progress of a single partition through the 5-step failback protocol."""
+    """Theo dõi tiến độ failback của một partition qua 5 bước."""
     partition_id: int
     step: FailbackStep
     started_at: float
@@ -69,10 +69,11 @@ class FailbackState:
 
 
 class FailoverManager:
-    """Detects worker failures and reassigns partitions among survivors."""
+    """Phát hiện worker lỗi và phân phối lại partition cho các worker còn sống."""
 
     def __init__(self, heartbeat_timeout_s: float = 10.0, total_partitions: int = 12,
                  rocks_store: "RocksStore | None" = None):
+        """Khởi tạo đối tượng của `FailoverManager` và thiết lập trạng thái ban đầu."""
         self.heartbeat_timeout_s = heartbeat_timeout_s
         self._original_timeout_s = heartbeat_timeout_s
         self.total_partitions = total_partitions
@@ -92,11 +93,12 @@ class FailoverManager:
         for pid in range(total_partitions):
             self._partition_state[pid] = PartitionState.ASSIGNED
 
-        # Restore in-progress failback states from RocksDB (coordinator-change resilience)
+        # Khôi phục failback đang chạy dở từ RocksDB để chịu được đổi coordinator.
         if self._rocks_store is not None:
             self.restore_failback_state()
 
     def register_worker(self, worker_id: str, partition_ids: list[int]) -> None:
+        """Đăng ký `worker` vào registry hoặc trạng thái quản lý."""
         with self._lock:
             if worker_id not in self._workers:
                 self._workers[worker_id] = WorkerRecord(worker_id=worker_id)
@@ -111,6 +113,7 @@ class FailoverManager:
 
     def heartbeat(self, worker_id: str, partition_ids: list[int],
                   offsets: dict[int, int] | None = None) -> None:
+        """Hàm `heartbeat` thực hiện phần xử lý liên quan đến heartbeat của `FailoverManager`."""
         with self._lock:
             if offsets:
                 self._partition_offsets.update(offsets)
@@ -126,8 +129,8 @@ class FailoverManager:
                 self._partition_owner[pid] = worker_id
                 if pid not in self._original_owner:
                     self._original_owner[pid] = worker_id
-                # Confirm reassignment: if this worker is the expected new owner
-                # and the partition is still REASSIGNING, mark it ASSIGNED.
+                # Xác nhận reassignment: nếu worker này là owner mới mong đợi và
+                # partition còn REASSIGNING, đánh dấu lại là ASSIGNED.
                 if (self._partition_state.get(pid) == PartitionState.REASSIGNING
                         and self._pending_reassignments.get(pid) == worker_id):
                     self._partition_state[pid] = PartitionState.ASSIGNED
@@ -138,6 +141,7 @@ class FailoverManager:
                     )
 
     def detect_failures(self) -> list[str]:
+        """Hàm `detect_failures` thực hiện phần xử lý liên quan đến detect failures của `FailoverManager`."""
         now = time.time()
         failed = []
         with self._lock:
@@ -155,6 +159,8 @@ class FailoverManager:
         return failed
 
     def reassign_failed_partitions(self) -> dict[int, str]:
+        """Hàm `reassign_failed_partitions` thực hiện phần xử lý liên quan đến reassign failed partitions của `FailoverManager`.
+        """
         with self._lock:
             alive = [wid for wid, wr in self._workers.items()
                      if wr.status in (WorkerStatus.ACTIVE, WorkerStatus.STALE)]
@@ -182,6 +188,8 @@ class FailoverManager:
             return reassignments
 
     def cascading_failover(self, failed_workers: list[str]) -> dict[int, str]:
+        """Hàm `cascading_failover` thực hiện phần xử lý liên quan đến cascading failover của `FailoverManager`.
+        """
         if len(failed_workers) <= 1:
             return self.reassign_failed_partitions()
         logger.warning("Cascading failure: %d workers failed (%s)",
@@ -219,10 +227,13 @@ class FailoverManager:
     # ------------------------------------------------------------------
 
     def start_failback(self, recovered_worker: str) -> dict:
-        """Begin failback for all partitions originally owned by *recovered_worker*.
-
-        Only executes Step 1 (PAUSE) — subsequent steps are advanced via
-        :meth:`advance_failback` one partition at a time.
+        """Khởi động tiến trình, server hoặc vòng nền `start failback`.
+        
+        Ghi chú gốc:
+        Begin failback for all partitions originally owned by *recovered_worker*.
+        
+                Only executes Step 1 (PAUSE) — subsequent steps are advanced via
+                :meth:`advance_failback` one partition at a time.
         """
         with self._lock:
             wr = self._workers.get(recovered_worker)
@@ -286,11 +297,14 @@ class FailoverManager:
             }
 
     def advance_failback(self, partition_id: int) -> dict:
-        """Advance a partition one step through the 5-step failback protocol.
-
-        Returns the *current* step (after advancing) and the next action required.
-        When COMPLETE is reached the partition is reassigned and its failback
-        state is removed.
+        """Hàm `advance_failback` thực hiện phần xử lý liên quan đến advance failback của `FailoverManager`.
+        
+        Ghi chú gốc:
+        Advance a partition one step through the 5-step failback protocol.
+        
+                Returns the *current* step (after advancing) and the next action required.
+                When COMPLETE is reached the partition is reassigned and its failback
+                state is removed.
         """
         _STEP_EVENT = {
             FailbackStep.PAUSE: FailoverEvent.FAILBACK_STEP_PAUSE,
@@ -380,7 +394,11 @@ class FailoverManager:
     _FBPFX = "fb:"  # RocksDB key prefix for failback state entries
 
     def _persist_failback_state(self, partition_id: int) -> None:
-        """Write a single failback state to RocksDB."""
+        """Ghi bền vững trạng thái `persist failback state` xuống storage.
+        
+        Ghi chú gốc:
+        Write a single failback state to RocksDB.
+        """
         if self._rocks_store is None:
             return
         fb = self._failback_states.get(partition_id)
@@ -390,7 +408,11 @@ class FailoverManager:
             self._rocks_store.delete(f"{self._FBPFX}{partition_id}")
 
     def _persist_all_failback(self) -> None:
-        """Write all current failback states to RocksDB (bulk)."""
+        """Ghi bền vững trạng thái `persist all failback` xuống storage.
+        
+        Ghi chú gốc:
+        Write all current failback states to RocksDB (bulk).
+        """
         if self._rocks_store is None:
             return
         # Clear old persisted failback keys, then re-write current set
@@ -399,17 +421,24 @@ class FailoverManager:
             self._rocks_store.put(f"{self._FBPFX}{pid}", fb)
 
     def _delete_persisted_failback(self, partition_id: int) -> None:
-        """Remove a completed failback state from RocksDB."""
+        """Xóa dữ liệu `delete persisted failback` khỏi bộ nhớ hoặc storage.
+        
+        Ghi chú gốc:
+        Remove a completed failback state from RocksDB.
+        """
         if self._rocks_store is None:
             return
         self._rocks_store.delete(f"{self._FBPFX}{partition_id}")
 
     def persist_failback_state(self) -> int:
-        """Persist all in-progress failback states to RocksDB.
-
-        Returns the number of partitions persisted.
-        Called before a coordinator handoff or on a regular interval
-        to enable coordinator-change resilience.
+        """Ghi bền vững trạng thái `persist failback state` xuống storage.
+        
+        Ghi chú gốc:
+        Persist all in-progress failback states to RocksDB.
+        
+                Returns the number of partitions persisted.
+                Called before a coordinator handoff or on a regular interval
+                to enable coordinator-change resilience.
         """
         with self._lock:
             if self._rocks_store is None:
@@ -418,10 +447,13 @@ class FailoverManager:
             return len(self._failback_states)
 
     def restore_failback_state(self) -> int:
-        """Restore in-progress failback states from RocksDB into memory.
-
-        Returns the number of partitions restored.
-        Called on coordinator startup or after a leadership change.
+        """Khôi phục trạng thái `restore failback state` từ checkpoint hoặc storage.
+        
+        Ghi chú gốc:
+        Restore in-progress failback states from RocksDB into memory.
+        
+                Returns the number of partitions restored.
+                Called on coordinator startup or after a leadership change.
         """
         if self._rocks_store is None:
             return 0
@@ -444,11 +476,14 @@ class FailoverManager:
             return count
 
     def resume_failback(self) -> list[dict]:
-        """Scan persisted states and resume any in-progress failbacks.
-
-        Returns a list of partitions that need to continue failback.
-        A new coordinator leader calls this after election to pick up
-        where the previous leader left off.
+        """Hàm `resume_failback` thực hiện phần xử lý liên quan đến resume failback của `FailoverManager`.
+        
+        Ghi chú gốc:
+        Scan persisted states and resume any in-progress failbacks.
+        
+                Returns a list of partitions that need to continue failback.
+                A new coordinator leader calls this after election to pick up
+                where the previous leader left off.
         """
         restored = self.restore_failback_state()
         pending: list[dict] = []
@@ -474,7 +509,11 @@ class FailoverManager:
             return pending
 
     def failback_summary(self) -> dict:
-        """Return current failback progress across all partitions."""
+        """Tạo bản tóm tắt trạng thái `failback summary` để trả về API hoặc báo cáo.
+        
+        Ghi chú gốc:
+        Return current failback progress across all partitions.
+        """
         with self._lock:
             by_step: dict[str, list[int]] = {}
             for pid, fb in self._failback_states.items():
@@ -498,18 +537,23 @@ class FailoverManager:
             }
 
     def get_partition_state(self, partition_id: int) -> PartitionState:
+        """Trả về thông tin `partition state` từ trạng thái hiện tại."""
         with self._lock:
             return self._partition_state.get(partition_id, PartitionState.ASSIGNED)
 
     def get_partition_owner(self, partition_id: int) -> str | None:
+        """Trả về thông tin `partition owner` từ trạng thái hiện tại."""
         with self._lock:
             return self._partition_owner.get(partition_id)
 
     def get_partition_types(self) -> dict[int, str]:
-        """Return {pid: 'recovery'|'normal'} based on current owner vs original.
-
-        Partitions owned by a different worker than their original owner are
-        in 'recovery' mode and should use aggressive eviction.
+        """Trả về thông tin `partition types` từ trạng thái hiện tại.
+        
+        Ghi chú gốc:
+        Return {pid: 'recovery'|'normal'} based on current owner vs original.
+        
+                Partitions owned by a different worker than their original owner are
+                in 'recovery' mode and should use aggressive eviction.
         """
         with self._lock:
             return {
@@ -519,15 +563,22 @@ class FailoverManager:
             }
 
     def get_recovery_offset(self, partition_id: int) -> int:
-        """Return the last known Kafka offset for *partition_id*."""
+        """Trả về thông tin `recovery offset` từ trạng thái hiện tại.
+        
+        Ghi chú gốc:
+        Return the last known Kafka offset for *partition_id*.
+        """
         with self._lock:
             return self._partition_offsets.get(partition_id, 0)
 
     def get_partition_recovery_info(self, partition_id: int) -> dict:
-        """Return recovery metadata for a survivor taking over *partition_id*.
-
-        Returns dict with ``original_worker``, ``last_offset``, and a simulated
-        ``checkpoint_path`` so the receiving worker knows what offset to seek to.
+        """Trả về thông tin `partition recovery info` từ trạng thái hiện tại.
+        
+        Ghi chú gốc:
+        Return recovery metadata for a survivor taking over *partition_id*.
+        
+                Returns dict with ``original_worker``, ``last_offset``, and a simulated
+                ``checkpoint_path`` so the receiving worker knows what offset to seek to.
         """
         with self._lock:
             orig = self._original_owner.get(partition_id, "unknown")
@@ -541,16 +592,20 @@ class FailoverManager:
             }
 
     def alive_workers(self) -> list[str]:
+        """Hàm `alive_workers` thực hiện phần xử lý liên quan đến alive workers của `FailoverManager`."""
         with self._lock:
             return [wid for wid, wr in self._workers.items()
                     if wr.status in (WorkerStatus.ACTIVE, WorkerStatus.STALE)]
 
     def adjust_timeout(self) -> None:
-        """Adaptive failover: reduce heartbeat timeout during cascading failures.
-
-        When >1 worker has failed, reduce timeout by 30% (min 3s) to detect
-        and respond to cascading failures faster. When all workers have been
-        healthy for > 60s, restore the original configured timeout.
+        """Hàm `adjust_timeout` thực hiện phần xử lý liên quan đến adjust timeout của `FailoverManager`.
+        
+        Ghi chú gốc:
+        Adaptive failover: reduce heartbeat timeout during cascading failures.
+        
+                When >1 worker has failed, reduce timeout by 30% (min 3s) to detect
+                and respond to cascading failures faster. When all workers have been
+                healthy for > 60s, restore the original configured timeout.
         """
         now = time.time()
         with self._lock:
@@ -589,6 +644,7 @@ class FailoverManager:
 
     def _log_event(self, event: FailoverEvent, worker_id: str,
                    partition_ids: list[int], details: str = ""):
+        """Hàm `_log_event` thực hiện phần xử lý liên quan đến log event của `FailoverManager`."""
         record = FailoverEventRecord(event=event, worker_id=worker_id,
                                      partition_ids=partition_ids,
                                      timestamp=time.time(), details=details)
@@ -601,12 +657,14 @@ class FailoverManager:
         print(msg, file=sys.stderr, flush=True)
 
     def recent_events(self, count: int = 20) -> list[dict]:
+        """Hàm `recent_events` thực hiện phần xử lý liên quan đến recent events của `FailoverManager`."""
         with self._lock:
             return [{"event": e.event.value, "worker": e.worker_id,
                      "partitions": e.partition_ids, "time": e.timestamp,
                      "details": e.details} for e in self._event_log[-count:]]
 
     def summary(self) -> dict:
+        """Tạo bản tóm tắt trạng thái `summary` để trả về API hoặc báo cáo."""
         with self._lock:
             alive = [wid for wid, wr in self._workers.items()
                      if wr.status in (WorkerStatus.ACTIVE, WorkerStatus.STALE)]

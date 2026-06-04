@@ -1,4 +1,8 @@
-"""Strict Coordinator - computes W_global from worker heartbeats."""
+"""
+Coordinator của Strict Watermark.
+
+Nhận heartbeat từ worker/ingestor, theo dõi local watermark theo partition và tính `W_global = min(LW_i)` trong khi xử lý partition idle, backpressure và trạng thái worker.
+"""
 
 import json
 import math
@@ -19,6 +23,7 @@ _PFX_META = "meta:"
 
 @dataclass
 class PartitionInfo:
+    """Lớp `PartitionInfo` gom dữ liệu và hành vi liên quan đến PartitionInfo."""
     partition_id: int
     worker_id: str
     local_watermark: float
@@ -30,12 +35,14 @@ class PartitionInfo:
 
 class StrictCoordinator:
 
+    """Lớp `StrictCoordinator` quản lý trạng thái coordinator và watermark toàn cục."""
     def __init__(
         self,
         delta_base_s: float = 10.0,
         state_path: str = "/tmp/coordinator-state.json",
         db_path: Optional[str] = None,
     ):
+        """Khởi tạo đối tượng của `StrictCoordinator` và thiết lập trạng thái ban đầu."""
         self.delta_base = delta_base_s
         self.state_path = state_path
         self.partitions: dict[int, PartitionInfo] = {}
@@ -68,6 +75,7 @@ class StrictCoordinator:
     # ------------------------------------------------------------------
 
     def _persist_partition(self, part_id: int) -> None:
+        """Ghi bền vững trạng thái `persist partition` xuống storage."""
         if self._store is None:
             return
         p = self.partitions.get(part_id)
@@ -75,12 +83,17 @@ class StrictCoordinator:
             self._store.put(f"{_PFX_PART}{part_id}", p)
 
     def _delete_partition(self, part_id: int) -> None:
+        """Xóa dữ liệu `delete partition` khỏi bộ nhớ hoặc storage."""
         if self._store is None:
             return
         self._store.delete(f"{_PFX_PART}{part_id}")
 
     def _load_from_store(self) -> None:
-        """Populate in-memory partitions and metadata from RocksDB."""
+        """Nạp dữ liệu/trạng thái `load from store` từ lưu trữ hoặc cấu hình.
+        
+        Ghi chú gốc:
+        Populate in-memory partitions and metadata from RocksDB.
+        """
         if self._store is None:
             return
         for key, val in self._store.items(prefix=_PFX_PART):
@@ -98,16 +111,25 @@ class StrictCoordinator:
             self.W_global_prev = float("-inf")
 
     def set_failover_manager(self, fm: object) -> None:
-        """Inject a FailoverManager so broadcast() can include partition_types
-        and recovery_info for workers."""
+        """Cập nhật giá trị `failover manager` vào trạng thái hiện tại.
+        
+        Ghi chú gốc:
+        Inject a FailoverManager so broadcast() can include partition_types
+                and recovery_info for workers.
+        """
         self._failover_manager = fm
 
     def set_ingestor_health(self, health_monitor: object) -> None:
-        """Inject an IngestorHealthMonitor so broadcast() can include
-        W_meta_global and ingestor health state for Raft replication."""
+        """Cập nhật giá trị `ingestor health` vào trạng thái hiện tại.
+        
+        Ghi chú gốc:
+        Inject an IngestorHealthMonitor so broadcast() can include
+                W_meta_global and ingestor health state for Raft replication.
+        """
         self._ingestor_health = health_monitor
 
     def receive_heartbeat(self, hb: WorkerHeartbeat) -> None:
+        """Nhận dữ liệu hoặc thông điệp `receive heartbeat` từ thành phần nguồn."""
         with self._lock:
             now = time.time()
 
@@ -149,6 +171,7 @@ class StrictCoordinator:
             self._compute_global()
 
     def _update_statuses(self) -> None:
+        """Cập nhật trạng thái/metric `update statuses` dựa trên dữ liệu mới."""
         now = time.time()
         for p in self.partitions.values():
             age = now - p.last_update
@@ -165,6 +188,7 @@ class StrictCoordinator:
         # §4.4.1: Strict includes IDLE partitions in min() — do NOT use Idleness Bypass
         # Only FAILED partitions are excluded.
         # But we implement Active Idle Classification to temporarily exclude TEMPORARY_IDLE partitions:
+        """Tính toán kết quả `compute global` từ dữ liệu hiện có."""
         _ACTIVE_STATUSES = (WorkerStatus.ACTIVE, WorkerStatus.STALE, WorkerStatus.IDLE)
 
         active = [
@@ -246,6 +270,7 @@ class StrictCoordinator:
             self._combined_diagnosis = "Cum cham + co Node yeu hon"
 
     def broadcast(self) -> dict:
+        """Hàm `broadcast` thực hiện phần xử lý liên quan đến broadcast của `StrictCoordinator`."""
         with self._lock:
             result = {
                 "W_global": self.W_global,
@@ -280,6 +305,7 @@ class StrictCoordinator:
             return result
 
     def save_state(self) -> None:
+        """Lưu dữ liệu/trạng thái `state` để dùng lại sau."""
         with self._lock:
             state = {
                 "term": self.term,
@@ -301,18 +327,21 @@ class StrictCoordinator:
             os.replace(tmp, self.state_path)
 
     def checkpoint(self) -> None:
+        """Hàm `checkpoint` thực hiện phần xử lý liên quan đến checkpoint của `StrictCoordinator`."""
         with self._lock:
             self.save_state()
             if self._store is not None:
                 self._store.flush()
 
     def flush(self) -> None:
+        """Flush dữ liệu đệm của `flush` xuống đích lưu trữ hoặc downstream."""
         with self._lock:
             self.save_state()
             if self._store is not None:
                 self._store.flush()
 
     def close(self) -> None:
+        """Đóng tài nguyên `close` và giải phóng trạng thái liên quan."""
         with self._lock:
             self.save_state()
             if self._store is not None:
@@ -331,6 +360,7 @@ class StrictCoordinator:
                 self._store.flush()
 
     def load_state(self) -> bool:
+        """Nạp dữ liệu/trạng thái `load state` từ lưu trữ hoặc cấu hình."""
         with self._lock:
             # If RocksDB is available, state was already restored in constructor
             if self._store is not None:

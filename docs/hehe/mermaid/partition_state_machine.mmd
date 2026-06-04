@@ -1,0 +1,9 @@
+%% Máy trạng thái sở hữu phân vùng (partition) (single-owner)
+stateDiagram-v2
+    [*] --> ASSIGNED
+    ASSIGNED --> REASSIGNING: yêu cầu chuyển giao / nút (node) sập
+    REASSIGNING --> ASSIGNED: chuyển giao (transfer) hoàn tất
+    ASSIGNED --> PAUSED: áp lực ngược (backpressure)
+    PAUSED --> ASSIGNED: tiếp tục (resume)
+    REASSIGNING --> ORPHANED: nguồn (source) bị mất trước khi đích (target) sẵn sàng
+    ORPHANED --> REASSIGNING: Coordinator chọn chủ sở hữu (owner) mới

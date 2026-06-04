@@ -1,10 +1,7 @@
 """
-Docker Compose Chaos Test Runner for Strict Watermark Mode.
-Verifies:
-1. System startup and healthy state.
-2. Worker node failure detection and partition reassignment (Kill Node).
-3. Worker node recovery and 5-step failback protocol (Recover Node).
-4. Correctness of global watermark advancement after recovery.
+Runner chaos test trên môi trường Docker Compose cho Strict Watermark.
+
+Script điều khiển compose, chờ service healthy, lấy state/log và mô phỏng lỗi container để kiểm tra failover/failback thực tế.
 """
 
 import subprocess
@@ -19,6 +16,7 @@ COMPOSE_FILE = os.path.join(DEPLOY_DIR, "docker-compose.yml")
 
 
 def run_cmd(cmd, env=None, cwd=DEPLOY_DIR, check=True, timeout=600):
+    """Chạy luồng xử lý `run cmd` theo cấu hình hiện tại."""
     print(f"Running: {' '.join(cmd)}")
     res = subprocess.run(cmd, capture_output=True, text=True, encoding="utf-8",
                          errors="replace", env=env, cwd=cwd, timeout=timeout)
@@ -31,6 +29,7 @@ def run_cmd(cmd, env=None, cwd=DEPLOY_DIR, check=True, timeout=600):
 
 
 def cleanup():
+    """Hàm `cleanup` thực hiện phần xử lý liên quan đến cleanup."""
     print("\n=== Cleaning up containers ===")
     cmd = ["docker", "compose", "-f", COMPOSE_FILE,
            "--profile", "strict", "down", "-v", "--remove-orphans"]
@@ -38,6 +37,7 @@ def cleanup():
 
 
 def wait_for_healthy(services_with_ports, timeout=120):
+    """Chờ điều kiện `wait for healthy` hoàn tất trước khi tiếp tục."""
     print(f"=== Waiting for health of {list(services_with_ports.keys())} ===")
     start = time.time()
     pending = list(services_with_ports.items())
@@ -63,6 +63,7 @@ def wait_for_healthy(services_with_ports, timeout=120):
 
 
 def get_state(port):
+    """Trả về thông tin `state` từ trạng thái hiện tại."""
     try:
         r = requests.get(f"http://127.0.0.1:{port}/state", timeout=3)
         if r.status_code == 200:
@@ -74,6 +75,7 @@ def get_state(port):
 
 def get_leader_state():
     # Try all coordinators to find the leader
+    """Trả về thông tin `leader state` từ trạng thái hiện tại."""
     for name, port in [("coordinator-1", 9000), ("coordinator-2", 9003), ("coordinator-3", 9004)]:
         state = get_state(port)
         if state and state.get("raft_role") == "leader":
@@ -83,6 +85,7 @@ def get_leader_state():
 
 
 def get_partition_owner_from_state(state, pid):
+    """Trả về thông tin `partition owner from state` từ trạng thái hiện tại."""
     if not state or "failover" not in state:
         return None
     workers = state["failover"].get("workers", {})
@@ -93,6 +96,7 @@ def get_partition_owner_from_state(state, pid):
 
 
 def get_ingestor_logs(tail=30):
+    """Trả về thông tin `ingestor logs` từ trạng thái hiện tại."""
     res = run_cmd(["docker", "compose", "-f", COMPOSE_FILE,
                    "logs", "--tail", str(tail), "--no-color", "ingestor"],
                   check=False, timeout=15)
@@ -100,6 +104,7 @@ def get_ingestor_logs(tail=30):
 
 
 def run_chaos_test():
+    """Chạy luồng xử lý `run chaos test` theo cấu hình hiện tại."""
     print("\n" + "=" * 60)
     print("STARTING DOCKER COMPOSE CHAOS TEST")
     print("=" * 60)

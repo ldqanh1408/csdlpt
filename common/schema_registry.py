@@ -1,4 +1,8 @@
-"""Schema Registry and client integration for Schema Evolution."""
+"""
+Schema Registry đơn giản cho tiến hóa schema sự kiện log.
+
+Định nghĩa schema JSON V1/V2, validate event, kiểm tra tương thích lùi và cung cấp client HTTP để đăng ký hoặc lấy schema runtime.
+"""
 
 import json
 import logging
@@ -77,7 +81,11 @@ WINDOW_RESULT_V2_SCHEMA = {
 # ---------------------------------------------------------------------------
 
 def validate_json_schema(data: dict, schema: dict) -> bool:
-    """Validate JSON data against a basic schema structure without external deps."""
+    """Kiểm tra tính hợp lệ của `validate json schema` trước khi xử lý tiếp.
+    
+    Ghi chú gốc:
+    Validate JSON data against a basic schema structure without external deps.
+    """
     if not isinstance(data, dict):
         return False
     
@@ -114,14 +122,17 @@ def validate_json_schema(data: dict, schema: dict) -> bool:
 # ---------------------------------------------------------------------------
 
 def check_backward_compatibility(old_schema: dict, new_schema: dict) -> bool:
-    """Check if new_schema is backward compatible with old_schema.
+    """Kiểm tra điều kiện `check backward compatibility` và trả về kết quả đánh giá.
     
-    Backward compatibility: Consumers with old_schema can read data produced by new_schema.
-    Rules:
-    - New schema must NOT remove fields that are required in the old schema.
-    - New schema must NOT change the type of existing fields.
-    - Any new required fields in the new schema must have default values (not supported here,
-      so any new required field makes it incompatible).
+    Ghi chú gốc:
+    Check if new_schema is backward compatible with old_schema.
+        
+        Backward compatibility: Consumers with old_schema can read data produced by new_schema.
+        Rules:
+        - New schema must NOT remove fields that are required in the old schema.
+        - New schema must NOT change the type of existing fields.
+        - Any new required fields in the new schema must have default values (not supported here,
+          so any new required field makes it incompatible).
     """
     old_props = old_schema.get("properties", {})
     new_props = new_schema.get("properties", {})
@@ -157,10 +168,15 @@ def check_backward_compatibility(old_schema: dict, new_schema: dict) -> bool:
 # ---------------------------------------------------------------------------
 
 class SchemaRegistry:
-    """In-memory Schema Registry for tracking and validating schemas."""
+    """Lớp `SchemaRegistry` gom dữ liệu và hành vi liên quan đến SchemaRegistry.
+    
+    Ghi chú gốc:
+    In-memory Schema Registry for tracking and validating schemas.
+    """
 
     def __init__(self):
         # subject -> list of schemas (index = version - 1)
+        """Khởi tạo đối tượng của `SchemaRegistry` và thiết lập trạng thái ban đầu."""
         self.schemas: dict[str, list[dict]] = {}
         # global id -> (subject, version)
         self.global_ids: dict[int, tuple[str, int]] = {}
@@ -171,7 +187,11 @@ class SchemaRegistry:
         # Register v2 as a separate step or forced bypass if needed
 
     def register(self, subject: str, schema: dict) -> int:
-        """Register a schema under a subject. Increments version."""
+        """Hàm `register` thực hiện phần xử lý liên quan đến register của `SchemaRegistry`.
+        
+        Ghi chú gốc:
+        Register a schema under a subject. Increments version.
+        """
         if subject not in self.schemas:
             self.schemas[subject] = []
             
@@ -196,16 +216,19 @@ class SchemaRegistry:
         return version
 
     def get_latest(self, subject: str) -> dict | None:
+        """Trả về thông tin `latest` từ trạng thái hiện tại."""
         versions = self.schemas.get(subject, [])
         return versions[-1] if versions else None
 
     def get_version(self, subject: str, version: int) -> dict | None:
+        """Trả về thông tin `version` từ trạng thái hiện tại."""
         versions = self.schemas.get(subject, [])
         if 1 <= version <= len(versions):
             return versions[version - 1]
         return None
 
     def get_by_id(self, schema_id: int) -> dict | None:
+        """Trả về thông tin `by id` từ trạng thái hiện tại."""
         ref = self.global_ids.get(schema_id)
         if ref:
             return self.get_version(ref[0], ref[1])
@@ -221,15 +244,24 @@ _global_registry = SchemaRegistry()
 # ---------------------------------------------------------------------------
 
 class SchemaRegistryClient:
-    """Client for communicating with the Schema Registry HTTP endpoints."""
+    """Lớp `SchemaRegistryClient` bọc giao tiếp client tới service bên ngoài.
+    
+    Ghi chú gốc:
+    Client for communicating with the Schema Registry HTTP endpoints.
+    """
 
     def __init__(self, registry_url: str = None):
+        """Khởi tạo đối tượng của `SchemaRegistryClient` và thiết lập trạng thái ban đầu."""
         self.registry_url = registry_url.rstrip("/") if registry_url else None
         # Cache to reduce network roundtrips
         self._cache: dict[str, dict[int, dict]] = {}
 
     def register_schema(self, subject: str, schema: dict) -> int:
-        """Register schema and return its version integer."""
+        """Đăng ký `schema` vào registry hoặc trạng thái quản lý.
+        
+        Ghi chú gốc:
+        Register schema and return its version integer.
+        """
         if not self.registry_url:
             # Fallback to local in-memory registry
             return _global_registry.register(subject, schema)
@@ -249,7 +281,11 @@ class SchemaRegistryClient:
             return _global_registry.register(subject, schema)
 
     def get_schema(self, subject: str, version: int) -> dict | None:
-        """Fetch a specific schema version."""
+        """Trả về thông tin `schema` từ trạng thái hiện tại.
+        
+        Ghi chú gốc:
+        Fetch a specific schema version.
+        """
         if not self.registry_url:
             return _global_registry.get_version(subject, version)
 
@@ -272,7 +308,11 @@ class SchemaRegistryClient:
             return _global_registry.get_version(subject, version)
 
     def check_compatibility(self, subject: str, version: int, schema: dict) -> bool:
-        """Check compatibility of schema against specified version."""
+        """Kiểm tra điều kiện `check compatibility` và trả về kết quả đánh giá.
+        
+        Ghi chú gốc:
+        Check compatibility of schema against specified version.
+        """
         if not self.registry_url:
             old = _global_registry.get_version(subject, version)
             if not old:

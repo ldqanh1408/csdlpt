@@ -1,0 +1,2 @@
+mode,punctuation,sweep_var,sweep_value,wait_time_ms,wait_time_s,l_eff_ms,completeness_final_pct,completeness_avg_pct,late_rate_pct,total_received,on_time,late_dropped,proc_lat_p99_us,run_seconds,samples
+heuristic,max-event-time,HEURISTIC_P_NORMAL,0.75,56788.6,56.789,56788.6,91.019,91.019,8.981,200000,182038,17962,33803.8,454,2

@@ -1,9 +1,7 @@
-"""Ingestor Health Monitor — per Strict Watermark spec Section 10.
+"""
+Theo dõi sức khỏe ingestor trong nhánh Strict Watermark.
 
-Two-tier heartbeat: Ingestor → Coordinator every 5s with T_commit and clock info.
-Alert conditions: SILENT (>15s no heartbeat), STUCK (punctuation stuck >5s),
-CLOCK_SKEW (non-monotonic T_commit).
-Computes W_meta_global = min(all ingestor T_commit).
+Nhận heartbeat ingestor, lưu T_commit/offset/clock, phát hiện ingestor silent và cung cấp trạng thái để coordinator không bị kẹt bởi nguồn dữ liệu im lặng.
 """
 
 import time
@@ -12,6 +10,7 @@ from enum import Enum
 
 
 class IngestorStatus(Enum):
+    """Lớp `IngestorStatus` gom dữ liệu và hành vi liên quan đến IngestorStatus."""
     ACTIVE = "active"
     SILENT = "silent"
     STUCK = "stuck"
@@ -29,6 +28,7 @@ CLOCK_SKEW_WARNING_MS = 2000.0
 
 @dataclass
 class HealthRecord:
+    """Lớp `HealthRecord` gom dữ liệu và hành vi liên quan đến HealthRecord."""
     ingestor_id: str
     last_heartbeat: float = 0.0
     last_T_commit: float = 0.0
@@ -41,7 +41,11 @@ class HealthRecord:
     internal_queue_depth: int = 0
 
     def diagnose_clock_skew(self) -> IngestorStatus:
-        """4-tier clock skew diagnosis per Spec §10.2."""
+        """Hàm `diagnose_clock_skew` thực hiện phần xử lý liên quan đến diagnose clock skew của `HealthRecord`.
+        
+        Ghi chú gốc:
+        4-tier clock skew diagnosis per Spec §10.2.
+        """
         ms = self.clock_skew_ms
         if ms < CLOCK_SKEW_OK_MS:
             return IngestorStatus.CLOCK_SKEW_OK
@@ -54,7 +58,11 @@ class HealthRecord:
 
 
 class IngestorHealthMonitor:
-    """Tracks health of all ingestors, computes W_meta_global, raises alerts."""
+    """Lớp `IngestorHealthMonitor` gom dữ liệu và hành vi liên quan đến IngestorHealthMonitor.
+    
+    Ghi chú gốc:
+    Tracks health of all ingestors, computes W_meta_global, raises alerts.
+    """
 
     def __init__(
         self,
@@ -63,6 +71,7 @@ class IngestorHealthMonitor:
         clock_skew_critical_ms: float = 2000.0,
         w_meta_deviation_s: float = 10.0,
     ):
+        """Khởi tạo đối tượng của `IngestorHealthMonitor` và thiết lập trạng thái ban đầu."""
         self.silent_timeout_s = silent_timeout_s
         self.stuck_timeout_s = stuck_timeout_s
         self.clock_skew_critical_ms = clock_skew_critical_ms
@@ -81,6 +90,7 @@ class IngestorHealthMonitor:
         offsets: dict[int, int] = None,
         network_rtt_ms: float = 0.0,
     ) -> None:
+        """Nhận dữ liệu hoặc thông điệp `receive heartbeat` từ thành phần nguồn."""
         now = time.time()
         if ingestor_clock is None:
             ingestor_clock = now
@@ -109,6 +119,7 @@ class IngestorHealthMonitor:
             rec.clock_skew_ms = abs(ingestor_clock - now) * 1000.0
 
     def evaluate(self, W_global: float = 0.0) -> dict:
+        """Hàm `evaluate` thực hiện phần xử lý liên quan đến evaluate của `IngestorHealthMonitor`."""
         now = time.time()
         self.alerts.clear()
         commits = []
@@ -188,6 +199,7 @@ class IngestorHealthMonitor:
         }
 
     def summary(self) -> dict:
+        """Tạo bản tóm tắt trạng thái `summary` để trả về API hoặc báo cáo."""
         return {
             ingestor_id: {
                 "status": rec.status.value,

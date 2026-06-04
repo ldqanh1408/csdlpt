@@ -1,6 +1,6 @@
 {
   "version": "1.0.0",
-  "lastScanned": 1780402282633,
+  "lastScanned": 1780496202705,
   "projectRoot": "D:\\dev\\csdlpt",
   "techStack": {
     "languages": [
@@ -45,7 +45,7 @@
       "path": "common",
       "purpose": null,
       "fileCount": 17,
-      "lastAccessed": 1780402281515,
+      "lastAccessed": 1780496202677,
       "keyFiles": [
         "alerting.py",
         "config.py",
@@ -57,30 +57,21 @@
     "dataset": {
       "path": "dataset",
       "purpose": null,
-      "fileCount": 3,
-      "lastAccessed": 1780402281518,
+      "fileCount": 5,
+      "lastAccessed": 1780496202679,
       "keyFiles": [
         "nyc_taxi_events_full.csv",
+        "nyc_taxi_events_half.csv",
+        "nyc_taxi_events_sliced.csv",
         "yellow_tripdata_2024-01.csv",
         "yellow_tripdata_2024-01.parquet"
-      ]
-    },
-    "ddsketch": {
-      "path": "ddsketch",
-      "purpose": null,
-      "fileCount": 3,
-      "lastAccessed": 1780402281518,
-      "keyFiles": [
-        "compat.py",
-        "sketch.py",
-        "__init__.py"
       ]
     },
     "deploy": {
       "path": "deploy",
       "purpose": null,
       "fileCount": 8,
-      "lastAccessed": 1780402281519,
+      "lastAccessed": 1780496202679,
       "keyFiles": [
         "dashboard.py",
         "docker-compose.yml",
@@ -92,21 +83,21 @@
     "docs": {
       "path": "docs",
       "purpose": "Documentation",
-      "fileCount": 19,
-      "lastAccessed": 1780402281519,
+      "fileCount": 32,
+      "lastAccessed": 1780496202680,
       "keyFiles": [
         "Bao_Cao_Thiet_Ke_He_Thong_Watermark.tex",
-        "dataset_stats_yellow_2024-01.txt",
-        "heuristic_sweep_20260531_123703.csv",
-        "heuristic_sweep_20260531_130204.csv",
-        "heuristic_sweep_20260602_183227.csv"
+        "completeness_vs_wait_heuristic_20260603_210530.csv",
+        "completeness_vs_wait_heuristic_20260603_210530.md",
+        "completeness_vs_wait_strict_20260603_003718.csv",
+        "completeness_vs_wait_strict_20260603_003718.md"
       ]
     },
     "heuristic": {
       "path": "heuristic",
       "purpose": null,
       "fileCount": 8,
-      "lastAccessed": 1780402281520,
+      "lastAccessed": 1780496202681,
       "keyFiles": [
         "aggregator.py",
         "aggregator_ha.py",
@@ -119,26 +110,38 @@
       "path": "hybrid",
       "purpose": null,
       "fileCount": 0,
-      "lastAccessed": 1780402281520,
+      "lastAccessed": 1780496202681,
       "keyFiles": []
+    },
+    "local_ddsketch": {
+      "path": "local_ddsketch",
+      "purpose": null,
+      "fileCount": 3,
+      "lastAccessed": 1780496202681,
+      "keyFiles": [
+        "compat.py",
+        "sketch.py",
+        "__init__.py"
+      ]
     },
     "reports": {
       "path": "reports",
       "purpose": null,
-      "fileCount": 4,
-      "lastAccessed": 1780402281521,
+      "fileCount": 7,
+      "lastAccessed": 1780496202682,
       "keyFiles": [
         "analyze_dataset.py",
+        "HEURISTIC_RUN_GUIDE.md",
+        "high_res_timers_and_bottlenecks.md",
         "run_all.py",
-        "run_experiment.py",
-        "__init__.py"
+        "run_experiment.py"
       ]
     },
     "strict": {
       "path": "strict",
       "purpose": null,
       "fileCount": 11,
-      "lastAccessed": 1780402281521,
+      "lastAccessed": 1780496202682,
       "keyFiles": [
         "backpressure.py",
         "coordinator.py",
@@ -151,7 +154,7 @@
       "path": "tests",
       "purpose": "Test files",
       "fileCount": 15,
-      "lastAccessed": 1780402281521,
+      "lastAccessed": 1780496202683,
       "keyFiles": [
         "check_state.py",
         "test_backpressure.py",
@@ -164,7 +167,7 @@
       "path": "tools",
       "purpose": null,
       "fileCount": 4,
-      "lastAccessed": 1780402281522,
+      "lastAccessed": 1780496202683,
       "keyFiles": [
         "dataset_stats.py",
         "make_out_of_order.py",
@@ -176,7 +179,7 @@
       "path": "__pycache__",
       "purpose": null,
       "fileCount": 4,
-      "lastAccessed": 1780402281522,
+      "lastAccessed": 1780496202684,
       "keyFiles": [
         "run.cpython-310.pyc",
         "run.cpython-314.pyc",
@@ -188,33 +191,57 @@
   "hotPaths": [
     {
       "path": "docs\\hehe\\Distributed_Database_Project_Proposal.tex",
-      "accessCount": 45,
-      "lastAccessed": 1780439191584,
-      "type": "file"
-    },
-    {
-      "path": "docs\\hehe\\REPORT_OZSU_VALDURIEZ_DESIGN_JUSTIFICATION.tex",
-      "accessCount": 21,
-      "lastAccessed": 1780439178825,
-      "type": "file"
-    },
-    {
-      "path": "docs\\hehe\\Tom_Tat_Thiet_Ke_Watermark.tex",
-      "accessCount": 13,
-      "lastAccessed": 1780438486319,
-      "type": "file"
-    },
-    {
-      "path": "heuristic\\engine.py",
-      "accessCount": 9,
-      "lastAccessed": 1780437340464,
+      "accessCount": 64,
+      "lastAccessed": 1780506954951,
       "type": "file"
     },
     {
       "path": "run.py",
-      "accessCount": 7,
-      "lastAccessed": 1780437315623,
+      "accessCount": 31,
+      "lastAccessed": 1780532742786,
       "type": "file"
+    },
+    {
+      "path": "heuristic\\engine.py",
+      "accessCount": 29,
+      "lastAccessed": 1780532215634,
+      "type": "file"
+    },
+    {
+      "path": "docs\\hehe\\REPORT_OZSU_VALDURIEZ_DESIGN_JUSTIFICATION.tex",
+      "accessCount": 23,
+      "lastAccessed": 1780468204912,
+      "type": "file"
+    },
+    {
+      "path": "docs\\hehe\\Tom_Tat_Thiet_Ke_Watermark.tex",
+      "accessCount": 16,
+      "lastAccessed": 1780506543933,
+      "type": "file"
+    },
+    {
+      "path": "strict\\worker.py",
+      "accessCount": 10,
+      "lastAccessed": 1780532754319,
+      "type": "directory"
+    },
+    {
+      "path": "docs\\hehe\\REPORT_OZSU_VALDURIEZ_DESIGN_JUSTIFICATION.md",
+      "accessCount": 6,
+      "lastAccessed": 1780468966750,
+      "type": "file"
+    },
+    {
+      "path": "deploy\\docker-compose.yml",
+      "accessCount": 4,
+      "lastAccessed": 1780532458659,
+      "type": "file"
+    },
+    {
+      "path": "strict\\engine.py",
+      "accessCount": 4,
+      "lastAccessed": 1780532755759,
+      "type": "directory"
     },
     {
       "path": "reports\\run_heuristic_sweep.py",
@@ -223,21 +250,75 @@
       "type": "file"
     },
     {
+      "path": "strict\\coordinator.py",
+      "accessCount": 3,
+      "lastAccessed": 1780466407877,
+      "type": "directory"
+    },
+    {
       "path": "reports\\results\\task-313.log",
       "accessCount": 2,
       "lastAccessed": 1780436879157,
       "type": "file"
     },
     {
-      "path": "deploy\\docker-compose.yml",
+      "path": "heuristic\\aggregator.py",
       "accessCount": 2,
-      "lastAccessed": 1780437192082,
+      "lastAccessed": 1780462600798,
       "type": "file"
     },
     {
       "path": "common\\rocks_store.py",
-      "accessCount": 1,
-      "lastAccessed": 1780435474993,
+      "accessCount": 2,
+      "lastAccessed": 1780464414713,
+      "type": "file"
+    },
+    {
+      "path": "docs\\hehe\\Phan_Bien_Kien_Truc_Domain.md",
+      "accessCount": 2,
+      "lastAccessed": 1780469539803,
+      "type": "file"
+    },
+    {
+      "path": "docs\\hehe",
+      "accessCount": 2,
+      "lastAccessed": 1780483662297,
+      "type": "directory"
+    },
+    {
+      "path": "reports\\run_experiment.py",
+      "accessCount": 2,
+      "lastAccessed": 1780499228574,
+      "type": "file"
+    },
+    {
+      "path": "local_ddsketch\\sketch.py",
+      "accessCount": 2,
+      "lastAccessed": 1780499249686,
+      "type": "file"
+    },
+    {
+      "path": "heuristic\\cold_start.py",
+      "accessCount": 2,
+      "lastAccessed": 1780499339622,
+      "type": "file"
+    },
+    {
+      "path": "strict",
+      "accessCount": 2,
+      "lastAccessed": 1780501129824,
+      "type": "directory"
+    },
+    {
+      "path": "strict\\raft_coordinator.py",
+      "accessCount": 2,
+      "lastAccessed": 1780501142604,
+      "type": "file"
+    },
+    {
+      "path": "tests\\test_heuristic.py",
+      "accessCount": 2,
+      "lastAccessed": 1780502848794,
       "type": "file"
     },
     {
@@ -253,39 +334,9 @@
       "type": "file"
     },
     {
-      "path": "reports\\run_experiment.py",
-      "accessCount": 1,
-      "lastAccessed": 1780435923344,
-      "type": "file"
-    },
-    {
-      "path": "heuristic\\cold_start.py",
-      "accessCount": 1,
-      "lastAccessed": 1780435936910,
-      "type": "file"
-    },
-    {
       "path": "C:\\Users\\CYBORG\\.gemini\\antigravity-cli\\brain\\1cd8d09e-ebc3-4fa7-a4c6-c5c812b61b0b\\.system_generated\\tasks\\task-652.log",
       "accessCount": 1,
       "lastAccessed": 1780436289919,
-      "type": "file"
-    },
-    {
-      "path": "heuristic\\aggregator.py",
-      "accessCount": 1,
-      "lastAccessed": 1780437020099,
-      "type": "file"
-    },
-    {
-      "path": "tests\\test_heuristic.py",
-      "accessCount": 1,
-      "lastAccessed": 1780437214699,
-      "type": "file"
-    },
-    {
-      "path": "docs\\hehe\\REPORT_OZSU_VALDURIEZ_DESIGN_JUSTIFICATION.md",
-      "accessCount": 1,
-      "lastAccessed": 1780437381297,
       "type": "file"
     },
     {
@@ -295,10 +346,148 @@
       "type": "file"
     },
     {
-      "path": "docs\\hehe",
+      "path": "docs\\Thiet_Ke_Heuristic_Watermark.md",
       "accessCount": 1,
-      "lastAccessed": 1780438635251,
+      "lastAccessed": 1780462359580,
+      "type": "file"
+    },
+    {
+      "path": "docs\\Thiet_Ke_Strict_Watermark.md",
+      "accessCount": 1,
+      "lastAccessed": 1780462359885,
+      "type": "file"
+    },
+    {
+      "path": "common\\csdlpt.proto",
+      "accessCount": 1,
+      "lastAccessed": 1780463778023,
+      "type": "file"
+    },
+    {
+      "path": "",
+      "accessCount": 1,
+      "lastAccessed": 1780463799332,
       "type": "directory"
+    },
+    {
+      "path": "common\\tiered_storage.py",
+      "accessCount": 1,
+      "lastAccessed": 1780464403762,
+      "type": "file"
+    },
+    {
+      "path": "strict\\disaster_recovery.py",
+      "accessCount": 1,
+      "lastAccessed": 1780464405513,
+      "type": "directory"
+    },
+    {
+      "path": "strict\\replay_checkpoint.py",
+      "accessCount": 1,
+      "lastAccessed": 1780464424646,
+      "type": "directory"
+    },
+    {
+      "path": "common\\differentiated_eviction.py",
+      "accessCount": 1,
+      "lastAccessed": 1780464433314,
+      "type": "file"
+    },
+    {
+      "path": "common\\schema_registry.py",
+      "accessCount": 1,
+      "lastAccessed": 1780466057957,
+      "type": "file"
+    },
+    {
+      "path": "local_ddsketch\\__init__.py",
+      "accessCount": 1,
+      "lastAccessed": 1780468905709,
+      "type": "file"
+    },
+    {
+      "path": "local_ddsketch\\compat.py",
+      "accessCount": 1,
+      "lastAccessed": 1780468906429,
+      "type": "file"
+    },
+    {
+      "path": "docs\\hehe\\mermaid\\domain_overview.mmd",
+      "accessCount": 1,
+      "lastAccessed": 1780469439078,
+      "type": "file"
+    },
+    {
+      "path": "docs\\hehe\\mermaid\\domain1_data_ingestion.mmd",
+      "accessCount": 1,
+      "lastAccessed": 1780469443809,
+      "type": "file"
+    },
+    {
+      "path": "docs\\hehe\\mermaid\\domain2_strict_coordination.mmd",
+      "accessCount": 1,
+      "lastAccessed": 1780469447546,
+      "type": "file"
+    },
+    {
+      "path": "docs\\hehe\\mermaid\\domain3_heuristic_aggregation.mmd",
+      "accessCount": 1,
+      "lastAccessed": 1780469451757,
+      "type": "file"
+    },
+    {
+      "path": "docs\\hehe\\mermaid\\domain4_control_metadata.mmd",
+      "accessCount": 1,
+      "lastAccessed": 1780469455495,
+      "type": "file"
+    },
+    {
+      "path": "docs\\hehe\\mermaid\\domain5_state_storage.mmd",
+      "accessCount": 1,
+      "lastAccessed": 1780469459277,
+      "type": "file"
+    },
+    {
+      "path": "docs\\hehe\\mermaid\\strict_watermark_seq.mmd",
+      "accessCount": 1,
+      "lastAccessed": 1780470477287,
+      "type": "file"
+    },
+    {
+      "path": "docs\\hehe\\mermaid\\heuristic_watermark_seq.mmd",
+      "accessCount": 1,
+      "lastAccessed": 1780470483867,
+      "type": "file"
+    },
+    {
+      "path": "docs\\hehe\\mermaid\\node_partition_engine.mmd",
+      "accessCount": 1,
+      "lastAccessed": 1780470485372,
+      "type": "file"
+    },
+    {
+      "path": "docs\\hehe\\mermaid\\kafka_bounded_pq.mmd",
+      "accessCount": 1,
+      "lastAccessed": 1780470488729,
+      "type": "file"
+    },
+    {
+      "path": "docs\\hehe\\mermaid\\tiered_storage_cycles.mmd",
+      "accessCount": 1,
+      "lastAccessed": 1780470492446,
+      "type": "file"
+    },
+    {
+      "path": "docs\\hehe\\mermaid\\eviction_state_machine.mmd",
+      "accessCount": 1,
+      "lastAccessed": 1780470495349,
+      "type": "file"
+    },
+    {
+      "path": "docs\\hehe\\mermaid\\coordinator_vs_aggregator.mmd",
+      "accessCount": 1,
+      "lastAccessed": 1780470498174,
+      "type": "file"
     }
   ],
   "userDirectives": []

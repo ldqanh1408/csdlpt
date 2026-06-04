@@ -1,0 +1,15 @@
+%% Domain 4 - Control & Metadata Plane
+%% Render: mmdc -i domain4_control_metadata.mmd -o domain4.svg
+flowchart TB
+    ING["Ingestor"]
+    KHB["Kafka - luồng ingestor-heartbeats (stream)"]
+    CO["Coordinator / Aggregator"]
+    ZK["ZooKeeper"]
+    KAF["Cụm Kafka (cluster)"]
+    DASH["Bảng điều khiển (Dashboard) / Vận hành (Ops)"]
+
+    ING -->|"heartbeat 5 giây - {T_commit, clock, offsets}<br/>(gRPC dự phòng)"| KHB
+    KHB -->|"consume - đo RTT + clock skew"| CO
+    DASH -->|"HTTP /state /api/metrics /failover"| CO
+    ZK <-->|"cấu hình (config) + bầu chọn (election) + phát hiện (discovery)"| KAF
+    ZK <-->|"bầu chọn (election) + phát hiện (discovery)"| CO

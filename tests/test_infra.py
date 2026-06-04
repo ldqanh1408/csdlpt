@@ -1,4 +1,8 @@
-"""Unit tests for ZooKeeper lock and Real Kafka adapters."""
+"""
+Test hạ tầng ZooKeeper lock và Kafka adapter thật.
+
+Các test dùng mock để xác nhận leader election, Kafka producer/consumer wrapper và logic coordinator election qua ZooKeeper.
+"""
 
 import os
 import sys
@@ -10,8 +14,10 @@ from common.kafka_real import KafkaProducer, KafkaConsumer
 
 
 class TestZKLeaderElection(unittest.TestCase):
+    """Lớp `TestZKLeaderElection` gom các ca kiểm thử liên quan đến ZKLeaderElection."""
     @patch("common.zk_lock.KazooClient")
     def test_zk_lock_lifecycle(self, mock_kazoo):
+        """Kiểm thử hành vi `test zk lock lifecycle` trong phạm vi module hiện tại."""
         mock_client = MagicMock()
         mock_lock = MagicMock()
         mock_kazoo.return_value = mock_client
@@ -38,8 +44,10 @@ class TestZKLeaderElection(unittest.TestCase):
 
 
 class TestKafkaRealAdapters(unittest.TestCase):
+    """Lớp `TestKafkaRealAdapters` gom các ca kiểm thử liên quan đến KafkaRealAdapters."""
     @patch("common.kafka_real.PyKafkaProducer")
     def test_producer_send(self, mock_producer_cls):
+        """Kiểm thử hành vi `test producer send` trong phạm vi module hiện tại."""
         mock_producer = MagicMock()
         mock_producer_cls.return_value = mock_producer
         mock_meta = MagicMock()
@@ -64,6 +72,7 @@ class TestKafkaRealAdapters(unittest.TestCase):
     @patch("common.kafka_real.PyKafkaConsumer")
     @patch.dict(os.environ, {"PARTITIONS": "0,1,2"})
     def test_consumer_operations(self, mock_consumer_cls):
+        """Kiểm thử hành vi `test consumer operations` trong phạm vi module hiện tại."""
         mock_consumer = MagicMock()
         mock_consumer_cls.return_value = mock_consumer
 
@@ -106,9 +115,11 @@ class TestKafkaRealAdapters(unittest.TestCase):
 
 
 class TestZKCoordinatorElection(unittest.TestCase):
+    """Lớp `TestZKCoordinatorElection` gom các ca kiểm thử liên quan đến ZKCoordinatorElection."""
     @patch("kazoo.client.KazooClient")
     @patch.dict(os.environ, {"ZK_HOSTS": "localhost:2181"})
     def test_zk_coordinator_election_leader(self, mock_kazoo):
+        """Kiểm thử hành vi `test zk coordinator election leader` trong phạm vi module hiện tại."""
         mock_client = MagicMock()
         mock_lock = MagicMock()
         mock_kazoo.return_value = mock_client
@@ -138,6 +149,7 @@ class TestZKCoordinatorElection(unittest.TestCase):
     @patch("kazoo.client.KazooClient")
     @patch.dict(os.environ, {"ZK_HOSTS": "localhost:2181"})
     def test_zk_coordinator_election_follower(self, mock_kazoo):
+        """Kiểm thử hành vi `test zk coordinator election follower` trong phạm vi module hiện tại."""
         mock_client = MagicMock()
         mock_lock = MagicMock()
         mock_kazoo.return_value = mock_client

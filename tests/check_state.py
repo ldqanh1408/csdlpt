@@ -1,3 +1,9 @@
+"""
+Script nhỏ để kiểm tra nhanh endpoint `/state` của coordinator local.
+
+Dùng khi cụm đang chạy tại `127.0.0.1:9000` và cần xem JSON state hiện tại mà không mở dashboard.
+"""
+
 import requests
 import json
 import time

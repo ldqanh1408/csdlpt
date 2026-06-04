@@ -1,6 +1,7 @@
-"""MinIO-backed tiered storage with 4-state eviction protocol.
+"""
+Quản lý tiered storage dựa trên MinIO với giao thức eviction bốn trạng thái.
 
-Eviction state machine: CLOSED -> UPLOADING -> UPLOADED -> PURGED
+Cửa sổ đã đóng có thể được upload ra object storage, xác nhận, đánh dấu uploaded và khôi phục khi cần để giảm áp lực RocksDB/RAM.
 """
 
 import io
@@ -19,45 +20,58 @@ RETRY_BASE_DELAY = 1.0
 
 
 class EvictionManager:
-    """Tracks eviction state transitions per window with retry logic."""
+    """Lớp `EvictionManager` quản lý trạng thái và thao tác nghiệp vụ tương ứng.
+    
+    Ghi chú gốc:
+    Tracks eviction state transitions per window with retry logic.
+    """
 
     def __init__(self):
+        """Khởi tạo đối tượng của `EvictionManager` và thiết lập trạng thái ban đầu."""
         self._states: dict[str, EvictionState] = {}
         self._retry_counts: dict[str, int] = {}
         self._etags: dict[str, str] = {}  # ETag written on UPLOADING→UPLOADED (spec §8.4)
         self._lock = threading.Lock()
 
     def get_state(self, window_id: str) -> EvictionState | None:
+        """Trả về thông tin `state` từ trạng thái hiện tại."""
         with self._lock:
             return self._states.get(window_id)
 
     def set_state(self, window_id: str, state: EvictionState):
+        """Cập nhật giá trị `state` vào trạng thái hiện tại."""
         with self._lock:
             self._states[window_id] = state
 
     def set_etag(self, window_id: str, etag: str) -> None:
+        """Cập nhật giá trị `etag` vào trạng thái hiện tại."""
         with self._lock:
             self._etags[window_id] = etag
 
     def get_etag(self, window_id: str) -> str | None:
+        """Trả về thông tin `etag` từ trạng thái hiện tại."""
         with self._lock:
             return self._etags.get(window_id)
 
     def can_retry(self, window_id: str, max_retries: int = MAX_RETRIES) -> bool:
+        """Kiểm tra khả năng thực hiện `retry` trước khi chạy thao tác."""
         with self._lock:
             return self._retry_counts.get(window_id, 0) < max_retries
 
     def record_attempt(self, window_id: str) -> int:
+        """Hàm `record_attempt` thực hiện phần xử lý liên quan đến record attempt của `EvictionManager`."""
         with self._lock:
             count = self._retry_counts.get(window_id, 0) + 1
             self._retry_counts[window_id] = count
             return count
 
     def reset_retry(self, window_id: str):
+        """Hàm `reset_retry` thực hiện phần xử lý liên quan đến reset retry của `EvictionManager`."""
         with self._lock:
             self._retry_counts.pop(window_id, None)
 
     def summary(self) -> dict:
+        """Tạo bản tóm tắt trạng thái `summary` để trả về API hoặc báo cáo."""
         with self._lock:
             states_count = {}
             for s in self._states.values():
@@ -71,7 +85,11 @@ class EvictionManager:
 
 
 class TieredStorageManager:
-    """Manages window data across memory and MinIO object storage."""
+    """Lớp `TieredStorageManager` quản lý trạng thái và thao tác nghiệp vụ tương ứng.
+    
+    Ghi chú gốc:
+    Manages window data across memory and MinIO object storage.
+    """
 
     def __init__(
         self,
@@ -81,6 +99,7 @@ class TieredStorageManager:
         bucket_name: str,
         secure: bool = False,
     ):
+        """Khởi tạo đối tượng của `TieredStorageManager` và thiết lập trạng thái ban đầu."""
         self.endpoint = endpoint
         self.bucket = bucket_name
         self.eviction = EvictionManager()
@@ -117,6 +136,7 @@ class TieredStorageManager:
             self.client = None
 
     def _ensure_bucket(self):
+        """Đảm bảo điều kiện/tài nguyên `ensure bucket` đã sẵn sàng trước khi dùng."""
         if self.client is None:
             return
         try:
@@ -127,15 +147,19 @@ class TieredStorageManager:
             self.client = None
 
     def _object_key(self, window_id: str, partition_id: int) -> str:
+        """Hàm `_object_key` thực hiện phần xử lý liên quan đến object key của `TieredStorageManager`."""
         return f"strict-watermark/historical/{partition_id}/{window_id}.json"
 
     def upload_window(self, window_id: str, window_data: dict, partition_id: int = 0,
                       sync: bool = False) -> bool:
-        """Upload closed window to MinIO. Returns True if upload succeeded.
-
-        When sync=True, blocks until the upload completes and returns the actual
-        result. When sync=False (default), starts an async daemon thread and
-        returns True if the thread was started.
+        """Hàm `upload_window` thực hiện phần xử lý liên quan đến upload window của `TieredStorageManager`.
+        
+        Ghi chú gốc:
+        Upload closed window to MinIO. Returns True if upload succeeded.
+        
+                When sync=True, blocks until the upload completes and returns the actual
+                result. When sync=False (default), starts an async daemon thread and
+                returns True if the thread was started.
         """
         if self.client is None:
             self.eviction.set_state(window_id, EvictionState.UPLOADED)
@@ -155,7 +179,11 @@ class TieredStorageManager:
         return True
 
     def download_window(self, window_id: str, partition_id: int = 0) -> dict | None:
-        """Download window data from MinIO. Returns None if not found or on error."""
+        """Hàm `download_window` thực hiện phần xử lý liên quan đến download window của `TieredStorageManager`.
+        
+        Ghi chú gốc:
+        Download window data from MinIO. Returns None if not found or on error.
+        """
         if self.client is None:
             return None
         try:
@@ -172,7 +200,11 @@ class TieredStorageManager:
             return None
 
     def purge_window(self, window_id: str, partition_id: int = 0) -> bool:
-        """Delete window from MinIO. Returns True on success."""
+        """Loại bỏ dữ liệu `purge window` đã hết hạn hoặc không còn cần thiết.
+        
+        Ghi chú gốc:
+        Delete window from MinIO. Returns True on success.
+        """
         if self.client is None:
             self.eviction.set_state(window_id, EvictionState.PURGED)
             return True
@@ -185,7 +217,11 @@ class TieredStorageManager:
             return False
 
     def list_windows(self, partition_id: int, prefix: str = "") -> list[str]:
-        """List all window object keys for a partition."""
+        """Liệt kê các mục `windows` hiện có.
+        
+        Ghi chú gốc:
+        List all window object keys for a partition.
+        """
         if self.client is None:
             return []
         try:
@@ -199,7 +235,11 @@ class TieredStorageManager:
             return []
 
     def get_storage_stats(self) -> dict:
-        """Return storage usage statistics."""
+        """Trả về thông tin `storage stats` từ trạng thái hiện tại.
+        
+        Ghi chú gốc:
+        Return storage usage statistics.
+        """
         if self.client is None:
             return {"status": "disabled", "total_objects": 0, "total_size_bytes": 0}
         try:
@@ -221,6 +261,7 @@ class TieredStorageManager:
             return {"status": "error", "total_objects": 0, "total_size_bytes": 0}
 
     def _do_upload(self, window_id: str, window_data: dict, partition_id: int = 0) -> None:
+        """Hàm `_do_upload` thực hiện phần xử lý liên quan đến do upload của `TieredStorageManager`."""
         import gzip
         data = gzip.compress(json.dumps(window_data).encode())
         headers = {}

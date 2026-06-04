@@ -1,8 +1,7 @@
-"""Differentiated Tiered Eviction — per-partition-type eviction strategies.
+"""
+Điều phối chính sách eviction khác nhau theo loại partition.
 
-Spec §8.6: Normal partitions flush straight to Tier 3 (MinIO), purge Tier 1.
-Recovery partitions: aggressive flush to Tier 2 (local checkpoint file) first,
-then upload to Tier 3 (MinIO). Tier 2 file serves as fallback if Tier 3 fails.
+Module phân biệt hot/warm/cold partition để quyết định cửa sổ nào giữ trong RAM và cửa sổ nào đẩy xuống tầng lưu trữ ngoài khi chạy dataset lớn.
 """
 
 import json
@@ -17,28 +16,39 @@ logger = logging.getLogger("differentiated_eviction")
 
 
 class PartitionEvictionType(Enum):
+    """Lớp `PartitionEvictionType` định nghĩa các trạng thái/hằng số dùng trong luồng xử lý."""
     NORMAL = "normal"
     RECOVERY = "recovery"
 
 
 class DifferentiatedEvictionManager:
-    """Wraps TieredStorageManager with partition-type-aware eviction strategies."""
+    """Lớp `DifferentiatedEvictionManager` quản lý trạng thái và thao tác nghiệp vụ tương ứng.
+    
+    Ghi chú gốc:
+    Wraps TieredStorageManager with partition-type-aware eviction strategies.
+    """
 
     def __init__(self, storage: TieredStorageManager):
+        """Khởi tạo đối tượng của `DifferentiatedEvictionManager` và thiết lập trạng thái ban đầu."""
         self.storage = storage
         self.eviction = storage.eviction
         self._partition_types: dict[int, PartitionEvictionType] = {}
 
     def set_partition_type(self, partition_id: int, ptype: PartitionEvictionType) -> None:
+        """Cập nhật giá trị `partition type` vào trạng thái hiện tại."""
         self._partition_types[partition_id] = ptype
 
     def get_partition_type(self, partition_id: int) -> PartitionEvictionType:
+        """Trả về thông tin `partition type` từ trạng thái hiện tại."""
         return self._partition_types.get(partition_id, PartitionEvictionType.NORMAL)
 
     def is_recovery(self, partition_id: int) -> bool:
+        """Kiểm tra điều kiện `is recovery` và trả về boolean."""
         return self.get_partition_type(partition_id) == PartitionEvictionType.RECOVERY
 
     def evict_window(self, partition_id: int, window_id: str, window_data: dict) -> bool:
+        """Hàm `evict_window` thực hiện phần xử lý liên quan đến evict window của `DifferentiatedEvictionManager`.
+        """
         ptype = self.get_partition_type(partition_id)
         if ptype == PartitionEvictionType.NORMAL:
             return self._evict_normal(partition_id, window_id, window_data)
@@ -46,6 +56,8 @@ class DifferentiatedEvictionManager:
             return self._evict_recovery(partition_id, window_id, window_data)
 
     def _evict_normal(self, partition_id: int, window_id: str, window_data: dict) -> bool:
+        """Hàm `_evict_normal` thực hiện phần xử lý liên quan đến evict normal của `DifferentiatedEvictionManager`.
+        """
         logger.debug("Normal eviction: %s -> Tier 3", window_id)
         ok = self.storage.upload_window(window_id, window_data, partition_id)
         if ok:
@@ -53,6 +65,8 @@ class DifferentiatedEvictionManager:
         return ok
 
     def _evict_recovery(self, partition_id: int, window_id: str, window_data: dict) -> bool:
+        """Hàm `_evict_recovery` thực hiện phần xử lý liên quan đến evict recovery của `DifferentiatedEvictionManager`.
+        """
         logger.debug("Recovery eviction: %s -> Tier 2/3 (aggressive)", window_id)
         self.eviction.set_state(window_id, EvictionState.UPLOADING)
 
@@ -91,6 +105,7 @@ class DifferentiatedEvictionManager:
         return ok
 
     def purge_completed(self, partition_id: int) -> list[str]:
+        """Loại bỏ dữ liệu `purge completed` đã hết hạn hoặc không còn cần thiết."""
         purged = []
         ptype = self.get_partition_type(partition_id)
         if ptype == PartitionEvictionType.NORMAL:
@@ -104,6 +119,7 @@ class DifferentiatedEvictionManager:
         return purged
 
     def summary(self) -> dict:
+        """Tạo bản tóm tắt trạng thái `summary` để trả về API hoặc báo cáo."""
         s = self.eviction.summary()
         s["partition_types"] = {str(k): v.value for k, v in self._partition_types.items()}
         return s

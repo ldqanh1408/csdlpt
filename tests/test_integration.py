@@ -1,4 +1,8 @@
-"""Integration tests: Strict vs Heuristic comparison, end-to-end flows, chaos simulation."""
+"""
+Test tích hợp so sánh Strict và Heuristic trong cùng luồng dữ liệu.
+
+Tạo stream mẫu, chạy end-to-end, kiểm tra logic window và mô phỏng một số tình huống chaos.
+"""
 
 import time
 import pytest
@@ -9,7 +13,11 @@ from heuristic import HeuristicWatermarkEngine, HeuristicAggregator, DLQPipeline
 
 
 def generate_test_stream(n_events: int, base_time: float, lag_min: float, lag_max: float):
-    """Generate a stream of LogEvents with varying lag."""
+    """Hàm `generate_test_stream` thực hiện phần xử lý liên quan đến generate test stream.
+    
+    Ghi chú gốc:
+    Generate a stream of LogEvents with varying lag.
+    """
     import random
     events = []
     for i in range(n_events):
@@ -24,9 +32,14 @@ def generate_test_stream(n_events: int, base_time: float, lag_min: float, lag_ma
 
 
 class TestStrictVsHeuristic:
-    """Compare Strict (0% loss, high latency) vs Heuristic (bounded loss, low latency)."""
+    """Lớp `TestStrictVsHeuristic` gom các ca kiểm thử liên quan đến StrictVsHeuristic.
+    
+    Ghi chú gốc:
+    Compare Strict (0% loss, high latency) vs Heuristic (bounded loss, low latency).
+    """
 
     def test_strict_zero_loss(self):
+        """Kiểm thử hành vi `test strict zero loss` trong phạm vi module hiện tại."""
         eng = StrictWatermarkEngine(window_size_s=5.0, delta_base_s=10.0)
         base = 1000.0
         for t in range(30):
@@ -43,6 +56,7 @@ class TestStrictVsHeuristic:
         assert eng.metrics.late_dropped == 0
 
     def test_heuristic_bounded_loss(self):
+        """Kiểm thử hành vi `test heuristic bounded loss` trong phạm vi module hiện tại."""
         eng = HeuristicWatermarkEngine(partition_id=0, L_max=10.0)
         base = time.time()
         for i in range(3000):
@@ -55,7 +69,11 @@ class TestStrictVsHeuristic:
         assert loss_rate < 40.0, f"Loss rate {loss_rate:.1f}% too high (expected <40%)"
 
     def test_heuristic_lower_latency_than_strict(self):
-        """Heuristic should close windows faster than Strict."""
+        """Kiểm thử hành vi `test heuristic lower latency than strict` trong phạm vi module hiện tại.
+        
+        Ghi chú gốc:
+        Heuristic should close windows faster than Strict.
+        """
         base = time.time()
 
         # Strict
@@ -78,10 +96,15 @@ class TestStrictVsHeuristic:
 
 
 class TestEndToEnd:
-    """Full pipeline: Ingestor → Kafka (simulated) → Worker → Coordinator → Output."""
+    """Lớp `TestEndToEnd` gom các ca kiểm thử liên quan đến EndToEnd.
+    
+    Ghi chú gốc:
+    Full pipeline: Ingestor → Kafka (simulated) → Worker → Coordinator → Output.
+    """
 
     def test_strict_e2e(self):
         # Setup
+        """Kiểm thử hành vi `test strict e2e` trong phạm vi module hiện tại."""
         coord = StrictCoordinator()
         worker = StrictWorker("w0", [0], window_size_s=5.0, delta_base_s=10.0)
 
@@ -105,6 +128,7 @@ class TestEndToEnd:
         assert len(worker.engines[0].closed_windows) > 0
 
     def test_heuristic_e2e(self):
+        """Kiểm thử hành vi `test heuristic e2e` trong phạm vi module hiện tại."""
         agg = HeuristicAggregator()
         eng = HeuristicWatermarkEngine(partition_id=0)
         dlq = DLQPipeline()
@@ -136,9 +160,14 @@ class TestEndToEnd:
 
 
 class TestChaosSimulation:
-    """Simulate failure scenarios: worker kill, replay, partition recovery."""
+    """Lớp `TestChaosSimulation` gom các ca kiểm thử liên quan đến ChaosSimulation.
+    
+    Ghi chú gốc:
+    Simulate failure scenarios: worker kill, replay, partition recovery.
+    """
 
     def test_worker_recovery_from_checkpoint(self):
+        """Kiểm thử hành vi `test worker recovery from checkpoint` trong phạm vi module hiện tại."""
         import tempfile, os
         with tempfile.TemporaryDirectory() as d:
             eng = StrictWatermarkEngine(checkpoint_dir=d)
@@ -152,6 +181,7 @@ class TestChaosSimulation:
             assert eng2.last_T_commit == 200.0
 
     def test_dlq_correction_flow(self):
+        """Kiểm thử hành vi `test dlq correction flow` trong phạm vi module hiện tại."""
         dlq = DLQPipeline()
         for i in range(45):
             dlq.enqueue({
@@ -168,7 +198,11 @@ class TestChaosSimulation:
         assert total_corrected == 45
 
     def test_adaptive_percentile_recovery(self):
-        """After burst, engine should recover to normal percentile."""
+        """Kiểm thử hành vi `test adaptive percentile recovery` trong phạm vi module hiện tại.
+        
+        Ghi chú gốc:
+        After burst, engine should recover to normal percentile.
+        """
         eng = HeuristicWatermarkEngine(burst_threshold=2.0, recovery_minutes=0)
         base = time.time()
         # Normal load
@@ -185,7 +219,9 @@ class TestChaosSimulation:
 
 
 class TestWindowLogic:
+    """Lớp `TestWindowLogic` gom các ca kiểm thử liên quan đến WindowLogic."""
     def test_tumbling_window_alignment(self):
+        """Kiểm thử hành vi `test tumbling window alignment` trong phạm vi module hiện tại."""
         tw = TumblingWindow(size_s=5.0)
         assert tw.window_start(0.0) == 0.0
         assert tw.window_start(4.9) == 0.0
@@ -193,12 +229,14 @@ class TestWindowLogic:
         assert tw.window_start(9.9) == 5.0
 
     def test_window_id_format(self):
+        """Kiểm thử hành vi `test window id format` trong phạm vi module hiện tại."""
         tw = TumblingWindow(size_s=5.0)
         wid = tw.window_id(7, 12.3)
         assert "7_" in wid
         assert "10-" in wid or "10.0-" in wid
 
     def test_windows_between(self):
+        """Kiểm thử hành vi `test windows between` trong phạm vi module hiện tại."""
         tw = TumblingWindow(size_s=5.0)
         ws = tw.windows_between(10.0, 22.0)
         assert ws == [10.0, 15.0, 20.0]

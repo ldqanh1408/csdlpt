@@ -1,6 +1,7 @@
-"""Disaster Recovery — periodic active window backup to MinIO.
+"""
+Disaster Recovery cho active window bằng snapshot định kỳ lên MinIO.
 
-Spec §6.6: Backup active windows every 5 min. RTO <= 30min, RPO <= 5min.
+Module chạy vòng backup nền, lưu trạng thái cửa sổ đang mở và có helper restore để giảm mất mát trạng thái khi node hoặc volume cục bộ gặp sự cố.
 """
 
 import io
@@ -19,7 +20,11 @@ BACKUP_PREFIX = "strict-watermark/active_state_backup"
 
 @dataclass
 class DisasterRecovery:
-    """Periodically backs up engine state to MinIO and restores on cold start."""
+    """Lớp `DisasterRecovery` gom dữ liệu và hành vi liên quan đến DisasterRecovery.
+    
+    Ghi chú gốc:
+    Periodically backs up engine state to MinIO and restores on cold start.
+    """
 
     storage: TieredStorageManager
     backup_interval_s: float = 300.0
@@ -27,7 +32,9 @@ class DisasterRecovery:
     _stop: threading.Event = field(default_factory=threading.Event)
 
     def start_background_backup(self, engines: dict, get_state_callback=None):
+        """Khởi động tiến trình, server hoặc vòng nền `start background backup`."""
         def _loop():
+            """Hàm `_loop` thực hiện phần xử lý liên quan đến loop của `DisasterRecovery`."""
             while not self._stop.is_set():
                 time.sleep(self.backup_interval_s)
                 try:
@@ -37,6 +44,7 @@ class DisasterRecovery:
         threading.Thread(target=_loop, daemon=True).start()
 
     def backup(self, engines: dict, get_state_callback=None) -> str:
+        """Hàm `backup` thực hiện phần xử lý liên quan đến backup của `DisasterRecovery`."""
         if self.storage is None or self.storage.client is None:
             return ""
         unix_ts = int(time.time())
@@ -78,7 +86,11 @@ class DisasterRecovery:
         return str(unix_ts)
 
     def _prune_old_backups(self, partition_ids: list, max_keep: int = 24) -> None:
-        """Keep only the max_keep most recent backups per partition (spec §6.6)."""
+        """Hàm `_prune_old_backups` thực hiện phần xử lý liên quan đến prune old backups của `DisasterRecovery`.
+        
+        Ghi chú gốc:
+        Keep only the max_keep most recent backups per partition (spec §6.6).
+        """
         if self.storage is None or self.storage.client is None:
             return
         for pid in partition_ids:
@@ -91,7 +103,11 @@ class DisasterRecovery:
                     pass
 
     def list_backups(self, partition_id: int = None) -> list[str]:
-        """List backup timestamps for a partition (or all partitions if None)."""
+        """Liệt kê các mục `backups` hiện có.
+        
+        Ghi chú gốc:
+        List backup timestamps for a partition (or all partitions if None).
+        """
         if self.storage is None or self.storage.client is None:
             return []
         try:
@@ -115,6 +131,7 @@ class DisasterRecovery:
             return []
 
     def restore_latest(self, engines: dict) -> bool:
+        """Khôi phục trạng thái `restore latest` từ checkpoint hoặc storage."""
         restored = 0
         for pid, eng in engines.items():
             timestamps = self.list_backups(partition_id=pid)
@@ -125,6 +142,7 @@ class DisasterRecovery:
         return restored > 0
 
     def restore(self, engines: dict, timestamp: str) -> bool:
+        """Hàm `restore` thực hiện phần xử lý liên quan đến restore của `DisasterRecovery`."""
         if self.storage is None or self.storage.client is None:
             return False
         restored = 0
@@ -135,6 +153,7 @@ class DisasterRecovery:
         return restored > 0
 
     def _restore_partition(self, pid: int, eng, timestamp: str) -> bool:
+        """Khôi phục trạng thái `restore partition` từ checkpoint hoặc storage."""
         key = f"{BACKUP_PREFIX}/partition_{pid}/{timestamp}_active.json"
         try:
             response = self.storage.client.get_object(self.storage.bucket, key)
@@ -156,4 +175,5 @@ class DisasterRecovery:
             return False
 
     def stop(self):
+        """Hàm `stop` thực hiện phần xử lý liên quan đến stop của `DisasterRecovery`."""
         self._stop.set()

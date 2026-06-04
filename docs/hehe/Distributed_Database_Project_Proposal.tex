@@ -113,8 +113,8 @@ window-id & Định danh cửa sổ duy nhất phục vụ phát kết quả ide
     Trong các hệ thống xử lý luồng dữ liệu phân tán (Distributed Stream Processing), việc đảm bảo tính đúng đắn khi thực hiện các phép tổng hợp theo cửa sổ thời gian (Windowed Aggregations) là một thách thức lớn do các sự kiện có thể đến muộn hoặc bị bất tuần tự (Out-of-order) bởi độ trễ truyền dẫn vật lý, sự cố mạng hoặc cơ chế đệm dữ liệu tại nguồn phát (Source Buffering). \\
     Hệ thống cần xác định thời điểm thích hợp để đóng một cửa sổ và xuất kết quả. Điều này dẫn đến sự đánh đổi (trade-off) cốt lõi giữa \textbf{độ trễ chờ xử lý cửa sổ} (Watermark Latency) và \textbf{tính hoàn thiện dữ liệu} (Data Completeness). Đề tài này nhằm xây dựng một hệ thống phân tán để so sánh thực nghiệm hai phương thức định thời logic phổ biến:
     \begin{enumerate}
-        \item \textit{Định thời nghiêm ngặt (Strict Watermark)}: Đảm bảo tính hoàn thiện dữ liệu đạt 100\% (0\% mất mát dữ liệu) bằng cách giữ cửa sổ mở cho đến khi nhận được xác nhận từ tất cả các phân vùng dữ liệu đầu nguồn. Tuy nhiên, phương pháp này chịu ảnh hưởng nghiêm trọng bởi hiện tượng thắt nút cổ chai do các nút xử lý chậm chạp (Stragglers).
-        \item \textit{Định thời thích ứng thống kê (Heuristic Watermark)}: Tối ưu hóa độ trễ chờ bằng cách đóng cửa sổ sớm dựa trên ước lượng phân vị của độ trễ thực nghiệm (sử dụng cấu trúc DDSketch), đồng thời định tuyến các dữ liệu đến muộn sang Hàng đợi xử lý muộn (Dead-Letter Queue - DLQ) để đối chiếu đền bù trạng thái lịch sử sau đó.
+        \item \textit{Định thời nghiêm ngặt (Strict Watermark)}: Cam kết \textbf{không mất dữ liệu (0\% loss)} trên đường xử lý chính bằng cách chỉ tiến mốc thời gian toàn cục khi \emph{mọi} phân mảnh đang hoạt động đã vượt qua mốc đó (xác nhận qua Punctuation Token từ nguồn). Theo phân loại của Özsu \& Valduriez, đây là thiết kế \textbf{PC/EC} --- ưu tiên tính nhất quán (Consistency) cả khi mạng phân tách lẫn lúc bình thường --- nên chấp nhận chi phí điều phối cao và độ trễ tăng, đồng thời chịu ảnh hưởng bởi hiện tượng nút cổ chai do các phân mảnh chậm (Stragglers).
+        \item \textit{Định thời thích ứng thống kê (Heuristic Watermark)}: Cam kết \textbf{độ trễ thấp}, trao quyền tự trị cục bộ tối đa cho Worker (\emph{Site Autonomy}). Mỗi Worker tự ước lượng phân vị độ trễ thực nghiệm bằng cấu trúc DDSketch để đóng cửa sổ sớm mà không chờ phân mảnh khác, đồng thời định tuyến dữ liệu đến muộn sang Hàng đợi xử lý muộn (Dead-Letter Queue - DLQ) để đền bù bất đồng bộ. Đây là thiết kế \textbf{PA/EL} --- ưu tiên tính sẵn sàng (Availability) và độ trễ (Latency) --- chấp nhận nhất quán sau cùng (Eventual Consistency).
     \end{enumerate}
 
     \item \textbf{Core Logic (Thuật toán cốt lõi):}
@@ -139,6 +139,7 @@ window-id & Định danh cửa sổ duy nhất phục vụ phát kết quả ide
 
 % ─────────────────────────────────────────────────────────────────────────────
 \section{Dataset Specification (Đặc tả Tập dữ liệu)}
+\label{sec:dataset}
 % ─────────────────────────────────────────────────────────────────────────────
 \begin{itemize}[leftmargin=*]
     \item \textbf{Source (Nguồn dữ liệu):} \\
@@ -167,14 +168,12 @@ window-id & Định danh cửa sổ duy nhất phục vụ phát kết quả ide
         \boxed{\displaystyle \ell = T_{\text{arrival}} - T_{\text{event}} = \frac{\text{dropoff\_timestamp} - \text{pickup\_timestamp}}{60} = \frac{\text{trip\_duration}}{60}}
     \end{equation}
     }
-    Kỹ thuật này nén toàn bộ 31 ngày dữ liệu thực tế xuống còn \textbf{12.4 giờ} thời gian logic mô phỏng (giảm 60 lần), trong khi vẫn giữ nguyên các phân phối bất tuần tự đặc trưng:
+    Kỹ thuật này nén toàn bộ 31 ngày dữ liệu thực tế xuống còn \textbf{12.4 giờ} thời gian logic mô phỏng (giảm 60 lần), trong khi vẫn giữ nguyên các phân phối bất tuần tự đặc trưng (tỷ lệ giảm theo đúng hệ số $\text{DIV}=60$):
     \begin{itemize}[label={-}]
-        \item Thời gian phân phối trễ trung vị (p50): giảm từ 12 phút thực tế xuống còn \textbf{11.63 giây} mô phỏng.
-        \item Thời gian phân phối trễ phân vị p95: giảm từ 38 phút thực tế xuống còn \textbf{37.78 giây} mô phỏng.
-        \item Thời gian phân phối trễ phân vị p99: giảm từ 60 phút thực tế xuống còn \textbf{59.70 giây} mô phỏng.
-        \item Trễ cực đại (Max lateness): giảm từ khoảng 5 giờ xuống còn \textbf{359.73 giây} mô phỏng.
+        \item \textbf{Tỷ lệ bất tuần tự (out-of-order)}: 49.41\% sự kiện (1,463,199 bản ghi) đến lệch thứ tự so với sự kiện liền kề trước đó --- đủ khốc liệt để kiểm thử cơ chế Watermark với cửa sổ 5 giây.
+        \item Phân vị độ trễ mô phỏng: p50 = \textbf{11.63 s}, p90 = \textbf{28.80 s}, p95 = \textbf{37.78 s}, p99 = \textbf{59.70 s}; trễ cực đại (max lateness) = \textbf{359.73 s}.
     \end{itemize}
-    Cơ chế này cho phép các Worker xử lý luồng (Stream processing engine) thực thi kiểm thử và thu thập dữ liệu chỉ số đánh đổi (completeness vs wait time) một cách nhanh chóng nhưng vẫn phản ánh chính xác hành vi bất tuần tự thực tế của dòng dữ liệu phân tán.
+    Nếu phát lại dữ liệu theo tỷ lệ 1:1, độ trễ đến muộn gần như bằng 0 so với quãng 31 ngày, khiến đường cong hoàn thiện luôn phẳng ở 100\% và không kiểm thử được Watermark. Cơ chế nén giữ nguyên hành vi bất tuần tự thực tế nhưng cho phép Worker thu thập chỉ số đánh đổi (completeness vs wait time) trong thời gian khả thi.
 
     \item \textbf{Schema (Cấu trúc dữ liệu):} \\
     Hệ thống chuẩn hóa dữ liệu TLC Yellow Taxi thành mô hình sự kiện có cấu trúc:
@@ -231,7 +230,7 @@ Luồng nạp dữ liệu mô tả cách thức dữ liệu hành trình taxi đ
 Sơ đồ mô tả luồng nạp dữ liệu:
 \begin{figure}[H]
     \centering
-    \includegraphics[width=1.0\textwidth,height=13.0cm,keepaspectratio]{domain_4.1.pdf}
+    \includegraphics[width=1.0\textwidth,height=20.0cm,keepaspectratio]{domain_4.1.pdf}
     \caption{Sơ đồ Domain 1: Luồng nạp dữ liệu từ Ingestor đến các Worker Nodes (Data Ingestion Domain).}
     \label{fig:domain1}
 \end{figure}
@@ -268,7 +267,7 @@ Sơ đồ mô tả luồng nạp dữ liệu:
 Sơ đồ mô tả điều phối Strict:
 \begin{figure}[H]
     \centering
-    \includegraphics[width=1.0\textwidth,height=13.0cm,keepaspectratio]{domain_4.2.pdf}
+    \includegraphics[width=1.0\textwidth,height=20.0cm,keepaspectratio]{domain_4.2.pdf}
     \caption{Sơ đồ Domain 2: Luồng điều phối Strict Watermark (Strict Coordination Domain).}
     \label{fig:domain2}
 \end{figure}
@@ -301,7 +300,7 @@ Sơ đồ mô tả điều phối Strict:
 Sơ đồ mô tả điều phối Heuristic:
 \begin{figure}[H]
     \centering
-    \includegraphics[width=1.0\textwidth,height=13.0cm,keepaspectratio]{domain_4.3.pdf}
+    \includegraphics[width=1.0\textwidth,height=20.0cm,keepaspectratio]{domain_4.3.pdf}
     \caption{Sơ đồ Domain 3: Luồng điều phối Heuristic Watermark (Heuristic Aggregation Domain).}
     \label{fig:domain3}
 \end{figure}
@@ -334,7 +333,7 @@ Mặt phẳng điều khiển và quản lý cấu hình hệ thống:
 Sơ đồ mô tả Control \& Metadata Plane:
 \begin{figure}[H]
     \centering
-    \includegraphics[width=1.0\textwidth,height=13.0cm,keepaspectratio]{domain_4.4.pdf}
+    \includegraphics[width=1.0\textwidth,height=20.0cm,keepaspectratio]{domain_4.4.pdf}
     \caption{Sơ đồ Domain 4: Phối hợp Control \& Metadata Plane (Control \& Infrastructure Domain).}
     \label{fig:domain4}
 \end{figure}
@@ -366,7 +365,7 @@ Cơ chế quản lý lưu trữ trạng thái phân tầng (Tiered State Storage
 Sơ đồ mô tả lưu trữ và Checkpoint:
 \begin{figure}[H]
     \centering
-    \includegraphics[width=1.0\textwidth,height=13.0cm,keepaspectratio]{domain_4.5.pdf}
+    \includegraphics[width=1.0\textwidth,height=20.0cm,keepaspectratio]{domain_4.5.pdf}
     \caption{Sơ đồ Domain 5: Luồng lưu trữ trạng thái và Checkpoint (State \& Storage Domain).}
     \label{fig:domain5}
 \end{figure}
@@ -396,7 +395,7 @@ Dưới đây là chi tiết vai trò của các thực thể trong kiến trúc
 \midrule
 \endhead
 \texttt{ING} & Ingestor & Đọc dữ liệu CSV từ thư mục chia sẻ, gán nhãn thời gian sự kiện ($T_{event}$), gửi dữ liệu và Punctuation Token vào Kafka. \\
-\texttt{KAFKA} & Data Plane & Broker điều phối thông điệp, lưu trữ 12 phân vùng cho các dòng sự kiện đầu vào, dòng kết quả chính và dòng kiểm toán. \\
+\texttt{KAFKA} & Data Plane & Broker điều phối thông điệp, lưu trữ 12 phân mảnh cho các dòng sự kiện đầu vào, dòng kết quả chính và dòng kiểm toán. \\
 \texttt{ZK} & Auxiliary & Quản lý cấu hình cluster Kafka, hỗ trợ bầu chọn Leader (Coordinator/Aggregator) và phát hiện dịch vụ (Service Discovery). \\
 \texttt{N0} -- \texttt{N3} & Worker Layer & Các thực thể tính toán chạy song song, tiêu thụ dữ liệu từ các partition Kafka được phân bổ, quản lý window và tính toán Watermark cục bộ. \\
 \texttt{C1} -- \texttt{C3} & Strict Control Plane & Cụm điều phối trạng thái hoạt động theo giải thuật đồng thuận Raft (Leader-Follower) để tính toán Watermark toàn cục ($W_{global}$) trong chế độ Strict. \\
@@ -454,7 +453,7 @@ Hiện tượng nút cổ chai xảy ra khi một hoặc một vài phân mảnh
 Sơ đồ trình tự xử lý phân mảnh nhàn rỗi bằng Empty Punctuation trong chế độ Strict:
 \begin{figure}[H]
     \centering
-    \includegraphics[width=1.0\textwidth,height=15.0cm,keepaspectratio]{Empty Punctuation.pdf}
+    \includegraphics[width=1.0\textwidth,height=21.0cm,keepaspectratio]{Empty Punctuation.pdf}
     \caption{Trình tự xử lý Straggler chế độ Strict: Empty Punctuation \& Idleness Bypass.}
     \label{fig:emptypunctuation}
 \end{figure}
@@ -468,7 +467,7 @@ Sơ đồ trình tự xử lý phân mảnh nhàn rỗi bằng Empty Punctuation
 Sơ đồ trình tự định tuyến dữ liệu muộn sang DLQ trong chế độ Heuristic:
 \begin{figure}[H]
     \centering
-    \includegraphics[width=1.0\textwidth,height=13.0cm,keepaspectratio]{DDSketch_DLQ_routing.pdf}
+    \includegraphics[width=1.0\textwidth,height=20.0cm,keepaspectratio]{DDSketch_DLQ_routing.pdf}
     \caption{Trình tự xử lý Straggler chế độ Heuristic: DDSketch ước lượng \& định tuyến DLQ.}
     \label{fig:ddsketchdlq}
 \end{figure}
@@ -561,31 +560,7 @@ Mỗi thực thể (Worker, Coordinator, Aggregator) cung cấp một giao diệ
     \item \textbf{Độ trễ chờ Watermark (Watermark Latency / Wait Time)}: Khoảng thời gian hệ thống phải chờ (tính bằng giây mô phỏng) từ lúc cửa sổ thời gian logic kết thúc cho đến khi mốc thời gian Watermark toàn cục vượt qua biên đóng cửa sổ.
 \end{enumerate}
 
-Chúng tôi đã thực hiện chạy quét thực nghiệm (benchmark sweeps) trên toàn bộ tập dữ liệu \textbf{2,961,423 bản ghi} (kích thước khoảng 152 MB). Dưới đây là các phân tích chuyên sâu về sự đánh đổi này.
-
-\subsubsection{Cơ chế nén thời gian mô phỏng (Time Compression Design, DIV = 60)}
-Trong dữ liệu thực tế, sự lệch thời gian (skew) giữa thời gian phát sinh sự kiện (event-time) và thời gian hệ thống nhận được dữ liệu (arrival-time) là cực kỳ nhỏ so với tổng thời gian của cả tập dữ liệu (khoảng 31 ngày). Nếu phát lại luồng dữ liệu theo tỷ lệ 1:1, đường cong độ hoàn thiện sẽ luôn phẳng ở mức 100\% do độ trễ đến muộn gần như bằng 0.
-
-Để mô phỏng hành vi bất tuần tự khốc liệt trong môi trường phân tán thực tế, chúng tôi áp dụng hệ số nén thời gian $\text{DIV} = 60$. Công thức ánh xạ mốc thời gian như sau:
-{\large
-\begin{equation}
-    \boxed{\displaystyle T_{\text{event}} = \frac{T_{\text{pickup}} - T_{\text{pickup,min}}}{\text{DIV}}}
-\end{equation}
-\begin{equation}
-    \boxed{\displaystyle T_{\text{arrival}} = \frac{T_{\text{dropoff}} - T_{\text{pickup,min}}}{\text{DIV}}}
-\end{equation}
-}
-Theo đó, độ trễ đến muộn của mỗi sự kiện được bảo toàn nguyên vẹn về mặt tỷ lệ vật lý và chỉ bị co giãn theo hệ số nén:
-{\large
-\begin{equation}
-    \boxed{\displaystyle \text{Lateness} = T_{\text{arrival}} - T_{\text{event}} = \frac{T_{\text{dropoff}} - T_{\text{pickup}}}{\text{DIV}}}
-\end{equation}
-}
-Với cấu hình $\text{DIV} = 60$, các đặc trưng của tập dữ liệu trở nên cực kỳ phù hợp để kiểm thử cơ chế Watermark với kích thước cửa sổ 5 giây:
-\begin{itemize}
-    \item \textbf{Tỷ lệ bất tuần tự}: Có tới \textbf{49.41\%} tổng số sự kiện (1,463,199 dòng) đến lệch thứ tự so với sự kiện liền kề trước đó.
-    \item \textbf{Phân phối độ trễ}: Giá trị trung vị (P50 Lateness) là $11.63$ giây, phân vị P90 là $28.80$ giây, P95 là $37.78$ giây, P99 là $59.70$ giây, và độ trễ ngoại lai lớn nhất lên tới $359.73$ giây.
-\end{itemize}
+Chúng tôi đã thực hiện chạy quét thực nghiệm (benchmark sweeps) trên toàn bộ tập dữ liệu \textbf{2,961,423 bản ghi}, áp dụng cơ chế nén thời gian $\text{DIV}=60$ và phân phối độ trễ đã mô tả ở Mục~\ref{sec:dataset} (Dataset Specification). Dưới đây là các phân tích chuyên sâu về sự đánh đổi này.
 
 \subsubsection{Kết quả quét thực nghiệm so sánh trực tiếp}
 Kết quả so sánh trực tiếp giữa hai chiến lược Strict Watermark và Heuristic Watermark được trình bày trong Bảng~\ref{tab:completeness_latency_tradeoff}.
@@ -700,7 +675,7 @@ Dựa trên kết quả thực nghiệm, chúng tôi đề xuất các mô hình
         Sơ đồ máy trạng thái phân mảnh (Partition State Machine):
         \begin{figure}[H]
             \centering
-            \includegraphics[width=1.0\textwidth,height=13.0cm,keepaspectratio]{Partition State Machine.pdf}
+            \includegraphics[width=1.0\textwidth,height=20.0cm,keepaspectratio]{Partition State Machine.pdf}
             \caption{Sơ đồ máy trạng thái phân mảnh (Partition State Machine).}
             \label{fig:partitionstatemachine}
         \end{figure}
@@ -708,7 +683,7 @@ Dựa trên kết quả thực nghiệm, chúng tôi đề xuất các mô hình
         Sơ đồ trình tự Failback 5 bước sau phục hồi:
         \begin{figure}[H]
             \centering
-            \includegraphics[width=1.0\textwidth,height=13.0cm,keepaspectratio]{5-Step Failback Sequence Diagram.pdf}
+            \includegraphics[width=1.0\textwidth,height=20.0cm,keepaspectratio]{5-Step Failback Sequence Diagram.pdf}
             \caption{Sơ đồ trình tự Failback 5 bước sau phục hồi.}
             \label{fig:failbacksequence}
         \end{figure}

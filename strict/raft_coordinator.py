@@ -1,6 +1,7 @@
-"""Simulated Raft Coordinator HA — leader election + state replication via HTTP.
+"""
+Mô phỏng Coordinator HA bằng cơ chế gần giống Raft qua HTTP/gRPC.
 
-Spec §5.1-5.4: 3-instance Raft cluster with leader election and state replication.
+Module bầu leader, tăng term, replicate state, xử lý vote/state request và cung cấp lớp coordinator chịu lỗi cho Strict Watermark.
 """
 
 import json
@@ -19,6 +20,7 @@ except ImportError:
 _grpc_channels = {}
 
 def get_grpc_target(peer):
+    """Trả về thông tin `grpc target` từ trạng thái hiện tại."""
     if not peer:
         return None
     if ":" in peer:
@@ -31,6 +33,7 @@ def get_grpc_target(peer):
     return None
 
 def get_grpc_stub(peer):
+    """Trả về thông tin `grpc stub` từ trạng thái hiện tại."""
     if grpc is None:
         return None
     target = get_grpc_target(peer)
@@ -53,16 +56,19 @@ logger = logging.getLogger("raft_coordinator")
 
 
 class RaftRole(Enum):
+    """Lớp `RaftRole` định nghĩa các trạng thái/hằng số dùng trong luồng xử lý."""
     LEADER = "leader"
     FOLLOWER = "follower"
     CANDIDATE = "candidate"
 
 
 class RaftCoordinator:
+    """Lớp `RaftCoordinator` quản lý trạng thái coordinator và watermark toàn cục."""
     def __init__(self, coordinator_id: str, peers: list[str],
                  delta_base_s: float = 10.0, state_path: str = "/tmp/coordinator-state.json",
                  db_path: str = None, heartbeat_interval_ms: int = 200,
                  zk_ensemble: bool = False):
+        """Khởi tạo đối tượng của `RaftCoordinator` và thiết lập trạng thái ban đầu."""
         self.coordinator_id = coordinator_id
         self.peers = peers
         self.heartbeat_interval_ms = heartbeat_interval_ms
@@ -85,7 +91,9 @@ class RaftCoordinator:
             self._start_election_timer()
 
     def _start_election_timer(self):
+        """Khởi động tiến trình, server hoặc vòng nền `start election timer`."""
         def _timer():
+            """Hàm `_timer` thực hiện phần xử lý liên quan đến timer của `RaftCoordinator`."""
             while not self._stop.is_set():
                 time.sleep(0.5)
                 with self._lock:
@@ -96,6 +104,7 @@ class RaftCoordinator:
         threading.Thread(target=_timer, daemon=True).start()
 
     def _start_election(self):
+        """Khởi động tiến trình, server hoặc vòng nền `start election`."""
         self.current_term += 1
         self.role = RaftRole.CANDIDATE
         self.voted_for = self.coordinator_id
@@ -142,6 +151,7 @@ class RaftCoordinator:
                 self.role = RaftRole.FOLLOWER
 
     def handle_vote_request(self, term: int, candidate_id: str, W_global: float) -> dict:
+        """Xử lý request/sự kiện `handle vote request` trong luồng runtime."""
         with self._lock:
             if term > self.current_term:
                 self.current_term = term
@@ -156,7 +166,9 @@ class RaftCoordinator:
             return {"granted": False, "term": self.current_term}
 
     def _start_heartbeat_loop(self):
+        """Khởi động tiến trình, server hoặc vòng nền `start heartbeat loop`."""
         def _loop():
+            """Hàm `_loop` thực hiện phần xử lý liên quan đến loop của `RaftCoordinator`."""
             while not self._stop.is_set() and self.role == RaftRole.LEADER:
                 state = self.coordinator.broadcast()
                 state["term"] = self.current_term
@@ -202,6 +214,7 @@ class RaftCoordinator:
         threading.Thread(target=_loop, daemon=True).start()
 
     def receive_state(self, state: dict):
+        """Nhận dữ liệu hoặc thông điệp `receive state` từ thành phần nguồn."""
         with self._lock:
             self._last_leader_heartbeat = time.time()
             self.role = RaftRole.FOLLOWER
@@ -220,6 +233,7 @@ class RaftCoordinator:
         # handles this). If a follower receives a heartbeat, it means the worker
         # hasn't discovered the leader yet — reject so the worker falls through
         # and the health check loop redirects.
+        """Nhận dữ liệu hoặc thông điệp `receive heartbeat` từ thành phần nguồn."""
         if self.role != RaftRole.LEADER:
             logger.warning(
                 "RaftCoordinator: follower %s received WorkerHeartbeat from %s "
@@ -231,21 +245,36 @@ class RaftCoordinator:
         return True  # signal to caller: accepted by leader
 
     def set_failover_manager(self, fm: object) -> None:
-        """Inject a FailoverManager, delegating to the inner StrictCoordinator."""
+        """Cập nhật giá trị `failover manager` vào trạng thái hiện tại.
+        
+        Ghi chú gốc:
+        Inject a FailoverManager, delegating to the inner StrictCoordinator.
+        """
         self.coordinator.set_failover_manager(fm)
 
     def set_ingestor_health(self, monitor: object) -> None:
-        """Proxy: inject ingestor health monitor into inner coordinator."""
+        """Cập nhật giá trị `ingestor health` vào trạng thái hiện tại.
+        
+        Ghi chú gốc:
+        Proxy: inject ingestor health monitor into inner coordinator.
+        """
         if hasattr(self.coordinator, "set_ingestor_health"):
             self.coordinator.set_ingestor_health(monitor)
 
     def load_state(self) -> None:
-        """Proxy: inner StrictCoordinator already loaded state in __init__; no-op here."""
+        """Nạp dữ liệu/trạng thái `load state` từ lưu trữ hoặc cấu hình.
+        
+        Ghi chú gốc:
+        Proxy: inner StrictCoordinator already loaded state in __init__; no-op here.
+        """
         pass
 
     def __getattr__(self, name):
-        """Proxy any unresolved attribute lookups to the inner StrictCoordinator.
-        This covers partitions, delta_base, _node_skew_max_ms, _watermark_lag_s, etc.
+        """Chuyển tiếp truy cập thuộc tính chưa xử lý của `RaftCoordinator`.
+        
+        Ghi chú gốc:
+        Proxy any unresolved attribute lookups to the inner StrictCoordinator.
+                This covers partitions, delta_base, _node_skew_max_ms, _watermark_lag_s, etc.
         """
         # Avoid infinite recursion on 'coordinator' itself (set in __init__ via __dict__)
         if name == "coordinator":
@@ -256,6 +285,7 @@ class RaftCoordinator:
             raise AttributeError(f"'RaftCoordinator' object has no attribute '{name}'")
 
     def broadcast(self) -> dict:
+        """Hàm `broadcast` thực hiện phần xử lý liên quan đến broadcast của `RaftCoordinator`."""
         r = self.coordinator.broadcast()
         r["raft_role"] = self.role.value
         r["raft_term"] = self.current_term
@@ -263,10 +293,12 @@ class RaftCoordinator:
         return r
 
     def save_state(self):
+        """Lưu dữ liệu/trạng thái `state` để dùng lại sau."""
         self.coordinator.save_state()
 
     @property
     def W_global(self):
+        """Hàm `W_global` thực hiện phần xử lý liên quan đến W global của `RaftCoordinator`."""
         return self.coordinator.W_global
 
     # ------------------------------------------------------------------
@@ -274,8 +306,11 @@ class RaftCoordinator:
     # ------------------------------------------------------------------
 
     def _start_zk_election_loop(self):
-        """ZK-style election. If ZK_HOSTS/ZK_ENSEMBLE is set (and not boolean),
-        uses a real ZooKeeper client. Otherwise falls back to simulated HTTP election.
+        """Khởi động tiến trình, server hoặc vòng nền `start zk election loop`.
+        
+        Ghi chú gốc:
+        ZK-style election. If ZK_HOSTS/ZK_ENSEMBLE is set (and not boolean),
+                uses a real ZooKeeper client. Otherwise falls back to simulated HTTP election.
         """
         import os
         zk_hosts = os.environ.get("ZK_HOSTS") or os.environ.get("ZK_ENSEMBLE")
@@ -299,6 +334,7 @@ class RaftCoordinator:
             self._zk_lock = None
 
             def _real_zk_loop():
+                """Hàm `_real_zk_loop` thực hiện phần xử lý liên quan đến real zk loop của `RaftCoordinator`."""
                 from kazoo.client import KazooClient
                 while not self._stop.is_set():
                     try:
@@ -378,6 +414,7 @@ class RaftCoordinator:
         else:
             logger.info("RaftCoordinator: ZK_HOSTS not configured. Starting simulated HTTP ZK election.")
             def _zk_loop():
+                """Hàm `_zk_loop` thực hiện phần xử lý liên quan đến zk loop của `RaftCoordinator`."""
                 while not self._stop.is_set():
                     time.sleep(2.0)
                     self._zk_elect_leader()
@@ -386,7 +423,11 @@ class RaftCoordinator:
             threading.Thread(target=_zk_loop, daemon=True).start()
 
     def _zk_elect_leader(self):
-        """Elect leader: lowest coordinator ID that responds to health check."""
+        """Hàm `_zk_elect_leader` thực hiện phần xử lý liên quan đến zk elect leader của `RaftCoordinator`.
+        
+        Ghi chú gốc:
+        Elect leader: lowest coordinator ID that responds to health check.
+        """
         candidates = [self.coordinator_id] + self.peers
         reachable = []
         for cid in candidates:
@@ -424,6 +465,7 @@ class RaftCoordinator:
 
         # Leader is the coordinator with lowest numeric ID among reachable
         def _parse_id(cid: str) -> int:
+            """Hàm `_parse_id` thực hiện phần xử lý liên quan đến parse id của `RaftCoordinator`."""
             import re
             host = cid.split(":")[0]
             m = re.search(r'\d+', host)
@@ -449,7 +491,11 @@ class RaftCoordinator:
                             self.coordinator_id, new_leader)
 
     def _zk_heartbeat_loop(self):
-        """ZK leader replicates state to peers (single-shot per election)."""
+        """Hàm `_zk_heartbeat_loop` thực hiện phần xử lý liên quan đến zk heartbeat loop của `RaftCoordinator`.
+        
+        Ghi chú gốc:
+        ZK leader replicates state to peers (single-shot per election).
+        """
         if self.role != RaftRole.LEADER:
             return
         state = self.coordinator.broadcast()
@@ -483,14 +529,22 @@ class RaftCoordinator:
                     pass
 
     def handle_zk_vote(self, data: dict) -> dict:
-        """Handle ZK vote/ping requests from peers."""
+        """Xử lý request/sự kiện `handle zk vote` trong luồng runtime.
+        
+        Ghi chú gốc:
+        Handle ZK vote/ping requests from peers.
+        """
         action = data.get("action", "")
         if action == "zk-ping":
             return {"ok": True, "coordinator_id": self.coordinator_id}
         return {"ok": False, "error": "unknown zk action"}
 
     def handle_zk_state(self, data: dict) -> dict:
-        """Receive ZK-replicated state from leader."""
+        """Xử lý request/sự kiện `handle zk state` trong luồng runtime.
+        
+        Ghi chú gốc:
+        Receive ZK-replicated state from leader.
+        """
         with self._lock:
             self._last_leader_heartbeat = time.time()
             self.role = RaftRole.FOLLOWER
@@ -502,6 +556,7 @@ class RaftCoordinator:
         return {"ok": True}
 
     def shutdown(self):
+        """Hàm `shutdown` thực hiện phần xử lý liên quan đến shutdown của `RaftCoordinator`."""
         self._stop.set()
         if hasattr(self, "_zk_lock") and self._zk_lock:
             try:

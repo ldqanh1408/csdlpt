@@ -1,0 +1,8 @@
+%% Ví dụ cấu trúc: bảng trạng thái phân vùng (partition) tại control plane
+flowchart TB
+    subgraph TBL["Bảng trạng thái phân vùng (partition) (ví dụ)"]
+        R1["P0: owner=W1, LW=120, ACTIVE"]
+        R2["P4: owner=W2, LW=118, STALE"]
+        R3["P7: owner=W3, LW=không có, FAILED"]
+    end
+    TBL -->|"tính toán watermark toàn cục"| G["W_global = min(LW của partition còn hoạt động) = 118<br/>(P7 FAILED bị loại bỏ)"]

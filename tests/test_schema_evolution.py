@@ -1,4 +1,8 @@
-"""Unit and integration tests for Schema Evolution and Registry integration."""
+"""
+Test schema evolution và Schema Registry.
+
+Kiểm tra validate JSON schema, tương thích lùi V1/V2 và registry HTTP/client integration.
+"""
 
 import os
 import time
@@ -21,15 +25,21 @@ from run import parse_and_deduplicate_event, HealthHandler
 
 class TestSchemaEvolution(unittest.TestCase):
 
+    """Lớp `TestSchemaEvolution` gom các ca kiểm thử liên quan đến SchemaEvolution."""
     def setUp(self):
         # Reset global registry between tests
+        """Hàm `setUp` thực hiện phần xử lý liên quan đến setUp của `TestSchemaEvolution`."""
         _global_registry.schemas.clear()
         _global_registry.global_ids.clear()
         _global_registry.next_id = 1
         _global_registry.register("events", LOG_EVENT_V1_SCHEMA)
 
     def test_schema_validation(self):
-        """Test programmatic JSON schema validation."""
+        """Kiểm thử hành vi `test schema validation` trong phạm vi module hiện tại.
+        
+        Ghi chú gốc:
+        Test programmatic JSON schema validation.
+        """
         valid_v1 = {
             "event_id": "ev-1",
             "event_time": 1716600000.0,
@@ -57,7 +67,11 @@ class TestSchemaEvolution(unittest.TestCase):
         self.assertFalse(validate_json_schema(bad_type_v1, LOG_EVENT_V1_SCHEMA))
 
     def test_compatibility_checking(self):
-        """Test backward compatibility checking."""
+        """Kiểm thử hành vi `test compatibility checking` trong phạm vi module hiện tại.
+        
+        Ghi chú gốc:
+        Test backward compatibility checking.
+        """
         # LOG_EVENT_V2_SCHEMA is incompatible with LOG_EVENT_V1_SCHEMA because:
         # 1. status is renamed to http_status (removed required field)
         # 2. service_name is a new required field with no default
@@ -78,7 +92,11 @@ class TestSchemaEvolution(unittest.TestCase):
         self.assertTrue(check_backward_compatibility(LOG_EVENT_V1_SCHEMA, compatible_schema))
 
     def test_in_memory_registry(self):
-        """Test in-memory SchemaRegistry operations."""
+        """Kiểm thử hành vi `test in memory registry` trong phạm vi module hiện tại.
+        
+        Ghi chú gốc:
+        Test in-memory SchemaRegistry operations.
+        """
         registry = SchemaRegistry()
         
         # Register V1
@@ -102,7 +120,11 @@ class TestSchemaEvolution(unittest.TestCase):
         self.assertEqual(by_id, LOG_EVENT_V1_SCHEMA)
 
     def test_parse_and_deduplicate_compat(self):
-        """Test event parsing, backward-compatibility mapping, and seen deduplication."""
+        """Kiểm thử hành vi `test parse and deduplicate compat` trong phạm vi module hiện tại.
+        
+        Ghi chú gốc:
+        Test event parsing, backward-compatibility mapping, and seen deduplication.
+        """
         seen_cache = set()
 
         # 1. V1 Event passes through unchanged (defaults added if missing)
@@ -129,15 +151,21 @@ class TestSchemaEvolution(unittest.TestCase):
 
 
 class TestSchemaRegistryHTTP(unittest.TestCase):
-    """Test Schema Registry client-server communication over mock HTTP endpoints."""
+    """Lớp `TestSchemaRegistryHTTP` gom các ca kiểm thử liên quan đến SchemaRegistryHTTP.
+    
+    Ghi chú gốc:
+    Test Schema Registry client-server communication over mock HTTP endpoints.
+    """
 
     @classmethod
     def setUpClass(cls):
         # Start a local HTTP server hosting the health/schema handler
+        """Hàm `setUpClass` thực hiện phần xử lý liên quan đến setUpClass của `TestSchemaRegistryHTTP`."""
         cls.server_state = {"monitoring_manager": None}
         
         # Subclass HealthHandler to bind state
         class BindedHandler(HealthHandler):
+            """Lớp `BindedHandler` xử lý request hoặc tình huống runtime liên quan."""
             server_state = cls.server_state
 
         cls.httpd = HTTPServer(("127.0.0.1", 0), BindedHandler)
@@ -147,19 +175,25 @@ class TestSchemaRegistryHTTP(unittest.TestCase):
 
     @classmethod
     def tearDownClass(cls):
+        """Hàm `tearDownClass` thực hiện phần xử lý liên quan đến tearDownClass của `TestSchemaRegistryHTTP`."""
         cls.httpd.shutdown()
         cls.httpd.server_close()
         cls.server_thread.join()
 
     def setUp(self):
         # Reset the global in-memory registry which the HealthHandler queries
+        """Hàm `setUp` thực hiện phần xử lý liên quan đến setUp của `TestSchemaRegistryHTTP`."""
         _global_registry.schemas.clear()
         _global_registry.global_ids.clear()
         _global_registry.next_id = 1
         _global_registry.register("events", LOG_EVENT_V1_SCHEMA)
 
     def test_client_registration_and_query(self):
-        """Test that SchemaRegistryClient registers schemas and checks compatibility over HTTP."""
+        """Kiểm thử hành vi `test client registration and query` trong phạm vi module hiện tại.
+        
+        Ghi chú gốc:
+        Test that SchemaRegistryClient registers schemas and checks compatibility over HTTP.
+        """
         client = SchemaRegistryClient(registry_url=f"http://127.0.0.1:{self.port}")
 
         # Register schema via client

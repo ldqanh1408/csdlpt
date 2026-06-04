@@ -1,0 +1,17 @@
+%% Domain 3 - Heuristic Aggregation (Active-Standby, DDSketch, DLQ)
+%% Render: mmdc -i domain3_heuristic_aggregation.mmd -o domain3.svg
+flowchart TB
+    WK["Worker N0-N3<br/>DDSketch cục bộ"]
+    AG["Aggregator chính (Primary - Active)"]
+    AGS["Aggregator dự phòng (Standby - Hot)"]
+    ZK["ZooKeeper / Khóa tệp (File Lock)"]
+    DLQ["DLQ - topic late_logs_dlq"]
+    DS["Phía hạ nguồn (Downstream) - Correction"]
+
+    WK -->|"gRPC SendWorkerWatermark - ~200ms<br/>{worker_id, partition_id, W_h, L_eff, sketch}"| AG
+    AG -->|"W_global_h = min(W_h) - 500ms"| AG
+    AG -->|"W_global_h - worker pull (HTTP)"| WK
+    AG <-->|"lock + heartbeat 1 giây"| ZK
+    AGS <-->|"theo dõi (watch) - tiếp quản (takeover) RTO <= 2 giây"| ZK
+    WK -->|"đến muộn (late): T_event nhỏ hơn W_h"| DLQ
+    DLQ -->|"Correction Message (Thông điệp hiệu chỉnh)"| DS

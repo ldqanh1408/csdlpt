@@ -1,0 +1,7 @@
+%% Ví dụ cấu trúc: heartbeat từng phân vùng (partition) -> W_global
+flowchart LR
+    HB["WorkerHeartbeat (W1)<br/>partitions: P0=120, P1=125, P2=118<br/>offset, fencing_token=43"]
+    CO["Coordinator<br/>W_global = min(120, 125, 118) = 118"]
+    OUT["Cửa sổ (Window) có window_end <= 118<br/>được chốt"]
+    HB -->|"gửi heartbeat"| CO
+    CO -->|"so khớp window_end để chốt"| OUT

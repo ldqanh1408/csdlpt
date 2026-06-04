@@ -9,6 +9,7 @@
 
 ## Mục lục
 
+- [⚡ Quick Start](#-quick-start)
 - [1. Tổng quan](#1-tổng-quan)
 - [2. Cài đặt](#2-cài-đặt)
 - [3. Chuẩn bị dữ liệu](#3-chuẩn-bị-dữ-liệu)
@@ -16,9 +17,57 @@
 - [5. Cấu hình](#5-cấu-hình)
 - [6. Giám sát](#6-giám-sát)
 - [7. API Endpoints](#7-api-endpoints)
-- [8. Sinh báo cáo tự động](#8-sinh-báo-cáo-tự-động)
+- [8. Chạy thực nghiệm & Sinh báo cáo](#8-chạy-thực-nghiệm--sinh-báo-cáo-reports)
 - [9. Cấu trúc thư mục](#9-cấu-trúc-thư-mục)
 - [10. Xử lý sự cố](#10-xử-lý-sự-cố)
+
+---
+
+## ⚡ Quick Start
+
+> Đường đi ngắn nhất để chạy được hệ thống trong ~10 phút. Chi tiết từng bước xem các mục bên dưới.
+
+**Yêu cầu tối thiểu:** Python 3.10+, Docker 24+ (Compose v2), RAM ≥ 8 GB. Mọi lệnh chạy từ **thư mục gốc repo** (trừ khi ghi `cd deploy`).
+
+```bash
+# 1) Cài môi trường Python (chỉ cần cho công cụ dataset, test, dashboard)
+python3 -m venv .venv && source .venv/bin/activate      # Windows: .venv\Scripts\activate
+pip install -r requirements.txt
+
+# 2) Chuẩn bị dữ liệu: tải dữ liệu thô NYC TLC rồi nén thời gian DIV=60
+wget -P dataset/ https://d37ci6vzurychx.cloudfront.net/trip-data/yellow_tripdata_2024-01.parquet
+python tools/nyc_taxi_to_events.py
+#   -> sinh dataset/nyc_taxi_events_full.csv  (2.96M dòng, sẵn sàng cho engine)
+#   Muốn chạy thử nhanh:  python tools/nyc_taxi_to_events.py --rows 150000
+
+# 3) Khởi chạy cụm phân tán bằng Docker Compose (chọn 1 trong 2 chế độ)
+cd deploy
+MODE=strict    DATASET_FILE=nyc_taxi_events_full.csv docker compose --profile strict    up --build -d
+# hoặc
+MODE=heuristic DATASET_FILE=nyc_taxi_events_full.csv docker compose --profile heuristic up --build -d
+
+# 4) Kiểm tra hệ thống đang chạy
+curl http://localhost:9000/health        # strict: coordinator   | heuristic: dùng :9007
+curl http://localhost:9101/api/metrics    # metrics của node0
+#   Grafana: http://localhost:3000 (admin/admin)   ·   Prometheus: http://localhost:9090
+
+# 5) (Tùy chọn) Dashboard trực quan
+streamlit run deploy/dashboard.py --server.port 8501
+
+# 6) Dừng cụm khi xong (đúng profile đã dùng ở bước 3)
+docker compose --profile strict down          # thêm -v để xóa luôn dữ liệu/checkpoint
+```
+
+**Chạy thực nghiệm Completeness vs Wait Time** (so sánh Strict vs Heuristic) → xem [Mục 8](#8-chạy-thực-nghiệm--sinh-báo-cáo-reports).
+**Chạy test** → `python -m pytest tests/ -v` ([Mục 4.4](#44-test-suite)).
+
+| Bạn muốn... | Đi tới |
+|---|---|
+| Hiểu kiến trúc & 2 chiến lược | [Mục 1](#1-tổng-quan) |
+| Chuẩn bị / dùng dataset riêng | [Mục 3](#3-chuẩn-bị-dữ-liệu) |
+| Chỉnh tham số (window, δ, percentile p...) | [Mục 5](#5-cấu-hình) |
+| Quét thực nghiệm & sinh báo cáo | [Mục 8](#8-chạy-thực-nghiệm--sinh-báo-cáo-reports) |
+| Gặp lỗi khi chạy | [Mục 10](#10-xử-lý-sự-cố) |
 
 ---
 
@@ -146,7 +195,7 @@ Engine đọc CSV qua **`csv.DictReader`** (theo tên cột, không theo vị tr
 | # | Cột | Bắt buộc | Kiểu | Vai trò |
 |---|---|---|---|---|
 | 0 | *(index)* | Không | int | Bỏ qua khi đọc (tự sinh bởi `to_csv(index=True)`) |
-| 1 | `host` | **Có** | str/int | **Partition key** — `hash(host) % 12` quyết định partition |
+| 1 | `host` | **Có** | str/int | **Partition key** — `stable_partition(host, 12)` quyết định partition |
 | 2 | `time` | **Có** | float | **Event-time** (epoch giây). Thời điểm sự kiện xảy ra thực tế |
 | 3 | `method` | Không | str | HTTP method ("GET", "POST",...) — cosmetic |
 | 4 | `url` | Không | str | URL path — cosmetic |
@@ -326,10 +375,21 @@ curl http://localhost:9101/api/metrics
 ### 4.3 Dừng & Dọn dẹp
 
 ```bash
-# Dừng tất cả
+cd deploy
 
-# Dừng + xóa volumes (checkpoint, RocksDB, MinIO data)
+# Dừng tất cả container (giữ lại volume/checkpoint)
+docker compose --profile strict down       # nếu đang chạy strict
+docker compose --profile heuristic down    # nếu đang chạy heuristic
+
+# Dừng + XÓA volumes (checkpoint, RocksDB, MinIO data) — chạy lại từ đầu sạch sẽ
+docker compose --profile strict down -v
+docker compose --profile heuristic down -v
+
+# Dọn triệt để nếu còn container/orphan sót lại
+docker compose down --remove-orphans -v
 ```
+
+> Lưu ý: phải truyền đúng `--profile` đã dùng khi `up`, nếu không `down` sẽ không thấy các service của profile đó.
 
 ### 4.4 Test Suite
 
@@ -593,66 +653,204 @@ Bạn có thể copy/di chuyển các tệp này vào thư mục kết quả ch�
 
 ---
 
-## 9. Cấu trúc thư mục
+## 9. Cấu trúc thư mục và vai trò từng chương trình Python
 
-```
+### 9.1 Cấu trúc thư mục tổng quan
+
+```text
 csdlpt/
-├── run.py                     # Entry point duy nhất (mọi role + mode)
-├── requirements.txt
+├── __init__.py                 # Khai báo package chính của dự án
+├── run.py                      # Entry point chạy coordinator / aggregator / worker / ingestor
+├── requirements.txt            # Dependency Python tối thiểu cho engine và hạ tầng
+├── Dockerfile                  # Image Python dùng khi build ở cấp repo
 │
-├── common/                    # Thư viện dùng chung
-│   ├── config.py              # Centralized config (env vars)
-│   ├── types.py               # Dataclass: LogEvent, WindowResult, ...
-│   ├── window.py              # TumblingWindow
-
-│   ├── rocks_store.py         # RocksDB wrapper
-│   └── metrics.py             # SystemMetrics
+├── common/                     # Thành phần dùng chung cho Strict và Heuristic
+│   ├── config.py               # Đọc cấu hình từ biến môi trường
+│   ├── types.py                # Dataclass / enum chung cho event, watermark, checkpoint
+│   ├── window.py               # Tumbling window theo event-time
+│   ├── metrics.py              # Metric nội bộ và timer độ phân giải cao
+│   ├── monitoring.py           # Registry Prometheus và snapshot metric
+│   ├── alerting.py             # Luật cảnh báo và PagerDuty fallback
+│   ├── kafka_real.py           # Adapter Kafka thật
+│   ├── rocks_store.py          # Wrapper RocksDB / RocksDict
+│   ├── tiered_storage.py       # MinIO tiered storage
+│   ├── differentiated_eviction.py # Chính sách eviction theo loại partition
+│   ├── schema_registry.py      # Schema evolution / registry
+│   ├── zk_lock.py              # ZooKeeper leader lock
+│   ├── tls.py                  # TLS helper
+│   ├── csdlpt.proto            # Định nghĩa protobuf gRPC
+│   ├── csdlpt_pb2.py           # Python protobuf sinh tự động
+│   └── csdlpt_pb2_grpc.py      # Stub / servicer gRPC sinh tự động
 │
-├── strict/                    # Strict Watermark (0% loss)
-│   ├── engine.py              # Per-partition watermark engine
-│   ├── worker.py              # BoundedPriorityQueue + heartbeat
-│   ├── coordinator.py         # W_global = min(LW_i)
-│   ├── raft_coordinator.py    # Raft consensus 3-node
-│   ├── failover.py            # 5-step failover/failback
-│   └── output_manager.py      # Exactly-once emission
+├── strict/                     # Nhánh Strict Watermark: ưu tiên 0% mất dữ liệu
+│   ├── engine.py               # Engine watermark theo partition
+│   ├── worker.py               # Worker quản lý nhiều partition engine
+│   ├── coordinator.py          # Tính W_global = min(LW_i)
+│   ├── raft_coordinator.py     # Coordinator HA mô phỏng Raft
+│   ├── failover.py             # Reassign / failback partition
+│   ├── output_manager.py       # Idempotent / transactional output
+│   ├── backpressure.py         # Pause / resume theo queue depth
+│   ├── ingestor_health.py      # Theo dõi heartbeat ingestor
+│   ├── disaster_recovery.py    # Backup active window lên MinIO
+│   └── replay_checkpoint.py    # Sub-checkpoint khi replay phục hồi
 │
-├── heuristic/                 # Heuristic Watermark (DDSketch + DLQ)
-│   ├── engine.py              # DDSketch per partition
-│   ├── aggregator.py          # W_global_h = min(W_h)
-│   ├── aggregator_ha.py       # Active-Standby failover
-│   └── dlq.py                 # Dead Letter Queue pipeline
+├── heuristic/                  # Nhánh Heuristic Watermark: ưu tiên latency thấp
+│   ├── engine.py               # DDSketch-based per-partition watermark
+│   ├── aggregator.py           # Tổng hợp W_global_h từ worker watermark
+│   ├── aggregator_ha.py        # Active / standby aggregator
+│   ├── dlq.py                  # Dead Letter Queue và correction protocol
+│   ├── downstream_emitter.py   # Phát correction xuống downstream
+│   ├── cold_start.py           # Warm-up trước khi DDSketch đủ mẫu
+│   └── negative_lag.py         # Xử lý clock skew / lag âm
 │
-├── ddsketch/                  # DDSketch implementation
-│   ├── sketch.py              # Core: log buckets, mergeable
-│   └── compat.py              # Compatibility wrapper
+├── local_ddsketch/             # DDSketch nội bộ, không phụ thuộc package ngoài khi cần
+│   ├── sketch.py               # Cài đặt DDSketch và SlidingWindowDDSketch
+│   └── compat.py               # Lớp tương thích API DDSketch
 │
-├── reports/                   # Tự động sinh báo cáo
-│   ├── run_all.py              # Một lệnh -> strict + heuristic + report
-│   ├── analyze_dataset.py      # Phân tích offline toàn bộ dataset
-│   └── run_experiment.py       # Docker-based Completeness vs Wait Time
+├── reports/                    # Script chạy thí nghiệm và sinh báo cáo
+│   ├── analyze_dataset.py      # Phân tích offline full dataset
+│   ├── run_experiment.py       # Chạy sweep Docker Completeness vs Wait Time
+│   ├── run_heuristic_sweep.py  # Wrapper sweep heuristic full dataset
+│   ├── run_all.py              # Pipeline tổng hợp báo cáo
+│   └── results/                # Báo cáo / CSV kết quả đã gom
 │
-├── tools/                     # Dataset preprocessing tools
-│   ├── nyc_taxi_to_events.py  # Raw taxi -> engine schema (DIV=60, Parquet+CSV)
-│   ├── make_out_of_order.py   # Inject out-of-order lateness
-│   └── dataset_stats.py       # In thống kê dataset
+├── tools/                      # Tiền xử lý và kiểm tra dataset
+│   ├── nyc_taxi_to_events.py   # NYC Taxi -> schema CSV của engine
+│   ├── make_out_of_order.py    # Inject lateness nhân tạo
+│   └── dataset_stats.py        # Thống kê dataset thô
 │
-├── deploy/                    # Deployment
-│   ├── docker-compose.yml     # Full cluster (14 services, 3 profiles)
-│   ├── Dockerfile             # Python 3.10-slim image
-│   ├── entrypoint.sh          # Checkpoint cleanup
-│   ├── dashboard.py           # Streamlit dashboard
-│   └── prometheus.yml         # Prometheus scrape config
+├── deploy/                     # Triển khai local bằng Docker Compose
+│   ├── dashboard.py            # Dashboard Streamlit điều khiển cụm
+│   ├── docker-compose.yml      # Cụm đầy đủ: Kafka, ZK, MinIO, coordinator, worker...
+│   ├── Dockerfile              # Image runtime cho service trong compose
+│   ├── entrypoint.sh           # Entrypoint container
+│   ├── prometheus.yml          # Cấu hình scrape Prometheus
+│   ├── prometheus-rules.yml    # Rule cảnh báo Prometheus
+│   ├── grafana-dashboard.json  # Dashboard Grafana import sẵn
+│   └── requirements-dashboard.txt # Dependency riêng cho Streamlit dashboard
 │
-├── dataset/                   # Dữ liệu NYC Taxi
-│   ├── yellow_tripdata_2024-01.parquet  # Raw (tải từ NYC TLC)
-│   └── nyc_taxi_events_full.csv        # Chuẩn hóa + nén (152 MB)
-│
-├── tests/                     # 15+ test files
-└── docs/                      # Tài liệu thiết kế (tiếng Việt)
-    ├── project_proposal_summary.md        # Đề xuất dự án
-    ├── REPORT_academic_watermark_*.md     # Báo cáo học thuật
-    └── REPORT_full_dataset_*.md          # Phân tích dataset
+├── tests/                      # Unit, integration, chaos và Docker E2E tests
+├── docs/                       # Tài liệu thiết kế, báo cáo, CSV sweep và PDF minh họa
+├── dataset/                    # Dữ liệu đầu vào local, không bắt buộc commit
+├── .simdata/                   # Dữ liệu mô phỏng / state sinh ra khi chạy local
+├── .pytest_cache/              # Cache pytest sinh tự động
+└── __pycache__/                # Bytecode cache Python sinh tự động
 ```
+
+> Các thư mục `__pycache__/`, `.pytest_cache/`, `.simdata/` và các file `.pyc` là dữ liệu sinh tự động khi chạy chương trình hoặc test. Chúng không phải mã nguồn chính cần chỉnh sửa.
+
+### 9.2 Mô tả từng file `.py`
+
+#### Gốc repo
+
+| File | Làm gì |
+|---|---|
+| `__init__.py` | Khai báo package chính, mô tả ngắn hệ thống Strict + Heuristic Watermark và danh sách package export. |
+| `run.py` | Entry point quan trọng nhất: parse CLI, chạy role `coordinator`, `aggregator`, `worker`, `ingestor`; dựng HTTP API, gRPC, TLS, monitoring, alerting, Kafka, failover và luồng ingest dữ liệu. |
+
+#### `common/`
+
+| File | Làm gì |
+|---|---|
+| `common/__init__.py` | Khai báo package `common`, gom ý nghĩa các module dùng chung. |
+| `common/alerting.py` | Định nghĩa luật cảnh báo, đánh giá metric và gửi PagerDuty hoặc log fallback khi chạy local. |
+| `common/config.py` | Đọc toàn bộ cấu hình từ biến môi trường: window size, partition, Kafka, MinIO, TLS, DDSketch, DLQ, failover, backpressure. |
+| `common/csdlpt_pb2.py` | File protobuf sinh tự động từ `csdlpt.proto`, chứa message class cho heartbeat, state, Raft và watermark. |
+| `common/csdlpt_pb2_grpc.py` | File gRPC sinh tự động, chứa stub/servicer cho CoordinatorService và AggregatorService. |
+| `common/differentiated_eviction.py` | Chọn chiến lược eviction theo loại partition để giảm áp lực bộ nhớ/lưu trữ. |
+| `common/kafka_real.py` | Adapter producer/consumer cho Kafka thật bằng `kafka-python`. |
+| `common/metrics.py` | Cấu trúc metric nội bộ và timer độ phân giải cao để đo processing/network latency. |
+| `common/monitoring.py` | Tạo Prometheus metric registry, cập nhật gauge/counter/histogram và snapshot phục vụ dashboard/cảnh báo. |
+| `common/rocks_store.py` | Wrapper RocksDB/RocksDict cho checkpoint, DLQ, idempotency, failback state và metadata bền vững. |
+| `common/schema_registry.py` | Validate JSON schema, kiểm tra backward compatibility và cung cấp schema registry/client đơn giản. |
+| `common/tiered_storage.py` | Upload/download window state lên MinIO theo giao thức eviction bốn trạng thái. |
+| `common/tls.py` | Tạo SSL context và bọc socket HTTP khi bật TLS. |
+| `common/types.py` | Chứa enum/dataclass chung: `LogEvent`, `PunctuationToken`, `WindowResult`, heartbeat, correction, checkpoint. |
+| `common/window.py` | Tính tumbling window theo event-time. |
+| `common/zk_lock.py` | Leader election bằng ZooKeeper cho aggregator/coordinator HA. |
+
+#### `strict/`
+
+| File | Làm gì |
+|---|---|
+| `strict/__init__.py` | Khai báo package Strict Watermark. |
+| `strict/backpressure.py` | Theo dõi queue depth từng partition và phát tín hiệu pause/resume. |
+| `strict/coordinator.py` | Nhận heartbeat worker/ingestor, theo dõi partition và tính `W_global = min(LW_i)`. |
+| `strict/disaster_recovery.py` | Backup active window định kỳ lên MinIO và hỗ trợ restore khi sự cố. |
+| `strict/engine.py` | Engine strict theo partition: nhận event/punctuation, cập nhật local watermark, đóng window an toàn, checkpoint và eviction. |
+| `strict/failover.py` | Phát hiện worker lỗi, reassign partition, lưu trạng thái failback và xử lý failback 5 bước. |
+| `strict/ingestor_health.py` | Lưu heartbeat ingestor, phát hiện ingestor im lặng hoặc T_commit không đơn điệu. |
+| `strict/output_manager.py` | Phát `WindowResult` theo cơ chế idempotent/transactional và chống phát trùng sau crash. |
+| `strict/raft_coordinator.py` | Mô phỏng Raft leader election/state replication cho coordinator HA. |
+| `strict/replay_checkpoint.py` | Ghi sub-checkpoint khi replay để recovery tiếp tục từ mốc gần nhất. |
+| `strict/worker.py` | Worker strict: quản lý engine theo partition, heap buffer event-time, heartbeat, backpressure, reassignment và output. |
+
+#### `heuristic/`
+
+| File | Làm gì |
+|---|---|
+| `heuristic/__init__.py` | Khai báo package Heuristic Watermark. |
+| `heuristic/aggregator.py` | Nhận watermark từng partition và tính `W_global_h`. |
+| `heuristic/aggregator_ha.py` | Active/standby failover cho aggregator bằng file lock. |
+| `heuristic/cold_start.py` | Quản lý giai đoạn warm-up để DDSketch đủ mẫu trước khi tin L_eff. |
+| `heuristic/dlq.py` | Lưu late event vào DLQ, gom correction và phát `CorrectionMessage`. |
+| `heuristic/downstream_emitter.py` | Xếp hàng, ưu tiên và phát correction xuống downstream/Kafka; đo correction latency. |
+| `heuristic/engine.py` | Engine heuristic theo partition: DDSketch ước lượng lateness, tính `W_h`, đóng window sớm, xử lý late event, burst, replay, cold start và lag âm. |
+| `heuristic/negative_lag.py` | Phân loại/đếm lag âm do clock skew để bảo vệ watermark và DDSketch. |
+
+#### `local_ddsketch/`
+
+| File | Làm gì |
+|---|---|
+| `local_ddsketch/__init__.py` | Export DDSketch nội bộ cho nhánh heuristic. |
+| `local_ddsketch/compat.py` | Lớp tương thích API DDSketch để code/test dùng interface quen thuộc. |
+| `local_ddsketch/sketch.py` | Cài đặt DDSketch logarithmic bucket và SlidingWindowDDSketch. |
+
+#### `reports/`
+
+| File | Làm gì |
+|---|---|
+| `reports/__init__.py` | Khai báo package báo cáo/thí nghiệm. |
+| `reports/analyze_dataset.py` | Phân tích offline toàn bộ dataset: lateness, strict/heuristic sweep, loss theo window/partition, fitting curve, xuất Markdown/CSV. |
+| `reports/run_all.py` | Chạy pipeline tổng hợp: đảm bảo dataset, chạy phân tích, tùy chọn Docker experiment và tạo comparison report. |
+| `reports/run_experiment.py` | Chạy Docker Compose theo từng điểm delta/percentile, thu metric và tạo báo cáo Completeness vs Wait Time. |
+| `reports/run_heuristic_sweep.py` | Wrapper đặt env phù hợp cho heuristic full dataset rồi gọi `run_experiment.py` và copy kết quả mới nhất. |
+
+#### `tools/`
+
+| File | Làm gì |
+|---|---|
+| `tools/__init__.py` | Khai báo package công cụ dataset. |
+| `tools/dataset_stats.py` | In thống kê dữ liệu NYC Taxi thô: range thời gian, duration/lateness percentile, out-of-order, zone, amount. |
+| `tools/make_out_of_order.py` | Tạo dataset mới với cột `arrival` bị trễ có kiểm soát để test watermark. |
+| `tools/nyc_taxi_to_events.py` | Chuyển NYC Yellow Taxi Parquet/CSV sang schema engine `host,time,method,url,response,bytes,arrival`. |
+
+#### `deploy/`
+
+| File | Làm gì |
+|---|---|
+| `deploy/dashboard.py` | Dashboard Streamlit để start/stop cụm Docker, xem health, metrics, logs, bottleneck, kết quả sweep và failover lab. |
+
+#### `tests/`
+
+| File | Làm gì |
+|---|---|
+| `tests/__init__.py` | Khai báo package test. |
+| `tests/check_state.py` | Script tiện ích gọi `http://127.0.0.1:9000/state` để xem state coordinator đang chạy. |
+| `tests/test_backpressure.py` | Test ngưỡng pause/resume và summary của `BackpressureController`. |
+| `tests/test_chaos.py` | Test chaos: worker kill, backpressure flood, clock skew, coordinator/aggregator HA, MinIO outage. |
+| `tests/test_ddsketch.py` | Test DDSketch, quantile, merge, bucket clamp và sliding window. |
+| `tests/test_docker_compose_chaos.py` | Runner chaos trên Docker Compose strict profile, kiểm tra node kill/recovery và reassign partition. |
+| `tests/test_docker_compose_e2e.py` | Runner E2E Docker Compose cho strict và heuristic, theo dõi EOF, state và logs. |
+| `tests/test_failover.py` | Test đăng ký worker, heartbeat timeout và phân phối lại partition của `FailoverManager`. |
+| `tests/test_heuristic.py` | Test engine heuristic, aggregator, DLQ, correction protocol, cold start và negative lag. |
+| `tests/test_infra.py` | Test ZooKeeper lock và Kafka adapter bằng mock. |
+| `tests/test_integration.py` | Test tích hợp Strict vs Heuristic, end-to-end flow, chaos simulation và window logic. |
+| `tests/test_output_manager.py` | Test idempotent/transactional output và mock sink. |
+| `tests/test_raft_coordinator.py` | Test mô phỏng Raft coordinator HA. |
+| `tests/test_schema_evolution.py` | Test JSON schema validation, compatibility và Schema Registry HTTP client. |
+| `tests/test_strict.py` | Test strict engine, coordinator, priority queue và worker. |
+
 
 ---
 

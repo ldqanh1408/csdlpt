@@ -1,34 +1,8 @@
 #!/usr/bin/env python3
-"""NYC Taxi (yellow_tripdata) -> engine-schema CSV converter.
+"""
+Chuyển dữ liệu NYC Yellow Taxi sang schema CSV của engine.
 
-Supports both CSV and Parquet input (auto-detected by file extension).
-
-Chuẩn hóa dataset/yellow_tripdata_2024-01.parquet (hoặc .csv, 19 cột thô) sang schema engine:
-    ,host,time,method,url,response,bytes,arrival
-
-Ánh xạ cột:
-    host     <- PULocationID          (partition key: hash(host)%12)
-    time     <- pickup  / DIV         (event-time, epoch giây sau nén)
-    method   = "GET"                 (cosmetic)
-    url      <- "/zone/{DO}"          (cosmetic)
-    response = 200                   (không có ý nghĩa trong topic taxi)
-    bytes    <- int(total_amount*100) (cents, dương)
-    arrival  <- dropoff / DIV         (arrival-time thật, out-of-order vs event-time)
-
-Nén thời gian — 1 hệ số DIV duy nhất:
-    pickup_min = min(pickup)
-    event_time = (pickup  - pickup_min) / DIV
-    arrival    = (dropoff - pickup_min) / DIV
-    lateness   = arrival - event_time = (dropoff-pickup)/DIV = duration/DIV
-    DIV=60 -> lateness p50~12s / p95~38s / p99~60s  -> delta sweep 0..60s
-
-Thứ tự dòng file: sắp theo arrival tăng dần (= thứ tự đến thật), out-of-order so với
-event_time vì chuyến dài kết thúc muộn hơn chuyến ngắn bắt đầu sau.
-
-Usage:
-    python tools/nyc_taxi_to_events.py --rows 150000 --div 60
-    python tools/nyc_taxi_to_events.py                       # toàn bộ dataset (auto-detect parquet/csv)
-    python tools/nyc_taxi_to_events.py --late-target-s 40    # tự tính DIV từ p95
+Script đọc Parquet/CSV, lọc bản ghi hợp lệ, nén thời gian bằng `DIV`, ánh xạ host/time/arrival và xuất `nyc_taxi_events_full.csv` để chạy Strict/Heuristic.
 """
 from __future__ import annotations
 import argparse
@@ -44,7 +18,11 @@ DEFAULT_OUT = ROOT / "dataset" / "nyc_taxi_events_full.csv"
 
 
 def _read_input(src: Path, cols: list, nrows: int | None) -> pd.DataFrame:
-    """Read CSV or Parquet, auto-detected by file extension."""
+    """Hàm `_read_input` thực hiện phần xử lý liên quan đến read input.
+    
+    Ghi chú gốc:
+    Read CSV or Parquet, auto-detected by file extension.
+    """
     suffix = src.suffix.lower()
     if suffix in (".parquet", ".pq"):
         df = pd.read_parquet(src, columns=cols)
@@ -61,6 +39,7 @@ def _read_input(src: Path, cols: list, nrows: int | None) -> pd.DataFrame:
 
 
 def main():
+    """Điểm vào CLI của script, đọc tham số và điều phối các bước xử lý."""
     ap = argparse.ArgumentParser(description="NYC Taxi -> engine event CSV")
     ap.add_argument("--src", default=str(DEFAULT_SRC))
     ap.add_argument("--out", default=str(DEFAULT_OUT))
@@ -87,6 +66,7 @@ def main():
 
     # Keep within Jan 2024 (drop stray Dec-2023 / Feb-2024 records)
     def _naive(s):
+        """Hàm `_naive` thực hiện phần xử lý liên quan đến naive."""
         return s.dt.tz_localize(None) if s.dt.tz is not None else s
     pu = _naive(df["tpep_pickup_datetime"])
     do = _naive(df["tpep_dropoff_datetime"])

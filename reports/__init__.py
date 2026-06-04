@@ -1,6 +1,5 @@
-"""reports — Automated experiment runner and report generator.
+"""
+Package chứa script chạy thí nghiệm và sinh báo cáo.
 
-    run_all.py           — Master script: auto-run strict + heuristic, generate report
-    analyze_dataset.py   — Offline numerical analysis of the full taxi dataset
-    run_experiment.py    — Docker-based Completeness vs Wait Time sweeper
+Các module dùng để chạy sweep Strict/Heuristic, phân tích offline dataset và tạo Markdown/CSV phục vụ báo cáo học thuật.
 """

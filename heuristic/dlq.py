@@ -1,10 +1,7 @@
-"""DLQ Pipeline - Dead Letter Queue for late-arriving data with correction protocol.
+"""
+Pipeline Dead Letter Queue cho dữ liệu đến muộn trong nhánh Heuristic.
 
-Late events (T_event < W_global_h at arrival) are routed to DLQ instead of
-being silently dropped. A correction consumer periodically processes batches
-and emits correction messages to downstream sinks.
-
-DLQ entries are persisted in RocksDB (prefix 'dlq:') for durability.
+Event có `T_event < W_global_h` được lưu vào DLQ thay vì bị mất; consumer correction gom batch, tính delta theo cửa sổ và phát CorrectionMessage xuống downstream.
 """
 
 import json
@@ -26,6 +23,7 @@ _DLQ_PFX = "dlq:"
 
 @dataclass
 class DLQEntry:
+    """Lớp `DLQEntry` gom dữ liệu và hành vi liên quan đến DLQEntry."""
     event_id: str
     T_event: float
     arrival_time: float
@@ -39,15 +37,16 @@ class DLQEntry:
 
 
 class DLQPipeline:
-    """Stores late events and produces correction messages for downstream reconciliation.
+    """Lưu late event và sinh correction message để downstream đối soát lại.
 
-    When a Kafka producer is provided, each late event enqueued to the DLQ is
-    also produced to the configured Kafka topic (default: late_logs_dlq).
+    Khi có Kafka producer, mỗi late event đưa vào DLQ cũng được gửi sang topic
+    cấu hình sẵn, mặc định là `late_logs_dlq`.
     """
 
     def __init__(self, dlq_path: str = "/tmp/dlq", retention_days: int = 7,
                  store: Optional[RocksStore] = None, kafka_producer=None,
                  kafka_topic: str = "late_logs_dlq"):
+        """Khởi tạo đối tượng của `DLQPipeline` và thiết lập trạng thái ban đầu."""
         self.dlq_path = dlq_path
         self.retention_days = retention_days
         self._entries: list[DLQEntry] = []
@@ -56,15 +55,16 @@ class DLQPipeline:
         self._entry_counter: int = 0
         self._kafka_producer = kafka_producer
         self._kafka_topic = kafka_topic
-        # Hourly consumer state
+        # Trạng thái consumer correction chạy định kỳ theo lô.
         self.on_corrections_ready: callable | None = None
         self._last_correction_time: float = 0.0
         self._correction_count: int = 0
-        # Load existing entries from RocksDB
+        # Nạp lại entry cũ từ RocksDB để DLQ sống sót qua restart.
         if self._store is not None:
             self._load_from_store()
 
     def _load_from_store(self):
+        """Nạp dữ liệu/trạng thái `load from store` từ lưu trữ hoặc cấu hình."""
         for key, val in self._store.items(prefix=_DLQ_PFX):
             try:
                 if isinstance(val, dict):
@@ -76,17 +76,20 @@ class DLQPipeline:
                 pass
 
     def _persist_entry(self, entry: DLQEntry):
+        """Ghi bền vững trạng thái `persist entry` xuống storage."""
         if self._store is None:
             return
         key = f"{_DLQ_PFX}{entry.event_id}"
         self._store.put(key, entry)
 
     def _delete_entry(self, event_id: str):
+        """Xóa dữ liệu `delete entry` khỏi bộ nhớ hoặc storage."""
         if self._store is None:
             return
         self._store.delete(f"{_DLQ_PFX}{event_id}")
 
     def enqueue(self, entry: dict) -> None:
+        """Đưa dữ liệu vào hàng đợi `enqueue` để xử lý sau."""
         dlq_entry = DLQEntry(
             event_id=entry.get("event_id", ""),
             T_event=entry.get("T_event", 0.0),
@@ -103,7 +106,7 @@ class DLQPipeline:
         self._entry_counter += 1
         self._persist_entry(dlq_entry)
 
-        # Also produce to Kafka DLQ topic if producer is configured
+        # Nếu có producer thì đồng thời phát late event sang Kafka DLQ topic.
         if self._kafka_producer is not None:
             try:
                 self._kafka_producer.send(self._kafka_topic, {
@@ -122,15 +125,17 @@ class DLQPipeline:
 
     @property
     def backlog(self) -> int:
+        """Hàm `backlog` thực hiện phần xử lý liên quan đến backlog của `DLQPipeline`."""
         return len(self._entries)
 
     def oldest_entry_age_s(self) -> float:
+        """Hàm `oldest_entry_age_s` thực hiện phần xử lý liên quan đến oldest entry age s của `DLQPipeline`."""
         if not self._entries:
             return 0.0
         return time.time() - min(e.arrival_time for e in self._entries)
 
     def purge_expired(self) -> int:
-        """Remove entries older than retention_days. Returns count of purged entries."""
+        """Xóa entry quá hạn retention_days và trả về số entry đã xóa."""
         if not self._entries or self.retention_days <= 0:
             return 0
         cutoff = time.time() - (self.retention_days * 86400)
@@ -147,7 +152,11 @@ class DLQPipeline:
         return len(expired)
 
     def drain(self, batch_size: int = 100) -> list[DLQEntry]:
-        """Pop up to batch_size oldest entries from DLQ."""
+        """Hàm `drain` thực hiện phần xử lý liên quan đến drain của `DLQPipeline`.
+        
+        Ghi chú gốc:
+        Pop up to batch_size oldest entries from DLQ.
+        """
         if not self._entries:
             return []
         # Sort by arrival_time, take oldest first
@@ -164,17 +173,20 @@ class DLQPipeline:
         is_final: bool = False,
         results_lookup: Callable[[str], dict | None] | None = None,
     ) -> list[CorrectionMessage]:
-        """Group DLQ entries by window, compute corrections with proper deltas.
-
-        Parameters
-        ----------
-        is_final : bool
-            If True, sets message_type to "FINAL_RECONCILIATION"; otherwise
-            uses "WINDOW_CORRECTION".
-        results_lookup : callable | None
-            Optional callable(window_id) -> dict | None that returns the
-            previously emitted result. When provided, previous_count/sum and
-            corrected_count/sum are computed from the actual prior result.
+        """Tính toán kết quả `compute corrections` từ dữ liệu hiện có.
+        
+        Ghi chú gốc:
+        Group DLQ entries by window, compute corrections with proper deltas.
+        
+                Parameters
+                ----------
+                is_final : bool
+                    If True, sets message_type to "FINAL_RECONCILIATION"; otherwise
+                    uses "WINDOW_CORRECTION".
+                results_lookup : callable | None
+                    Optional callable(window_id) -> dict | None that returns the
+                    previously emitted result. When provided, previous_count/sum and
+                    corrected_count/sum are computed from the actual prior result.
         """
         import math
         msg_type = "FINAL_RECONCILIATION" if is_final else "WINDOW_CORRECTION"
@@ -224,7 +236,11 @@ class DLQPipeline:
         return corrections
 
     def dlq_metrics(self) -> dict:
-        """Return DLQ monitoring metrics."""
+        """Hàm `dlq_metrics` thực hiện phần xử lý liên quan đến dlq metrics của `DLQPipeline`.
+        
+        Ghi chú gốc:
+        Return DLQ monitoring metrics.
+        """
         m = {
             "backlog": self.backlog,
             "oldest_entry_age_s": round(self.oldest_entry_age_s(), 1),
@@ -236,18 +252,22 @@ class DLQPipeline:
         return m
 
     def start_hourly_consumer(self, stop_event: threading.Event) -> None:
-        """Start a background thread that drains DLQ entries every hour.
-
-        Every 3600 seconds, this consumer drains up to 1000 entries from the
-        DLQ, calls compute_corrections() on them, and invokes the
-        on_corrections_ready callback (if set) with the resulting corrections.
-
-        Parameters
-        ----------
-        stop_event : threading.Event
-            When set, the consumer loop exits cleanly.
+        """Khởi động tiến trình, server hoặc vòng nền `start hourly consumer`.
+        
+        Ghi chú gốc:
+        Start a background thread that drains DLQ entries every hour.
+        
+                Every 3600 seconds, this consumer drains up to 1000 entries from the
+                DLQ, calls compute_corrections() on them, and invokes the
+                on_corrections_ready callback (if set) with the resulting corrections.
+        
+                Parameters
+                ----------
+                stop_event : threading.Event
+                    When set, the consumer loop exits cleanly.
         """
         def _loop():
+            """Hàm `_loop` thực hiện phần xử lý liên quan đến loop của `DLQPipeline`."""
             logger.info("Hourly DLQ correction consumer started")
             while not stop_event.is_set():
                 try:
@@ -280,7 +300,11 @@ class DLQPipeline:
         t.start()
 
     def save(self) -> None:
-        """Save in-memory DLQ to JSON file (backup). RocksDB is write-through."""
+        """Hàm `save` thực hiện phần xử lý liên quan đến save của `DLQPipeline`.
+        
+        Ghi chú gốc:
+        Save in-memory DLQ to JSON file (backup). RocksDB is write-through.
+        """
         import os
         os.makedirs(os.path.dirname(self.dlq_path), exist_ok=True)
         data = {
@@ -316,16 +340,20 @@ class DLQPipeline:
 
 
 class CorrectionProtocol:
-    """Handles correction message delivery to downstream sinks.
-
-    Supports 3 patterns:
-    1. Incremental Update - SQL UPDATE with delta
-    2. Replace - PUT entire corrected result
-    3. Append + Versioning - event log with increasing version
+    """Lớp `CorrectionProtocol` gom dữ liệu và hành vi liên quan đến CorrectionProtocol.
+    
+    Ghi chú gốc:
+    Handles correction message delivery to downstream sinks.
+    
+        Supports 3 patterns:
+        1. Incremental Update - SQL UPDATE with delta
+        2. Replace - PUT entire corrected result
+        3. Append + Versioning - event log with increasing version
     """
 
     def __init__(self, pattern: str = "incremental",
                  store: Optional[RocksStore] = None):
+        """Khởi tạo đối tượng của `CorrectionProtocol` và thiết lập trạng thái ban đầu."""
         self.pattern = pattern
         self._store = store
         self._processed_corrections: set[str] = set()
@@ -337,6 +365,7 @@ class CorrectionProtocol:
                     self._processed_corrections.add(cid)
 
     def is_duplicate(self, correction_id: str) -> bool:
+        """Kiểm tra điều kiện `is duplicate` và trả về boolean."""
         if correction_id in self._processed_corrections:
             return True
         # Also check RocksDB for persisted dedup
@@ -354,6 +383,7 @@ class CorrectionProtocol:
     def apply_correction(
         self, correction: CorrectionMessage, current_result: dict
     ) -> dict:
+        """Hàm `apply_correction` thực hiện phần xử lý liên quan đến apply correction của `CorrectionProtocol`."""
         if self.is_duplicate(correction.correction_id):
             return current_result
 

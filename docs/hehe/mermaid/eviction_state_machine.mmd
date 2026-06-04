@@ -1,0 +1,8 @@
+%% Vòng đời window đã chốt - 4-state eviction
+stateDiagram-v2
+    [*] --> CLOSED: window_end <= W_global
+    CLOSED --> UPLOADING: bắt đầu tải lên (upload) MinIO
+    UPLOADING --> UPLOADED: put_object OK (lưu ETag)
+    UPLOADING --> CLOSED: thất bại sau 3 lần thử lại (retry)
+    UPLOADED --> PURGED: xóa bản cục bộ (local) khỏi Tier1
+    PURGED --> [*]

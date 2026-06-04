@@ -1,4 +1,8 @@
-"""Heuristic Aggregator - computes W_global_h = min(per-partition W_h) with Active-Standby HA."""
+"""
+Aggregator của nhánh Heuristic Watermark.
+
+Nhận watermark cục bộ từ worker theo partition, lưu timestamp cập nhật và tính `W_global_h = min(W_h_i)` trên các partition còn hoạt động.
+"""
 
 import json
 import os
@@ -16,6 +20,7 @@ _PFX_META = "meta:"
 
 @dataclass
 class PartitionWatermark:
+    """Lớp `PartitionWatermark` gom dữ liệu và hành vi liên quan đến PartitionWatermark."""
     partition_id: int
     worker_id: str
     W_h: float
@@ -24,14 +29,18 @@ class PartitionWatermark:
 
 
 class HeuristicAggregator:
-    """Merges per-partition heuristic watermarks into W_global_h.
-
-    In production: 2 instances (Active-Standby) with ZK lock.
-    Here: single-process with state persistence for failover simulation.
+    """Lớp `HeuristicAggregator` gom dữ liệu và hành vi liên quan đến HeuristicAggregator.
+    
+    Ghi chú gốc:
+    Merges per-partition heuristic watermarks into W_global_h.
+    
+        In production: 2 instances (Active-Standby) with ZK lock.
+        Here: single-process with state persistence for failover simulation.
     """
 
     def __init__(self, state_path: str = "/tmp/aggregator-state.json",
                  db_path: Optional[str] = None):
+        """Khởi tạo đối tượng của `HeuristicAggregator` và thiết lập trạng thái ban đầu."""
         self.state_path = state_path
         self.partitions: dict[int, PartitionWatermark] = {}
         self.W_global_h: float = float("-inf")
@@ -52,6 +61,7 @@ class HeuristicAggregator:
     # ------------------------------------------------------------------
 
     def _persist_partition(self, part_id: int) -> None:
+        """Ghi bền vững trạng thái `persist partition` xuống storage."""
         if self._store is None:
             return
         p = self.partitions.get(part_id)
@@ -59,7 +69,11 @@ class HeuristicAggregator:
             self._store.put(f"{_PFX_PART}{part_id}", p)
 
     def _load_from_store(self) -> None:
-        """Populate in-memory partitions and metadata from RocksDB."""
+        """Nạp dữ liệu/trạng thái `load from store` từ lưu trữ hoặc cấu hình.
+        
+        Ghi chú gốc:
+        Populate in-memory partitions and metadata from RocksDB.
+        """
         if self._store is None:
             return
         for key, val in self._store.items(prefix=_PFX_PART):
@@ -74,6 +88,7 @@ class HeuristicAggregator:
             self.W_global_h_prev = self.W_global_h
 
     def receive_worker_watermark(self, worker_id: str, partition_id: int, W_h: float) -> None:
+        """Nhận dữ liệu hoặc thông điệp `receive worker watermark` từ thành phần nguồn."""
         now = time.time()
         if partition_id not in self.partitions:
             self.partitions[partition_id] = PartitionWatermark(
@@ -94,6 +109,7 @@ class HeuristicAggregator:
         self._compute_global()
 
     def _update_statuses(self) -> None:
+        """Cập nhật trạng thái/metric `update statuses` dựa trên dữ liệu mới."""
         now = time.time()
         for p in self.partitions.values():
             age = now - p.last_update
@@ -107,6 +123,7 @@ class HeuristicAggregator:
                 p.status = WorkerStatus.FAILED
 
     def _compute_global(self) -> None:
+        """Tính toán kết quả `compute global` từ dữ liệu hiện có."""
         active = [
             p.W_h for p in self.partitions.values()
             if p.status in (WorkerStatus.ACTIVE, WorkerStatus.STALE)
@@ -134,6 +151,7 @@ class HeuristicAggregator:
         self._watermark_lag_s = time.time() - self.W_global_h
 
     def broadcast(self) -> dict:
+        """Hàm `broadcast` thực hiện phần xử lý liên quan đến broadcast của `HeuristicAggregator`."""
         return {
             "W_global_h": self.W_global_h,
             "timestamp": time.time(),
@@ -147,10 +165,15 @@ class HeuristicAggregator:
         }
 
     def failover(self) -> None:
-        """Simulate failover: standby becomes active."""
+        """Hàm `failover` thực hiện phần xử lý liên quan đến failover của `HeuristicAggregator`.
+        
+        Ghi chú gốc:
+        Simulate failover: standby becomes active.
+        """
         self._is_active = True
 
     def save_state(self) -> None:
+        """Lưu dữ liệu/trạng thái `state` để dùng lại sau."""
         state = {
             "W_global_h": self.W_global_h,
             "partitions": {
@@ -188,6 +211,7 @@ class HeuristicAggregator:
 
     def load_state(self) -> bool:
         # If RocksDB is available, state was already restored in constructor
+        """Nạp dữ liệu/trạng thái `load state` từ lưu trữ hoặc cấu hình."""
         if self._store is not None:
             return True
 
@@ -210,4 +234,5 @@ class HeuristicAggregator:
 
     @property
     def is_active(self) -> bool:
+        """Kiểm tra điều kiện `is active` và trả về boolean."""
         return self._is_active

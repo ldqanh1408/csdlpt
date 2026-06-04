@@ -1,0 +1,15 @@
+%% Domain 1 - Data Ingestion (Ingestor -> Kafka -> Worker -> Output)
+%% Render: mmdc -i domain1_data_ingestion.mmd -o domain1.svg
+flowchart LR
+    CSV[("CSV dataset")]
+    ING["Ingestor<br/>gán T_event - hash(host) mod 12"]
+    KAF["Kafka - topic events<br/>12 partition - RF=3"]
+    WK["Worker N0-N3<br/>Bounded Min-Heap (sắp xếp theo event_time)"]
+    RES["topic strict_results"]
+    AUD["Critical Audit Sink (Hố thu kiểm toán quan trọng)<br/>topic audit_results"]
+
+    CSV -->|"đọc CSV"| ING
+    ING -->|"produce: LogEvent + Punctuation(T_commit)<br/>Empty Punctuation 1 giây khi rảnh (idle) (chỉ Strict)"| KAF
+    KAF -->|"poll (pull) - backpressure pause/resume"| WK
+    WK -->|"window_end <= W - idempotent window_id"| RES
+    WK -->|"nhân bản song song"| AUD

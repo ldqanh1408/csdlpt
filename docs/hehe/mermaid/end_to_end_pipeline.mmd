@@ -1,0 +1,23 @@
+%% Xâu chuỗi 8 mục: một event đi xuyên hệ thống từ đầu đến cuối
+flowchart TB
+    ING["Ingestor - gán event-time, phát Punctuation (mục 1)"]
+    K["Kafka 12 partition (mục 4)"]
+    subgraph WK["Worker - mỗi partition có 1 engine (mục 3)"]
+        PQ["Bounded PQ - sắp xếp theo event-time (mục 4)"]
+        ENG["Engine - gom nhóm cửa sổ (window) + watermark cục bộ (mục 1/2)"]
+        PQ -->|"drain (luồng xử lý)"| ENG
+    end
+    CO["Coordinator/Raft - Strict (mục 6)"]
+    AG["Aggregator - Heuristic (mục 6)"]
+    OUT["Đóng cửa sổ (window) -> kết quả / DLQ (mục 1/2)"]
+    ST[("Tiered Storage 3 tầng (mục 5)")]
+
+    ING -->|"event + token"| K
+    K -->|"poll (luồng nạp)"| PQ
+    ENG -->|"LW_i - kênh điều khiển (control) (mục 7)"| CO
+    ENG -->|"W_h - kênh điều khiển (control) (mục 7)"| AG
+    CO -->|"W_global"| ENG
+    AG -->|"W_global_h"| ENG
+    ENG -->|"đóng cửa sổ -> phát kết quả"| OUT
+    ENG -.->|"checkpoint / eviction (mục 5)"| ST
+    ST -.->|"failover / failback (mục 8)"| WK

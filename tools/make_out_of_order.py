@@ -1,21 +1,8 @@
 #!/usr/bin/env python3
-"""Generate a dataset with CONTROLLED out-of-order lateness for the
-Completeness-vs-Wait-Time study (topic #112).
+"""
+Tạo dataset có out-of-order/lateness được kiểm soát.
 
-The raw web log is (mostly) time-sorted, so ingested in file order it shows almost
-no lateness and strict completeness stays ~100% at every wait time — a flat curve.
-To exercise the watermark trade-off we inject a known lateness distribution:
-
-  - keep each row's event-time (`time` column) unchanged,
-  - give a fraction `p_late` of rows an arrival delay L ~ Uniform(0, max_late_s),
-  - re-sort rows by (event_time + L) → that becomes the ARRIVAL (file) order.
-
-An event then arrives "late" for wait δ roughly when L > δ, so sweeping δ from 0 to
-max_late_s yields completeness rising from ~(1 - p_late) toward 100%.
-
-Usage:
-    python tools/make_out_of_order.py --rows 150000 --p-late 0.30 --max-late-s 20 \
-        --out dataset/oo_sample.csv
+Script đọc CSV engine schema, thêm độ trễ nhân tạo vào cột `arrival` theo phân phối đã chọn và ghi file mới để test watermark.
 """
 import argparse
 import csv
@@ -27,6 +14,7 @@ SRC = ROOT / "dataset" / "nyc_taxi_events_full.csv"
 
 
 def main():
+    """Điểm vào CLI của script, đọc tham số và điều phối các bước xử lý."""
     ap = argparse.ArgumentParser()
     ap.add_argument("--rows", type=int, default=150000)
     ap.add_argument("--p-late", type=float, default=0.30, help="fraction of rows that arrive late")

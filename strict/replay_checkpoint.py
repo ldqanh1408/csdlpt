@@ -1,7 +1,7 @@
-"""Replay Sub-Checkpointing — progress tracking during recovery replay.
+"""
+Theo dõi sub-checkpoint trong quá trình replay phục hồi.
 
-Spec §8.7: Periodic sub-checkpoints during replay catch-up allow resuming
-from interruption mid-replay.
+Module lưu tiến độ replay theo partition/batch để khi recovery bị gián đoạn có thể tiếp tục từ mốc gần nhất thay vì đọc lại toàn bộ dữ liệu.
 """
 
 import logging
@@ -13,6 +13,7 @@ logger = logging.getLogger("replay_checkpoint")
 
 @dataclass
 class ReplayCheckpoint:
+    """Lớp `ReplayCheckpoint` gom dữ liệu và hành vi liên quan đến ReplayCheckpoint."""
     partition_id: int
     start_offset: int = 0
     current_offset: int = 0
@@ -23,19 +24,23 @@ class ReplayCheckpoint:
 
     @property
     def progress_pct(self) -> float:
+        """Hàm `progress_pct` thực hiện phần xử lý liên quan đến progress pct của `ReplayCheckpoint`."""
         if self.total_to_replay <= 0:
             return 0.0
         return self.current_offset / self.total_to_replay
 
     @property
     def is_complete(self) -> bool:
+        """Kiểm tra điều kiện `is complete` và trả về boolean."""
         return self.current_offset >= self.total_to_replay > 0
 
     @property
     def is_replay(self) -> bool:
+        """Kiểm tra điều kiện `is replay` và trả về boolean."""
         return self.is_replay_checkpoint
 
     def to_dict(self) -> dict:
+        """Hàm `to_dict` thực hiện phần xử lý liên quan đến to dict của `ReplayCheckpoint`."""
         return {
             "partition_id": self.partition_id,
             "start_offset": self.start_offset,
@@ -53,12 +58,17 @@ class ReplayCheckpoint:
 
 
 class ReplayCheckpointManager:
-    """Manages periodic sub-checkpoints during replay catch-up."""
+    """Lớp `ReplayCheckpointManager` quản lý trạng thái và thao tác nghiệp vụ tương ứng.
+    
+    Ghi chú gốc:
+    Manages periodic sub-checkpoints during replay catch-up.
+    """
 
     CHECKPOINT_INTERVAL_EVENTS = 1000
 
     def __init__(self, store=None, db_path: str = None, checkpoint_interval: int = None):
         # db_path: if provided, open a RocksStore for durable checkpoint persistence
+        """Khởi tạo đối tượng của `ReplayCheckpointManager` và thiết lập trạng thái ban đầu."""
         if store is None and db_path is not None:
             try:
                 from common.rocks_store import RocksStore
@@ -75,10 +85,13 @@ class ReplayCheckpointManager:
 
     def detect_replay_mode(self, event, watermark: float = float("-inf"),
                            delta_base_s: float = 10.0) -> bool:
-        """Return True if the event appears to be a replay (catch-up) event.
-
-        Accepts either a LogEvent (uses event.event_time) or a raw float timestamp.
-        Delegates to the module-level detect_replay_mode() function.
+        """Hàm `detect_replay_mode` thực hiện phần xử lý liên quan đến detect replay mode của `ReplayCheckpointManager`.
+        
+        Ghi chú gốc:
+        Return True if the event appears to be a replay (catch-up) event.
+        
+                Accepts either a LogEvent (uses event.event_time) or a raw float timestamp.
+                Delegates to the module-level detect_replay_mode() function.
         """
         if hasattr(event, "event_time"):
             event_time = event.event_time
@@ -87,6 +100,7 @@ class ReplayCheckpointManager:
         return detect_replay_mode(event_time, watermark, delta_base_s)
 
     def start_replay(self, partition_id: int, start_offset: int, total_to_replay: int):
+        """Khởi động tiến trình, server hoặc vòng nền `start replay`."""
         ckpt = ReplayCheckpoint(partition_id=partition_id, start_offset=start_offset,
                                 current_offset=start_offset, total_to_replay=total_to_replay,
                                 is_replay_checkpoint=True,
@@ -95,6 +109,7 @@ class ReplayCheckpointManager:
         logger.info("Replay started: p=%d, offset=%d, total=%d", partition_id, start_offset, total_to_replay)
 
     def record_event(self, partition_id: int) -> ReplayCheckpoint | None:
+        """Hàm `record_event` thực hiện phần xử lý liên quan đến record event của `ReplayCheckpointManager`."""
         ckpt = self._checkpoints.get(partition_id)
         if ckpt is None:
             return None
@@ -109,6 +124,7 @@ class ReplayCheckpointManager:
         return None
 
     def load_checkpoint(self, partition_id: int) -> ReplayCheckpoint | None:
+        """Nạp dữ liệu/trạng thái `load checkpoint` từ lưu trữ hoặc cấu hình."""
         if self._store is None:
             return None
         ckpt = self._store.get(f"replay:ckpt:{partition_id}")
@@ -120,6 +136,7 @@ class ReplayCheckpointManager:
         return ckpt
 
     def finish_replay(self, partition_id: int):
+        """Hàm `finish_replay` thực hiện phần xử lý liên quan đến finish replay của `ReplayCheckpointManager`."""
         ckpt = self._checkpoints.pop(partition_id, None)
         if ckpt is not None and self._store is not None:
             self._store.delete(f"replay:ckpt:{partition_id}")
@@ -127,15 +144,21 @@ class ReplayCheckpointManager:
                         ckpt.current_offset - ckpt.start_offset)
 
     def is_replaying(self, partition_id: int) -> bool:
+        """Kiểm tra điều kiện `is replaying` và trả về boolean."""
         ckpt = self._checkpoints.get(partition_id)
         return ckpt is not None and not ckpt.is_complete
 
     def summary(self) -> dict:
+        """Tạo bản tóm tắt trạng thái `summary` để trả về API hoặc báo cáo."""
         return {str(pid): ckpt.to_dict() for pid, ckpt in self._checkpoints.items()}
 
 
 def detect_replay_mode(event_time: float, watermark: float, delta_base_s: float) -> bool:
-    """Event is replay if event_time is more than 2*delta_base behind watermark."""
+    """Hàm `detect_replay_mode` thực hiện phần xử lý liên quan đến detect replay mode.
+    
+    Ghi chú gốc:
+    Event is replay if event_time is more than 2*delta_base behind watermark.
+    """
     if watermark == float("-inf"):
         return False
     return (watermark - event_time) > (2 * delta_base_s)

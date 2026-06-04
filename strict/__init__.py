@@ -1,4 +1,8 @@
-"""Strict Watermark path - 0% data loss guarantee."""
+"""
+Package triển khai nhánh Strict Watermark.
+
+Nhánh này ưu tiên không mất dữ liệu bằng punctuation, global watermark qua coordinator, checkpoint, exactly-once output, failover/failback và disaster recovery.
+"""
 
 from strict.engine import StrictWatermarkEngine, WindowState
 from strict.coordinator import StrictCoordinator, PartitionInfo

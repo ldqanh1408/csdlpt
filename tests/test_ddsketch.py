@@ -1,8 +1,7 @@
-"""Tests for DDSketch and SlidingWindowDDSketch (official ddsketch library backed).
+"""
+Test DDSketch và SlidingWindowDDSketch.
 
-These tests exercise the compatibility wrapper that delegates to the
-official ``ddsketch`` v3.0.1 library.  The wrapper presents the same
-legacy API so existing callers require no changes.
+Kiểm tra thêm mẫu, quantile, merge, giới hạn bucket, sliding window và sai số ước lượng.
 """
 
 import math
@@ -11,18 +10,22 @@ from local_ddsketch import DDSketch, SlidingWindowDDSketch
 
 
 class TestDDSketch:
+    """Lớp `TestDDSketch` gom các ca kiểm thử liên quan đến DDSketch."""
     def test_empty_sketch(self):
+        """Kiểm thử hành vi `test empty sketch` trong phạm vi module hiện tại."""
         s = DDSketch()
         assert s.total_count == 0
         assert s.quantile(0.5) == 0.0
 
     def test_single_value(self):
+        """Kiểm thử hành vi `test single value` trong phạm vi module hiện tại."""
         s = DDSketch()
         s.add(1.0)
         assert s.total_count == 1
         assert s.quantile(0.5) == pytest.approx(1.0, rel=0.02)
 
     def test_relative_error_guarantee(self):
+        """Kiểm thử hành vi `test relative error guarantee` trong phạm vi module hiện tại."""
         alpha = 0.01
         s = DDSketch(alpha=alpha, min_value=0.01, max_value=100.0)
         values = [0.05, 0.1, 0.5, 1.0, 2.0, 5.0, 10.0, 20.0, 50.0]
@@ -39,6 +42,7 @@ class TestDDSketch:
             )
 
     def test_merge_preserves_count(self):
+        """Kiểm thử hành vi `test merge preserves count` trong phạm vi module hiện tại."""
         s1, s2 = DDSketch(), DDSketch()
         for v in [0.1, 0.5, 1.0] * 50:
             s1.add(v)
@@ -48,6 +52,7 @@ class TestDDSketch:
         assert merged.total_count == 300
 
     def test_merge_is_commutative(self):
+        """Kiểm thử hành vi `test merge is commutative` trong phạm vi module hiện tại."""
         s1, s2 = DDSketch(), DDSketch()
         for v in [0.1, 2.0, 5.0] * 100:
             s1.add(v)
@@ -59,12 +64,14 @@ class TestDDSketch:
             assert m12.quantile(q) == pytest.approx(m21.quantile(q), rel=1e-6)
 
     def test_negative_values_skipped(self):
+        """Kiểm thử hành vi `test negative values skipped` trong phạm vi module hiện tại."""
         s = DDSketch()
         s.add(-1.0)
         s.add(-0.5)
         assert s.total_count == 0
 
     def test_value_capping(self):
+        """Kiểm thử hành vi `test value capping` trong phạm vi module hiện tại."""
         s = DDSketch(min_value=1e-3, max_value=3600.0)
         s.add(1e-6)   # below min -> capped
         s.add(7200.0)  # above max -> capped
@@ -77,6 +84,7 @@ class TestDDSketch:
         assert p50 <= 3600.0
 
     def test_serialization_roundtrip(self):
+        """Kiểm thử hành vi `test serialization roundtrip` trong phạm vi module hiện tại."""
         s = DDSketch(alpha=0.01)
         for v in [0.001, 0.1, 1.0, 10.0, 100.0] * 50:
             s.add(v)
@@ -87,12 +95,15 @@ class TestDDSketch:
             assert s2.quantile(q) == pytest.approx(s.quantile(q), rel=1e-6)
 
     def test_many_values_still_accurate(self):
-        """Sketch should remain accurate after many insertions.
-
-        The official library manages bin limits automatically based on
-        *relative_accuracy*.  This test verifies that even with a large
-        number of distinct values the quantile estimates stay within the
-        relative error bound.
+        """Kiểm thử hành vi `test many values still accurate` trong phạm vi module hiện tại.
+        
+        Ghi chú gốc:
+        Sketch should remain accurate after many insertions.
+        
+                The official library manages bin limits automatically based on
+                *relative_accuracy*.  This test verifies that even with a large
+                number of distinct values the quantile estimates stay within the
+                relative error bound.
         """
         alpha = 0.01
         s = DDSketch(alpha=alpha, min_value=1e-3, max_value=3600.0)
@@ -108,6 +119,7 @@ class TestDDSketch:
         assert s.total_count == 1000
 
     def test_quantile_monotonicity(self):
+        """Kiểm thử hành vi `test quantile monotonicity` trong phạm vi module hiện tại."""
         s = DDSketch()
         for v in [0.1, 0.2, 0.5, 1.0, 2.0, 5.0, 10.0] * 200:
             s.add(v)
@@ -119,7 +131,9 @@ class TestDDSketch:
 
 
 class TestSlidingWindowDDSketch:
+    """Lớp `TestSlidingWindowDDSketch` gom các ca kiểm thử liên quan đến SlidingWindowDDSketch."""
     def test_add_and_query(self):
+        """Kiểm thử hành vi `test add and query` trong phạm vi module hiện tại."""
         sw = SlidingWindowDDSketch(window_seconds=60, sub_sketch_granularity=1)
         for i in range(100):
             sw.add(0.5 + i * 0.01, timestamp=100.0 + i * 0.1)
@@ -128,12 +142,14 @@ class TestSlidingWindowDDSketch:
         assert 0.5 <= p50 <= 2.0
 
     def test_window_pruning(self):
+        """Kiểm thử hành vi `test window pruning` trong phạm vi module hiện tại."""
         sw = SlidingWindowDDSketch(window_seconds=10, sub_sketch_granularity=1)
         sw.add(1.0, timestamp=100.0)
         sw.add(2.0, timestamp=120.0)  # 20s later, should prune old
         assert sw.total_count == 1
 
     def test_serialization(self):
+        """Kiểm thử hành vi `test serialization` trong phạm vi module hiện tại."""
         sw = SlidingWindowDDSketch(window_seconds=30)
         for i in range(50):
             sw.add(i * 0.01, timestamp=100.0 + i * 0.1)
@@ -143,6 +159,7 @@ class TestSlidingWindowDDSketch:
         assert sw2.quantile(0.5) == pytest.approx(sw.quantile(0.5), rel=0.1)
 
     def test_empty_sw_quantile(self):
+        """Kiểm thử hành vi `test empty sw quantile` trong phạm vi module hiện tại."""
         sw = SlidingWindowDDSketch()
         assert sw.quantile(0.5) == 0.0
         assert sw.total_count == 0

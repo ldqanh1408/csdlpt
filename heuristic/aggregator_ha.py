@@ -1,4 +1,8 @@
-"""Aggregator HA — Active-Standby failover via file lock (Spec §9.4)."""
+"""
+Cơ chế High Availability cho Heuristic Aggregator bằng file lock.
+
+Một process giữ vai trò primary, process còn lại standby; khi primary mất lock hoặc dừng, standby takeover để tiếp tục nhận watermark từ worker.
+"""
 
 import json
 import logging
@@ -25,18 +29,23 @@ logger = logging.getLogger("aggregator_ha")
 
 
 class FileLockLeader:
-    """Leader election via exclusive lock on a shared file.
-
-    Uses fcntl.flock on POSIX systems and msvcrt.locking on Windows.
-    Falls back to a best-effort O_CREAT|O_EXCL approach if neither is available.
+    """Lớp `FileLockLeader` gom dữ liệu và hành vi liên quan đến FileLockLeader.
+    
+    Ghi chú gốc:
+    Leader election via exclusive lock on a shared file.
+    
+        Uses fcntl.flock on POSIX systems and msvcrt.locking on Windows.
+        Falls back to a best-effort O_CREAT|O_EXCL approach if neither is available.
     """
 
     def __init__(self, lock_path: str = "/tmp/aggregator.lock"):
+        """Khởi tạo đối tượng của `FileLockLeader` và thiết lập trạng thái ban đầu."""
         self.lock_path = lock_path
         self._lock_file = None
         self._active = False
 
     def try_acquire(self) -> bool:
+        """Hàm `try_acquire` thực hiện phần xử lý liên quan đến try acquire của `FileLockLeader`."""
         try:
             parent = os.path.dirname(self.lock_path)
             if parent:
@@ -64,6 +73,7 @@ class FileLockLeader:
             return False
 
     def release(self):
+        """Hàm `release` thực hiện phần xử lý liên quan đến release của `FileLockLeader`."""
         if self._lock_file:
             try:
                 if _HAS_FCNTL:
@@ -82,18 +92,23 @@ class FileLockLeader:
 
     @property
     def is_active(self) -> bool:
+        """Kiểm tra điều kiện `is active` và trả về boolean."""
         return self._active
 
 
 class AggregatorHA:
-    """Wraps HeuristicAggregator with Active-Standby HA.
-
-    Active holds file lock + writes heartbeat every 1s.
-    Standby monitors heartbeat file, takes over if active stale > 3s.
+    """Lớp `AggregatorHA` gom dữ liệu và hành vi liên quan đến AggregatorHA.
+    
+    Ghi chú gốc:
+    Wraps HeuristicAggregator with Active-Standby HA.
+    
+        Active holds file lock + writes heartbeat every 1s.
+        Standby monitors heartbeat file, takes over if active stale > 3s.
     """
 
     def __init__(self, aggregator: HeuristicAggregator, lock_path: str = "/tmp/aggregator.lock",
                  heartbeat_path: str = "/tmp/aggregator-heartbeat", leader_lock=None):
+        """Khởi tạo đối tượng của `AggregatorHA` và thiết lập trạng thái ban đầu."""
         self.aggregator = aggregator
         self.heartbeat_path = heartbeat_path
         self._stop = threading.Event()
@@ -114,6 +129,7 @@ class AggregatorHA:
                 self._leader = FileLockLeader(lock_path)
 
     def start(self):
+        """Hàm `start` thực hiện phần xử lý liên quan đến start của `AggregatorHA`."""
         if self._leader.try_acquire():
             self._active = True
             self.aggregator._is_active = True
@@ -130,7 +146,9 @@ class AggregatorHA:
             self._start_heartbeat_monitor()
 
     def _start_heartbeat_writer(self):
+        """Khởi động tiến trình, server hoặc vòng nền `start heartbeat writer`."""
         def _write():
+            """Hàm `_write` thực hiện phần xử lý liên quan đến write của `AggregatorHA`."""
             while not self._stop.is_set() and self._active:
                 try:
                     os.makedirs(os.path.dirname(self.heartbeat_path) or "/tmp", exist_ok=True)
@@ -143,7 +161,9 @@ class AggregatorHA:
         threading.Thread(target=_write, daemon=True).start()
 
     def _start_heartbeat_monitor(self):
+        """Khởi động tiến trình, server hoặc vòng nền `start heartbeat monitor`."""
         def _monitor():
+            """Hàm `_monitor` thực hiện phần xử lý liên quan đến monitor của `AggregatorHA`."""
             while not self._stop.is_set():
                 try:
                     # The standby must take over whenever it can no longer see a
@@ -170,6 +190,7 @@ class AggregatorHA:
         threading.Thread(target=_monitor, daemon=True).start()
 
     def _attempt_takeover(self):
+        """Hàm `_attempt_takeover` thực hiện phần xử lý liên quan đến attempt takeover của `AggregatorHA`."""
         if self._leader.try_acquire():
             self._active = True
             self.aggregator._is_active = True
@@ -179,11 +200,13 @@ class AggregatorHA:
             self._start_heartbeat_writer()
 
     def broadcast(self) -> dict:
+        """Hàm `broadcast` thực hiện phần xử lý liên quan đến broadcast của `AggregatorHA`."""
         r = self.aggregator.broadcast()
         r["ha_active"] = self._active
         r["ha_failover_count"] = self._failover_count
         return r
 
     def shutdown(self):
+        """Hàm `shutdown` thực hiện phần xử lý liên quan đến shutdown của `AggregatorHA`."""
         self._stop.set()
         self._leader.release()

@@ -1,4 +1,8 @@
-"""Strict Watermark Engine - 0% data loss via punctuation-based watermarks."""
+"""
+Engine Strict Watermark chạy theo từng partition và cam kết 0% mất dữ liệu.
+
+Engine nhận LogEvent/PunctuationToken, cập nhật local watermark, gom event vào tumbling window, đóng cửa sổ khi an toàn, checkpoint vào RocksDB/JSON và hỗ trợ tiered eviction.
+"""
 
 import dataclasses
 import logging
@@ -22,7 +26,7 @@ from common.metrics import HighResTimer, SystemMetrics
 from common.rocks_store import RocksStore
 
 
-# RocksDB key prefixes
+# Tiền tố key trong RocksDB cho open window, closed window, seen-id và metadata.
 _PFX_OPEN = "ow:"
 _PFX_CLOSED = "cw:"
 _PFX_SEEN = "si:"
@@ -31,6 +35,7 @@ _PFX_META = "meta:"
 
 @dataclass
 class WindowState:
+    """Lớp `WindowState` gom dữ liệu và hành vi liên quan đến WindowState."""
     count: int = 0
     status_500: int = 0
     eviction: EvictionState = EvictionState.CLOSED
@@ -38,6 +43,7 @@ class WindowState:
 
 class StrictWatermarkEngine:
 
+    """Lớp `StrictWatermarkEngine` thực thi logic xử lý chính của engine."""
     def __init__(
         self,
         window_size_s: float = 5.0,
@@ -50,6 +56,7 @@ class StrictWatermarkEngine:
         diff_eviction=None,
         store: Optional[RocksStore] = None,
     ):
+        """Khởi tạo đối tượng của `StrictWatermarkEngine` và thiết lập trạng thái ban đầu."""
         self.tumbling = TumblingWindow(window_size_s)
         self.delta_base = delta_base_s
         self.max_queue = max_queue
@@ -58,7 +65,7 @@ class StrictWatermarkEngine:
         self.output_manager = output_manager
         self.diff_eviction = diff_eviction
 
-        # Partition identity (default 0, no Raft term tracking)
+        # Định danh partition và Raft term; mặc định partition 0 khi chạy unit test đơn giản.
         self.partition_id: int = 0
         self.raft_term: int = 0
 
@@ -67,7 +74,7 @@ class StrictWatermarkEngine:
         self.max_event_time: float = float("-inf")
         self.watermark: float = float("-inf")
 
-        # Kafka offset tracking per partition (spec §6.3)
+        # Theo dõi offset Kafka để checkpoint/replay đúng vị trí.
         self.kafka_committed_offset: int = 0
         self.kafka_current_offset: int = 0
         self.punctuation_total: int = 0
@@ -75,11 +82,11 @@ class StrictWatermarkEngine:
         self.open_windows: dict[float, WindowState] = defaultdict(WindowState)
         self.closed_windows: dict[float, WindowResult] = {}
 
-        # Dedup with TTL (60s window per spec §6.5)
+        # Chống trùng event_id bằng TTL 60s để giới hạn bộ nhớ.
         self._seen_ids_ttl: dict[str, float] = {}
         self._dedup_ttl_s: float = 60.0
 
-        # Time-based checkpoint (spec §6.3: every 10s)
+        # Checkpoint theo thời gian, mặc định mỗi 10 giây.
         self._last_checkpoint_time: float = time.time()
         self._checkpoint_interval_s: float = 10.0
         self._checkpoint_lock = threading.RLock()
@@ -87,11 +94,9 @@ class StrictWatermarkEngine:
         self.metrics = SystemMetrics()
         self.proc_latencies_ns: list[float] = []
 
-        # RocksDB persistent storage (None = in-memory-only, backward compatible).
-        # §6.4 feature flag: ENABLE_TWO_PHASE_EVICTION gates the on-restart
-        # eviction-state recovery sweep (CLOSED/UPLOADING/UPLOADED check). When
-        # disabled, restart only restores in-memory state; closed windows
-        # remain in whatever state they were persisted in.
+        # Lưu trữ bền vững bằng RocksDB. Nếu không truyền store/db_path thì engine
+        # chạy in-memory để tương thích test cũ. Flag ENABLE_TWO_PHASE_EVICTION
+        # quyết định có quét phục hồi trạng thái eviction khi restart hay không.
         self._store: Optional[RocksStore] = store
         if self._store is None and db_path is not None:
             self._store = RocksStore(db_path)
@@ -105,8 +110,8 @@ class StrictWatermarkEngine:
             if has_metadata:
                 self._restore_from_store()
             else:
-                # No RocksDB metadata (e.g. fresh database directory because of takeover/rebalance).
-                # Load fallback from checkpoint.json.
+                # Không có metadata RocksDB (ví dụ thư mục mới sau takeover/rebalance),
+                # nên thử khôi phục fallback từ checkpoint.json.
                 path = os.path.join(checkpoint_dir, "checkpoint.json")
                 if os.path.exists(path):
                     logger.info("StrictWatermarkEngine: No RocksDB metadata found. Falling back to JSON checkpoint at %s", path)
@@ -121,7 +126,7 @@ class StrictWatermarkEngine:
                         self.kafka_current_offset = self.kafka_committed_offset
                         self.partition_id = snap.get("partition_id", 0)
                         
-                        # Open windows
+                        # Khôi phục các cửa sổ đang mở.
                         open_wins = snap.get("open_windows", {})
                         for k, v in open_wins.items():
                             ws = float(k)
@@ -132,7 +137,7 @@ class StrictWatermarkEngine:
                             self.open_windows[ws] = ws_state
                             self._persist_open_window(ws)
                         
-                        # Seen IDs
+                        # Khôi phục tập event_id gần đây để tránh phát trùng sau restart.
                         seen_ids = snap.get("seen_ids", [])
                         ckpt_time = snap.get("last_checkpoint_time", time.time())
                         for eid in seen_ids:
@@ -141,7 +146,7 @@ class StrictWatermarkEngine:
                             
                         self._last_checkpoint_time = ckpt_time
                         
-                        # Save metadata to store
+                        # Ghi metadata vào RocksDB sau khi restore fallback thành công.
                         meta = {
                             "last_T_commit": self.last_T_commit,
                             "local_watermark": self.local_watermark,
@@ -169,7 +174,7 @@ class StrictWatermarkEngine:
             self.checkpoint_dir = checkpoint_dir
             os.makedirs(checkpoint_dir, exist_ok=True)
 
-        # Restore emitted set for duplicate prevention after restart
+        # Khôi phục tập window đã phát để chống phát trùng sau restart.
         if self.output_manager is not None:
             emitted_path = os.path.join(self.checkpoint_dir, "emitted.json")
             self.output_manager.load_emitted(emitted_path)
@@ -179,6 +184,7 @@ class StrictWatermarkEngine:
     # ------------------------------------------------------------------
 
     def _persist_open_window(self, ws: float) -> None:
+        """Ghi bền vững trạng thái `persist open window` xuống storage."""
         if self._store is None:
             return
         st = self.open_windows.get(ws)
@@ -186,12 +192,14 @@ class StrictWatermarkEngine:
             self._store.put(f"{_PFX_OPEN}{ws}", st)
 
     def _delete_open_window(self, ws: float) -> None:
+        """Xóa dữ liệu `delete open window` khỏi bộ nhớ hoặc storage."""
         if self._store is None:
             return
         self._store.delete(f"{_PFX_OPEN}{ws}")
 
     def _persist_closed_window(self, ws: float, result: WindowResult,
                                 eviction: EvictionState = EvictionState.UPLOADING) -> None:
+        """Ghi bền vững trạng thái `persist closed window` xuống storage."""
         if self._store is None:
             return
         self._store.put(f"{_PFX_CLOSED}{ws}", {
@@ -200,16 +208,20 @@ class StrictWatermarkEngine:
         })
 
     def _purge_window_from_store(self, ws: float) -> None:
-        """Delete a closed window entry from RocksDB after successful upload and emit.
-
-        Called once the window has been uploaded to tiered storage (MinIO) and
-        emitted downstream. After purging, only the tier-3 copy remains.
+        """Loại bỏ dữ liệu `purge window from store` đã hết hạn hoặc không còn cần thiết.
+        
+        Ghi chú gốc:
+        Delete a closed window entry from RocksDB after successful upload and emit.
+        
+                Called once the window has been uploaded to tiered storage (MinIO) and
+                emitted downstream. After purging, only the tier-3 copy remains.
         """
         if self._store is None:
             return
         self._store.delete(f"{_PFX_CLOSED}{ws}")
 
     def _persist_seen_id(self, event_id: str) -> None:
+        """Ghi bền vững trạng thái `persist seen id` xuống storage."""
         if self._store is None:
             return
         ts = self._seen_ids_ttl.get(event_id)
@@ -217,12 +229,17 @@ class StrictWatermarkEngine:
             self._store.put(f"{_PFX_SEEN}{event_id}", ts)
 
     def _delete_seen_id(self, event_id: str) -> None:
+        """Xóa dữ liệu `delete seen id` khỏi bộ nhớ hoặc storage."""
         if self._store is None:
             return
         self._store.delete(f"{_PFX_SEEN}{event_id}")
 
     def _restore_from_store(self) -> None:
-        """Populate in-memory state from RocksDB on startup."""
+        """Khôi phục trạng thái `restore from store` từ checkpoint hoặc storage.
+        
+        Ghi chú gốc:
+        Populate in-memory state from RocksDB on startup.
+        """
         if self._store is None:
             return
 
@@ -259,17 +276,20 @@ class StrictWatermarkEngine:
             self._last_checkpoint_time = meta.get("last_checkpoint_time", time.time())
 
     def _recover_eviction_states(self) -> None:
-        """Recover eviction state for closed windows after a crash.
-
-        For each closed window in RocksDB:
-          - If UPLOADING: check MinIO for the window file
-            - If file exists: advance to UPLOADED (upload completed before crash)
-            - If file missing: re-upload
-          - If UPLOADED: verify file exists, re-upload if missing
-          - If UPLOADED and no tiered_storage: no-op (already durable)
-
-        Backward-compat: old-format closed windows (raw WindowResult without
-        eviction field) are treated as UPLOADING and recovered.
+        """Hàm `_recover_eviction_states` thực hiện phần xử lý liên quan đến recover eviction states của `StrictWatermarkEngine`.
+        
+        Ghi chú gốc:
+        Recover eviction state for closed windows after a crash.
+        
+                For each closed window in RocksDB:
+                  - If UPLOADING: check MinIO for the window file
+                    - If file exists: advance to UPLOADED (upload completed before crash)
+                    - If file missing: re-upload
+                  - If UPLOADED: verify file exists, re-upload if missing
+                  - If UPLOADED and no tiered_storage: no-op (already durable)
+        
+                Backward-compat: old-format closed windows (raw WindowResult without
+                eviction field) are treated as UPLOADING and recovered.
         """
         if self._store is None:
             return
@@ -336,7 +356,11 @@ class StrictWatermarkEngine:
                         recovered_count, reupload_count)
 
     def _check_tiered_window_exists(self, window_id: str, partition_id: int) -> bool:
-        """Check if a window file exists in tiered storage (MinIO)."""
+        """Kiểm tra điều kiện `check tiered window exists` và trả về kết quả đánh giá.
+        
+        Ghi chú gốc:
+        Check if a window file exists in tiered storage (MinIO).
+        """
         if self.tiered_storage is None:
             return False
         try:
@@ -346,6 +370,7 @@ class StrictWatermarkEngine:
             return False
 
     def on_punctuation(self, token: PunctuationToken) -> None:
+        """Hàm `on_punctuation` thực hiện phần xử lý liên quan đến on punctuation của `StrictWatermarkEngine`."""
         self.punctuation_total += 1
         if token.T_commit > self.last_T_commit:
             self.last_T_commit = token.T_commit
@@ -355,13 +380,17 @@ class StrictWatermarkEngine:
             self.metrics.non_monotonic_punctuation += 1
 
     def _advance_watermark(self) -> None:
+        """Hàm `_advance_watermark` thực hiện phần xử lý liên quan đến advance watermark của `StrictWatermarkEngine`.
+        """
         self.watermark = self.local_watermark
         to_close = [
             w for w in list(self.open_windows)
             if w + self.tumbling.size <= self.watermark
         ]
         for w in sorted(to_close):
-            st = self.open_windows.pop(w)
+            st = self.open_windows.pop(w, None)
+            if st is None:
+                continue
             self._delete_open_window(w)
             st.eviction = EvictionState.UPLOADING
             result = WindowResult(
@@ -389,21 +418,24 @@ class StrictWatermarkEngine:
             st.eviction = EvictionState.PURGED
 
     def _purge_seen_ids(self) -> None:
-        """Remove dedup entries older than TTL (60s spec §6.5).
-
-        Uses watermark-based cutoff (W_global - dedupe_window) per the spec,
-        NOT wall clock. Stored values are T_event (the log's event_time), so
-        entries are purged when T_event < W_global - 60s — i.e. only after the
-        global watermark has safely passed the event's time + the dedup window.
-
-        In data-driven mode with -inf watermark during ingestion, falls back to
-        max_event_time as the reference point for TTL calculation, preventing
-        unbounded memory growth from the seen-IDs cache.
-
-        RocksDB bulk cleanup uses efficient clear_prefix every 5 minutes
-        (replacing the per-key-delete sweep for better compaction performance).
-        The in-memory dict is the authoritative source; RocksDB is for crash
-        recovery only, so bulk clearing is safe.
+        """Loại bỏ dữ liệu `purge seen ids` đã hết hạn hoặc không còn cần thiết.
+        
+        Ghi chú gốc:
+        Remove dedup entries older than TTL (60s spec §6.5).
+        
+                Uses watermark-based cutoff (W_global - dedupe_window) per the spec,
+                NOT wall clock. Stored values are T_event (the log's event_time), so
+                entries are purged when T_event < W_global - 60s — i.e. only after the
+                global watermark has safely passed the event's time + the dedup window.
+        
+                In data-driven mode with -inf watermark during ingestion, falls back to
+                max_event_time as the reference point for TTL calculation, preventing
+                unbounded memory growth from the seen-IDs cache.
+        
+                RocksDB bulk cleanup uses efficient clear_prefix every 5 minutes
+                (replacing the per-key-delete sweep for better compaction performance).
+                The in-memory dict is the authoritative source; RocksDB is for crash
+                recovery only, so bulk clearing is safe.
         """
         if self.watermark == float("-inf"):
             # Data-driven mode during ingestion: watermark not yet advanced.
@@ -440,6 +472,7 @@ class StrictWatermarkEngine:
             self._store.put(f"{_PFX_SEEN}{eid}", ts)
 
     def process(self, event: LogEvent, queue_len: int = 0) -> Optional[float]:
+        """Hàm `process` thực hiện phần xử lý liên quan đến process của `StrictWatermarkEngine`."""
         t0 = HighResTimer.now_ns()
         self.metrics.total_received += 1
 
@@ -518,7 +551,11 @@ class StrictWatermarkEngine:
         return lat_ns
 
     def _list_sst_files(self, ckpt_dir: str) -> list[str]:
-        """List SST files in a RocksDB checkpoint directory."""
+        """Hàm `_list_sst_files` thực hiện phần xử lý liên quan đến list sst files của `StrictWatermarkEngine`.
+        
+        Ghi chú gốc:
+        List SST files in a RocksDB checkpoint directory.
+        """
         import glob
         sst_files = []
         for root, _dirs, files in os.walk(ckpt_dir):
@@ -528,11 +565,14 @@ class StrictWatermarkEngine:
         return sorted(sst_files)
 
     def checkpoint(self) -> None:
+        """Hàm `checkpoint` thực hiện phần xử lý liên quan đến checkpoint của `StrictWatermarkEngine`."""
         with self._checkpoint_lock:
             return self._checkpoint_impl()
 
     def _checkpoint_impl(self) -> None:
         # Purge stale dedup entries before checkpoint (spec §6.3 + §6.5)
+        """Hàm `_checkpoint_impl` thực hiện phần xử lý liên quan đến checkpoint impl của `StrictWatermarkEngine`.
+        """
         self._purge_seen_ids()
 
         # Create RocksDB checkpoint first so we can list actual SST files
@@ -613,10 +653,13 @@ class StrictWatermarkEngine:
             self.output_manager.save_emitted(emitted_path)
 
     def _rocksdb_checkpoint(self) -> Optional[str]:
-        """Create an incremental RocksDB SST checkpoint via rocksdict.Checkpoint.
-
-        Returns the checkpoint directory path on success, or None on failure.
-        JSON checkpoint is always kept as a fallback for backward compatibility.
+        """Hàm `_rocksdb_checkpoint` thực hiện phần xử lý liên quan đến rocksdb checkpoint của `StrictWatermarkEngine`.
+        
+        Ghi chú gốc:
+        Create an incremental RocksDB SST checkpoint via rocksdict.Checkpoint.
+        
+                Returns the checkpoint directory path on success, or None on failure.
+                JSON checkpoint is always kept as a fallback for backward compatibility.
         """
         if self._store is None or not self._store.is_open:
             return None
@@ -654,6 +697,7 @@ class StrictWatermarkEngine:
 
     @classmethod
     def restore(cls, checkpoint_dir: str, db_path: Optional[str] = None, **kwargs) -> "StrictWatermarkEngine":
+        """Hàm `restore` thực hiện phần xử lý liên quan đến restore của `StrictWatermarkEngine`."""
         eng = cls(checkpoint_dir=checkpoint_dir, db_path=db_path, **kwargs)
 
         # If RocksDB is available, state was already restored in constructor.
@@ -680,6 +724,7 @@ class StrictWatermarkEngine:
         return eng
 
     def flush(self) -> None:
+        """Flush dữ liệu đệm của `flush` xuống đích lưu trữ hoặc downstream."""
         for w in sorted(self.open_windows):
             st = self.open_windows[w]
             st.eviction = EvictionState.UPLOADING
@@ -714,7 +759,11 @@ class StrictWatermarkEngine:
 
     def _upload_to_tiered_storage(self, window_start: float, window_result: WindowResult,
                                    sync: bool = False) -> bool:
-        """Upload window to tiered storage. Returns True if upload succeeded."""
+        """Hàm `_upload_to_tiered_storage` thực hiện phần xử lý liên quan đến upload to tiered storage của `StrictWatermarkEngine`.
+        
+        Ghi chú gốc:
+        Upload window to tiered storage. Returns True if upload succeeded.
+        """
         if self.tiered_storage is None:
             return True
         if self.diff_eviction is not None:
@@ -733,12 +782,17 @@ class StrictWatermarkEngine:
             )
 
     def close(self) -> None:
-        """Close the RocksDB store if open."""
+        """Đóng tài nguyên `close` và giải phóng trạng thái liên quan.
+        
+        Ghi chú gốc:
+        Close the RocksDB store if open.
+        """
         if self._store is not None:
             self._store.close()
             self._store = None
 
     def summary(self) -> dict:
+        """Tạo bản tóm tắt trạng thái `summary` để trả về API hoặc báo cáo."""
         open_count = len(self.open_windows)
         closed_count = (
             self._store.count(prefix=_PFX_CLOSED)
@@ -762,6 +816,7 @@ class StrictWatermarkEngine:
             p99 = sorted_l[int(n * 0.99)] / 1000.0
 
         def _lat_us(values: list[float], percentile: float) -> float:
+            """Hàm `_lat_us` thực hiện phần xử lý liên quan đến lat us của `StrictWatermarkEngine`."""
             values = [v for v in values if v >= 0]
             if not values:
                 return 0.0

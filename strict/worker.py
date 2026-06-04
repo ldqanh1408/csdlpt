@@ -1,4 +1,8 @@
-"""Strict Worker - bounded priority queue + per-partition engine management."""
+"""
+Worker của Strict Watermark với bounded priority queue theo event-time.
+
+Worker quản lý nhiều partition engine, buffer event theo heap, phát heartbeat, xử lý backpressure, fencing token, dynamic reassignment và checkpoint/output theo partition.
+"""
 
 import heapq
 import os
@@ -8,19 +12,19 @@ import time
 from strict.engine import StrictWatermarkEngine
 from common.types import LogEvent, PunctuationToken, WorkerHeartbeat
 
-# Idleness detection: partition idle if no event for > 30.0s
+# Phát hiện partition idle nếu không có event mới quá 30 giây.
 IDLE_TIMEOUT_S = 30.0
 
-# Backpressure: reject new events when queue >= 500, resume when < 100
+# Backpressure: pause khi queue quá cao và resume khi đã rút xuống ngưỡng an toàn.
 BACKPRESSURE_MAX_QUEUE = 500
 BACKPRESSURE_RESUME_AT = 100
 
 
 class BoundedPriorityQueue:
-    """Client-side min-heap that sorts events by event_time.
-    Maxsize: 10000, max wait: 1000ms timeout before forced pop."""
+    """Heap cục bộ sắp xếp event theo event_time trước khi đưa vào engine."""
 
     def __init__(self, maxsize: int = 10000, max_wait_ms: int = 1000):
+        """Khởi tạo đối tượng của `BoundedPriorityQueue` và thiết lập trạng thái ban đầu."""
         self.maxsize = maxsize
         self.max_wait_ms = max_wait_ms
         self._buffer: list[tuple[float, int, LogEvent]] = []
@@ -28,6 +32,7 @@ class BoundedPriorityQueue:
         self._last_pop: float = time.monotonic()
 
     def push(self, event: LogEvent) -> LogEvent | None:
+        """Đưa phần tử mới vào hàng đợi/bộ đệm `push`."""
         heapq.heappush(self._buffer, (event.event_time, self._counter, event))
         self._counter += 1
         if len(self._buffer) >= self.maxsize:
@@ -35,13 +40,18 @@ class BoundedPriorityQueue:
         return None
 
     def pop_ready(self) -> LogEvent | None:
+        """Lấy phần tử tiếp theo từ hàng đợi/bộ đệm `pop ready`."""
         elapsed_ms = (time.monotonic() - self._last_pop) * 1000
         if self._buffer and elapsed_ms >= self.max_wait_ms:
             return self._pop_min()
         return None
 
     def pop_all_ready(self, batch_size: int = 200) -> list[LogEvent]:
-        """Drain up to batch_size events on every call."""
+        """Lấy phần tử tiếp theo từ hàng đợi/bộ đệm `pop all ready`.
+        
+        Ghi chú gốc:
+        Drain up to batch_size events on every call.
+        """
         result = []
         if not self._buffer:
             return result
@@ -55,6 +65,7 @@ class BoundedPriorityQueue:
         return result
 
     def _pop_min(self) -> LogEvent | None:
+        """Lấy phần tử tiếp theo từ hàng đợi/bộ đệm `pop min`."""
         if not self._buffer:
             return None
         _, _, event = heapq.heappop(self._buffer)
@@ -62,16 +73,19 @@ class BoundedPriorityQueue:
         return event
 
     def flush_all(self) -> list[LogEvent]:
+        """Flush dữ liệu đệm của `flush all` xuống đích lưu trữ hoặc downstream."""
         events = [e for _, _, e in sorted(self._buffer, key=lambda x: x[0])]
         self._buffer.clear()
         return events
 
     def __len__(self) -> int:
+        """Trả về kích thước hiện tại của `BoundedPriorityQueue`."""
         return len(self._buffer)
 
 
 class StrictWorker:
 
+    """Lớp `StrictWorker` quản lý vòng đời và xử lý của worker."""
     def __init__(
         self,
         worker_id: str,
@@ -88,6 +102,7 @@ class StrictWorker:
         kafka_audit_producer=None,
         kafka_audit_topic: str = "audit_results",
     ):
+        """Khởi tạo đối tượng của `StrictWorker` và thiết lập trạng thái ban đầu."""
         self.worker_id = worker_id
         self.partition_ids = []
         self.engines: dict[int, StrictWatermarkEngine] = {}
@@ -95,13 +110,12 @@ class StrictWorker:
         self._partition_locks: dict[int, threading.RLock] = {}
         self.max_event_times: dict[int, float] = {}
 
-        # Idleness detection
+        # Theo dõi lần cuối mỗi partition có event để phát hiện idle/straggler.
         self._last_event_time: dict[int, float] = {}
 
-        # Backpressure pause/resume is a flow-control signal, not a data-loss
-        # boundary. The hard queue limit is intentionally much higher so a
-        # fetched Kafka batch can be accepted before the consumer pause takes
-        # effect.
+        # Pause/resume backpressure chỉ là tín hiệu điều tiết luồng, không phải
+        # ranh giới làm rơi dữ liệu. Hard limit cao hơn để batch Kafka đã fetch
+        # vẫn được nhận trước khi lệnh pause upstream có hiệu lực.
         self.max_queue = int(os.environ.get("BP_PAUSE_THRESHOLD", str(max_queue)))
         self.resume_threshold = int(os.environ.get("BP_RESUME_THRESHOLD", "100"))
         self.hard_queue_limit = int(os.environ.get(
@@ -115,7 +129,7 @@ class StrictWorker:
         self.known_term: int = 0
         self.seen_commands: set[str] = set()
 
-        # Save config for dynamic partition addition
+        # Lưu cấu hình để có thể thêm partition động khi coordinator reassign.
         self.window_size_s = window_size_s
         self.delta_base_s = delta_base_s
         self.tiered_storage = tiered_storage
@@ -128,11 +142,12 @@ class StrictWorker:
         self.kafka_audit_topic = kafka_audit_topic
         self._dynamic_partition_lock = threading.Lock()
 
-        # Initialize partitions
+        # Khởi tạo engine/buffer cho các partition được giao ban đầu.
         for pid in partition_ids:
             self.ensure_partition(pid)
 
     def ensure_partition(self, pid: int) -> None:
+        """Đảm bảo điều kiện/tài nguyên `ensure partition` đã sẵn sàng trước khi dùng."""
         if pid in list(self.engines):
             return
         with self._dynamic_partition_lock:
@@ -173,7 +188,11 @@ class StrictWorker:
                 self.partition_ids.append(pid)
 
     def sync_active_partitions(self, active_pids: list[int]) -> None:
-        """Close and remove engines for partitions that are no longer assigned to this worker."""
+        """Hàm `sync_active_partitions` thực hiện phần xử lý liên quan đến sync active partitions của `StrictWorker`.
+        
+        Ghi chú gốc:
+        Close and remove engines for partitions that are no longer assigned to this worker.
+        """
         with self._dynamic_partition_lock:
             to_remove = [pid for pid in list(self.engines.keys()) if pid not in active_pids]
             for pid in to_remove:
@@ -195,6 +214,7 @@ class StrictWorker:
                     self.partition_ids.remove(pid)
 
     def validate_command(self, term: int, command_id: str) -> bool:
+        """Kiểm tra tính hợp lệ của `validate command` trước khi xử lý tiếp."""
         if term < self.known_term:
             return False  # stale term
         if command_id and command_id in self.seen_commands:
@@ -207,6 +227,7 @@ class StrictWorker:
         return True
 
     def on_punctuation(self, token: PunctuationToken) -> None:
+        """Hàm `on_punctuation` thực hiện phần xử lý liên quan đến on punctuation của `StrictWorker`."""
         pid = token.partition_id
         lock = self._partition_locks.get(pid)
         if lock is not None:
@@ -217,16 +238,25 @@ class StrictWorker:
 
     # ---- Idleness detection ----
     def is_idle(self, partition_id: int) -> bool:
-        """Return True if no event received for this partition within IDLE_TIMEOUT_S."""
+        """Kiểm tra điều kiện `is idle` và trả về boolean.
+        
+        Ghi chú gốc:
+        Return True if no event received for this partition within IDLE_TIMEOUT_S.
+        """
         if partition_id not in self._last_event_time:
             return True
         return (time.time() - self._last_event_time[partition_id]) > IDLE_TIMEOUT_S
 
     def idle_partitions(self) -> list[int]:
-        """Return list of partition IDs currently considered idle."""
+        """Hàm `idle_partitions` thực hiện phần xử lý liên quan đến idle partitions của `StrictWorker`.
+        
+        Ghi chú gốc:
+        Return list of partition IDs currently considered idle.
+        """
         return [pid for pid in self.partition_ids if self.is_idle(pid)]
 
     def process(self, event: LogEvent, partition_id: int) -> float | None:
+        """Hàm `process` thực hiện phần xử lý liên quan đến process của `StrictWorker`."""
         if partition_id not in list(self.engines):
             self.ensure_partition(partition_id)
 
@@ -275,6 +305,7 @@ class StrictWorker:
             return result
 
     def _process_event(self, event: LogEvent, partition_id: int) -> float | None:
+        """Hàm `_process_event` thực hiện phần xử lý liên quan đến process event của `StrictWorker`."""
         lock = self._partition_locks.get(partition_id)
         if lock is None:
             # Partition was reassigned/removed (e.g. by sync_active_partitions)
@@ -292,6 +323,7 @@ class StrictWorker:
             return engine.process(event, len(buf))
 
     def buffer_size(self, partition_id: int) -> int:
+        """Hàm `buffer_size` thực hiện phần xử lý liên quan đến buffer size của `StrictWorker`."""
         lock = self._partition_locks.get(partition_id)
         if lock is None:
             return 0
@@ -300,6 +332,7 @@ class StrictWorker:
             return len(buf) if buf is not None else 0
 
     def drain_ready(self, partition_id: int, batch_size: int = 200) -> int:
+        """Rút dữ liệu đang chờ trong `drain ready` để xử lý tiếp."""
         lock = self._partition_locks.get(partition_id)
         if lock is None:
             return 0
@@ -316,6 +349,7 @@ class StrictWorker:
             return len(batch)
 
     def heartbeat(self) -> WorkerHeartbeat:
+        """Hàm `heartbeat` thực hiện phần xử lý liên quan đến heartbeat của `StrictWorker`."""
         partitions = {}
         for pid, eng in list(self.engines.items()):
             lock = self._partition_locks.get(pid)
@@ -335,6 +369,7 @@ class StrictWorker:
     def update_global_watermark(
         self, W_global: float, term: int = 0, command_id: str = ""
     ) -> None:
+        """Cập nhật trạng thái/metric `update global watermark` dựa trên dữ liệu mới."""
         if not self.validate_command(term, command_id):
             return
         for pid, eng in list(self.engines.items()):
@@ -345,6 +380,7 @@ class StrictWorker:
                     eng.raft_term = max(eng.raft_term, term)
 
     def summary(self) -> dict:
+        """Tạo bản tóm tắt trạng thái `summary` để trả về API hoặc báo cáo."""
         total_recv = 0
         total_on_time = 0
         total_late = 0
@@ -390,9 +426,11 @@ class StrictWorker:
         late_rate = 100.0 * total_late / max(total_recv, 1)
 
         def _avg(values: list[float]) -> float:
+            """Hàm `_avg` thực hiện phần xử lý liên quan đến avg của `StrictWorker`."""
             return round(sum(values) / len(values), 2) if values else 0.0
 
         def _max(values: list[float]) -> float:
+            """Hàm `_max` thực hiện phần xử lý liên quan đến max của `StrictWorker`."""
             return round(max(values), 2) if values else 0.0
 
         # Resource stats
@@ -454,6 +492,7 @@ class StrictWorker:
         }
 
     def broadcast(self) -> dict:
+        """Hàm `broadcast` thực hiện phần xử lý liên quan đến broadcast của `StrictWorker`."""
         partitions = {}
         for pid, eng in list(self.engines.items()):
             lock = self._partition_locks.get(pid)
@@ -473,6 +512,7 @@ class StrictWorker:
         }
 
     def flush_all(self) -> None:
+        """Flush dữ liệu đệm của `flush all` xuống đích lưu trữ hoặc downstream."""
         for pid, buf in list(self.buffers.items()):
             lock = self._partition_locks.get(pid)
             if lock is not None:

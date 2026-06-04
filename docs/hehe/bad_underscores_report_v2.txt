@@ -1,0 +1,92 @@
+Bad unescaped underscores found: 30
+
+Line 176:     \makebox[\textwidth][c]{\includegraphics[width=1.15\textwidth]{end_to_end_pipeline.pdf}}
+                                                                                ^
+
+Line 176:     \makebox[\textwidth][c]{\includegraphics[width=1.15\textwidth]{end_to_end_pipeline.pdf}}
+                                                                                   ^
+
+Line 176:     \makebox[\textwidth][c]{\includegraphics[width=1.15\textwidth]{end_to_end_pipeline.pdf}}
+                                                                                       ^
+
+Line 293:     \makebox[\textwidth][c]{\includegraphics[width=1.15\textwidth]{strict_watermark_seq.pdf}}
+                                                                                   ^
+
+Line 293:     \makebox[\textwidth][c]{\includegraphics[width=1.15\textwidth]{strict_watermark_seq.pdf}}
+                                                                                             ^
+
+Line 491:     \makebox[\textwidth][c]{\includegraphics[width=1.15\textwidth]{heuristic_watermark_seq.pdf}}
+                                                                                      ^
+
+Line 491:     \makebox[\textwidth][c]{\includegraphics[width=1.15\textwidth]{heuristic_watermark_seq.pdf}}
+                                                                                                ^
+
+Line 593:     \makebox[\textwidth][c]{\includegraphics[width=1.15\textwidth]{node_partition_engine.pdf}}
+                                                                                 ^
+
+Line 593:     \makebox[\textwidth][c]{\includegraphics[width=1.15\textwidth]{node_partition_engine.pdf}}
+                                                                                           ^
+
+Line 716:     \makebox[\textwidth][c]{\includegraphics[width=1.15\textwidth]{kafka_bounded_pq.pdf}}
+                                                                                  ^
+
+Line 716:     \makebox[\textwidth][c]{\includegraphics[width=1.15\textwidth]{kafka_bounded_pq.pdf}}
+                                                                                          ^
+
+Line 791:     \makebox[\textwidth][c]{\includegraphics[width=1.15\textwidth]{tiered_storage_flow.pdf}}
+                                                                                   ^
+
+Line 791:     \makebox[\textwidth][c]{\includegraphics[width=1.15\textwidth]{tiered_storage_flow.pdf}}
+                                                                                           ^
+
+Line 805:     \makebox[\textwidth][c]{\includegraphics[width=1.15\textwidth]{tiered_storage_layout.pdf}}
+                                                                                   ^
+
+Line 805:     \makebox[\textwidth][c]{\includegraphics[width=1.15\textwidth]{tiered_storage_layout.pdf}}
+                                                                                           ^
+
+Line 909:     \makebox[\textwidth][c]{\includegraphics[width=1.15\textwidth]{tiered_storage_cycles.pdf}}
+                                                                                   ^
+
+Line 909:     \makebox[\textwidth][c]{\includegraphics[width=1.15\textwidth]{tiered_storage_cycles.pdf}}
+                                                                                           ^
+
+Line 916:     \makebox[\textwidth][c]{\includegraphics[width=1.15\textwidth]{eviction_state_machine.pdf}}
+                                                                                     ^
+
+Line 916:     \makebox[\textwidth][c]{\includegraphics[width=1.15\textwidth]{eviction_state_machine.pdf}}
+                                                                                           ^
+
+Line 1025:     \makebox[\textwidth][c]{\includegraphics[width=1.15\textwidth]{coordinator_vs_aggregator.pdf}}
+                                                                                         ^
+
+Line 1025:     \makebox[\textwidth][c]{\includegraphics[width=1.15\textwidth]{coordinator_vs_aggregator.pdf}}
+                                                                                            ^
+
+Line 1065:     \makebox[\textwidth][c]{\includegraphics[width=1.15\textwidth]{comm_ingest_data.pdf}}
+                                                                                  ^
+
+Line 1065:     \makebox[\textwidth][c]{\includegraphics[width=1.15\textwidth]{comm_ingest_data.pdf}}
+                                                                                         ^
+
+Line 1080:     \makebox[\textwidth][c]{\includegraphics[width=1.15\textwidth]{comm_control_plane.pdf}}
+                                                                                  ^
+
+Line 1080:     \makebox[\textwidth][c]{\includegraphics[width=1.15\textwidth]{comm_control_plane.pdf}}
+                                                                                          ^
+
+Line 1136:     \makebox[\textwidth][c]{\includegraphics[width=1.15\textwidth]{layer_communication.pdf}}
+                                                                                   ^
+
+Line 1306:     \makebox[\textwidth][c]{\includegraphics[width=1.15\textwidth]{failback_5step_seq.pdf}}
+                                                                                      ^
+
+Line 1306:     \makebox[\textwidth][c]{\includegraphics[width=1.15\textwidth]{failback_5step_seq.pdf}}
+                                                                                            ^
+
+Line 1313:     \makebox[\textwidth][c]{\includegraphics[width=1.15\textwidth]{partition_state_machine.pdf}}
+                                                                                       ^
+
+Line 1313:     \makebox[\textwidth][c]{\includegraphics[width=1.15\textwidth]{partition_state_machine.pdf}}
+                                                                                             ^
+

@@ -1,12 +1,22 @@
-"""Unified entrypoint for the refactor stream processing system.
+"""Điểm vào thống nhất để chạy hệ thống stream processing phân tán.
 
-Roles: coordinator | aggregator | worker | ingestor
-Modes:  strict | heuristic
+Vai trò có thể chạy:
+  - coordinator: tính hoặc replicate global watermark.
+  - aggregator: nhận watermark heuristic từ worker và tổng hợp W_global_h.
+  - worker: đọc event/punctuation theo partition và đóng cửa sổ.
+  - ingestor: đọc CSV/JSONL, phát event và punctuation vào worker/Kafka.
 
-Usage:
-  python3 -m refactor.run --role coordinator --mode strict
-  python3 -m refactor.run --role worker --mode heuristic
-  python3 -m refactor.run --role ingestor --source /data/events.jsonl
+Chế độ hỗ trợ:
+  - strict: ưu tiên 0% mất dữ liệu, dùng punctuation và coordinator.
+  - heuristic: ưu tiên latency thấp, dùng DDSketch, DLQ và correction.
+
+Ví dụ chạy từ thư mục gốc repo:
+  python run.py --role coordinator --mode strict
+  python run.py --role worker --mode heuristic
+  python run.py --role ingestor --source dataset/nyc_taxi_events_full.csv
+
+Ngoài CLI, file này còn dựng HTTP health/metrics API, gRPC, TLS tùy chọn,
+Kafka adapter, monitoring, alerting, failover, checkpoint và shutdown mềm.
 """
 
 import argparse
@@ -23,6 +33,7 @@ from http.server import HTTPServer, BaseHTTPRequestHandler
 from socketserver import ThreadingMixIn
 
 def dump_tracebacks(signum, frame):
+    """In stack trace của mọi thread khi cần debug process đang treo."""
     print("=== DUMPING TRACEBACKS ===", file=sys.stderr)
     for thread_id, stack in sys._current_frames().items():
         print(f"\nThread {thread_id}:", file=sys.stderr)
@@ -32,14 +43,16 @@ def dump_tracebacks(signum, frame):
 if hasattr(signal, "SIGUSR1"):
     signal.signal(signal.SIGUSR1, dump_tracebacks)
 
-# Ensure sibling packages (common, heuristic, strict, etc.) are importable
-# when run.py lives inside a refactor/ package directory.
+# Bảo đảm các package cùng cấp (common, heuristic, strict, ...) import được
+# khi chạy trực tiếp file run.py từ thư mục gốc dự án.
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
 from common import csdlpt_pb2
+from common.partitioning import stable_partition
 
 
 class ThreadingHTTPServer(ThreadingMixIn, HTTPServer):
+    """Lớp `ThreadingHTTPServer` gom dữ liệu và hành vi liên quan đến ThreadingHTTPServer."""
     daemon_threads = True
 from urllib.parse import urlparse, parse_qs
 import urllib.request
@@ -54,6 +67,7 @@ except ImportError:
 _grpc_channels = {}
 
 def get_grpc_target(url_or_peer):
+    """Trả về thông tin `grpc target` từ trạng thái hiện tại."""
     if not url_or_peer:
         return None
     if url_or_peer.startswith("http://") or url_or_peer.startswith("https://"):
@@ -71,6 +85,7 @@ def get_grpc_target(url_or_peer):
     return None
 
 def get_grpc_stub(url_or_peer):
+    """Trả về thông tin `grpc stub` từ trạng thái hiện tại."""
     if grpc is None:
         return None
     target = get_grpc_target(url_or_peer)
@@ -86,6 +101,7 @@ def get_grpc_stub(url_or_peer):
     return _grpc_channels[target][1]
 
 def get_grpc_aggregator_stub(url_or_peer):
+    """Trả về thông tin `grpc aggregator stub` từ trạng thái hiện tại."""
     if grpc is None:
         return None
     target = get_grpc_target(url_or_peer)
@@ -106,6 +122,7 @@ def get_grpc_aggregator_stub(url_or_peer):
 _original_urlopen = urllib.request.urlopen
 
 def _injected_urlopen(*args, **kwargs):
+    """Hàm `_injected_urlopen` thực hiện phần xử lý liên quan đến injected urlopen."""
     if "context" not in kwargs or kwargs["context"] is None:
         cert_file = os.environ.get("TLS_CLIENT_CERT") or os.environ.get("TLS_CERT")
         key_file = os.environ.get("TLS_CLIENT_KEY") or os.environ.get("TLS_KEY")
@@ -132,14 +149,14 @@ urllib.request.urlopen = _injected_urlopen
 
 
 def parse_and_deduplicate_event(ev: dict, seen_ids_cache: set) -> dict | None:
-    """Validate, parse and deduplicate event according to schema version and migration step."""
+    """Validate, chuyển schema và loại event trùng trong giai đoạn schema migration."""
     if not isinstance(ev, dict):
         return ev
 
     event_id = ev.get("event_id")
     schema_ver = ev.get("schema_version", 1)
 
-    # 1. Deduplication (important in dual_consume step where both V1 & V2 are received)
+    # 1. Chống trùng lặp: rất quan trọng ở bước dual_consume khi nhận cả V1 và V2.
     if event_id:
         if event_id in seen_ids_cache:
             return None
@@ -150,12 +167,12 @@ def parse_and_deduplicate_event(ev: dict, seen_ids_cache: set) -> dict | None:
             except (StopIteration, KeyError):
                 pass
 
-    # 2. Schema Registry Validation
+    # 2. Kiểm tra event theo schema registry tương ứng với phiên bản schema.
     from common.schema_registry import validate_json_schema, LOG_EVENT_V1_SCHEMA, LOG_EVENT_V2_SCHEMA
     schema = LOG_EVENT_V2_SCHEMA if schema_ver == 2 else LOG_EVENT_V1_SCHEMA
     validate_json_schema(ev, schema)
 
-    # 3. Transform / Backward Compatibility mapping
+    # 3. Chuyển đổi field để tương thích lùi giữa schema V1 và V2.
     if schema_ver == 2:
         if "status" not in ev:
             ev["status"] = ev.get("http_status", 200)
@@ -168,9 +185,13 @@ def parse_and_deduplicate_event(ev: dict, seen_ids_cache: set) -> dict | None:
     return ev
 
 
+def _stable_partition(key, total_partitions: int = 12) -> int:
+    """Map a partition key to a stable partition id across Python processes."""
+    return stable_partition(key, total_partitions)
+
 
 def _create_tiered_storage():
-    """Initialize TieredStorageManager from env vars. Returns None if not configured."""
+    """Khởi tạo TieredStorageManager từ env; trả về None nếu chưa cấu hình MinIO."""
     endpoint = os.environ.get("MINIO_ENDPOINT", "")
     if not endpoint:
         return None
@@ -192,6 +213,7 @@ def _create_tiered_storage():
 # ---------------------------------------------------------------------------
 
 def parse_args():
+    """Phân tích dữ liệu đầu vào `parse args` và chuyển sang cấu trúc dùng được."""
     p = argparse.ArgumentParser(description="Refactor Stream Processor")
     p.add_argument("--role", required=True,
                    choices=["coordinator", "aggregator", "worker", "ingestor"])
@@ -221,16 +243,19 @@ def parse_args():
 
 
 # ---------------------------------------------------------------------------
-# HTTP health + metrics server (stdlib, no frameworks)
+# HTTP health + metrics server dùng stdlib, không cần framework ngoài.
 # ---------------------------------------------------------------------------
 
 class HealthHandler(BaseHTTPRequestHandler):
+    """Lớp `HealthHandler` xử lý request hoặc tình huống runtime liên quan."""
     server_state: dict = {}
 
     def log_message(self, *args):
+        """Hàm `log_message` thực hiện phần xử lý liên quan đến log message của `HealthHandler`."""
         pass
 
     def do_GET(self):
+        """Hàm `do_GET` thực hiện phần xử lý liên quan đến do GET của `HealthHandler`."""
         parsed = urlparse(self.path)
         path = parsed.path
         if path == "/health":
@@ -293,6 +318,7 @@ class HealthHandler(BaseHTTPRequestHandler):
             self._json(404, {"error": "not found"})
 
     def do_POST(self):
+        """Hàm `do_POST` thực hiện phần xử lý liên quan đến do POST của `HealthHandler`."""
         path = urlparse(self.path).path
         content_len = int(self.headers.get("Content-Length", 0))
         body = self.rfile.read(content_len) if content_len else b"{}"
@@ -414,6 +440,7 @@ class HealthHandler(BaseHTTPRequestHandler):
             self._json(404, {"error": "not found"})
 
     def _json(self, code, data):
+        """Hàm `_json` thực hiện phần xử lý liên quan đến json của `HealthHandler`."""
         body = json.dumps(data, default=str).encode()
         self.send_response(code)
         self.send_header("Content-Type", "application/json")
@@ -422,7 +449,11 @@ class HealthHandler(BaseHTTPRequestHandler):
         self.wfile.write(body)
 
     def _serve_prometheus_metrics(self):
-        """Serve metrics in Prometheus text format from MonitoringManager."""
+        """Hàm `_serve_prometheus_metrics` thực hiện phần xử lý liên quan đến serve prometheus metrics của `HealthHandler`.
+        
+        Ghi chú gốc:
+        Serve metrics in Prometheus text format from MonitoringManager.
+        """
         mon_mgr = self.server_state.get("monitoring_manager")
         if mon_mgr is not None:
             body = mon_mgr.generate_metrics()
@@ -435,7 +466,11 @@ class HealthHandler(BaseHTTPRequestHandler):
             self._json(503, {"error": "monitoring not initialized"})
 
     def _build_metrics_json(self):
-        """Return metrics as JSON (legacy /api/metrics endpoint)."""
+        """Xây dựng cấu trúc dữ liệu hoặc payload `build metrics json`.
+        
+        Ghi chú gốc:
+        Return metrics as JSON (legacy /api/metrics endpoint).
+        """
         comp = self.server_state.get("component")
         if comp is None:
             return {"status": "initializing"}
@@ -447,6 +482,7 @@ class HealthHandler(BaseHTTPRequestHandler):
 
     def _build_state(self):
         # Return fast-path cached state if available (avoids lock contention)
+        """Xây dựng cấu trúc dữ liệu hoặc payload `build state`."""
         cached = self.server_state.get("cached_state")
         if cached is not None:
             return cached
@@ -470,6 +506,7 @@ class HealthHandler(BaseHTTPRequestHandler):
 
 
 def start_http_server(port: int, state: dict) -> HTTPServer:
+    """Khởi động tiến trình, server hoặc vòng nền `start http server`."""
     HealthHandler.server_state = state
     srv = ThreadingHTTPServer(("0.0.0.0", port), HealthHandler)
 
@@ -493,9 +530,12 @@ def start_http_server(port: int, state: dict) -> HTTPServer:
 # ---------------------------------------------------------------------------
 
 def _create_monitoring() -> "MonitoringManager":
-    """Create a MonitoringManager instance.
-
-    Returns None if prometheus_client is not available.
+    """Hàm `_create_monitoring` thực hiện phần xử lý liên quan đến create monitoring.
+    
+    Ghi chú gốc:
+    Create a MonitoringManager instance.
+    
+        Returns None if prometheus_client is not available.
     """
     try:
         from common.monitoring import MonitoringManager
@@ -506,12 +546,15 @@ def _create_monitoring() -> "MonitoringManager":
 
 
 def _start_alerting_thread(mon_mgr, stop_event):
-    """Start periodic alert evaluation if PagerDuty routing key is configured.
-
-    Parameters
-    ----------
-    mon_mgr : MonitoringManager | None
-    stop_event : threading.Event
+    """Khởi động tiến trình, server hoặc vòng nền `start alerting thread`.
+    
+    Ghi chú gốc:
+    Start periodic alert evaluation if PagerDuty routing key is configured.
+    
+        Parameters
+        ----------
+        mon_mgr : MonitoringManager | None
+        stop_event : threading.Event
     """
     if mon_mgr is None:
         return
@@ -538,9 +581,12 @@ def _start_alerting_thread(mon_mgr, stop_event):
 
 
 def _update_monitoring_from_component(mon_mgr, state: dict) -> None:
-    """Push current component state into MonitoringManager.
-
-    Called periodically by each role's background loop.
+    """Cập nhật trạng thái/metric `update monitoring from component` dựa trên dữ liệu mới.
+    
+    Ghi chú gốc:
+    Push current component state into MonitoringManager.
+    
+        Called periodically by each role's background loop.
     """
     if mon_mgr is None:
         return
@@ -643,6 +689,7 @@ def _update_monitoring_from_component(mon_mgr, state: dict) -> None:
 # ---------------------------------------------------------------------------
 
 def run_coordinator(args):
+    """Chạy luồng xử lý `run coordinator` theo cấu hình hiện tại."""
     from strict.coordinator import StrictCoordinator
     from strict.ingestor_health import IngestorHealthMonitor
     from strict.failover import FailoverManager
@@ -720,6 +767,7 @@ def run_coordinator(args):
     _coord_last_cache_update = [0.0]
 
     def heartbeat_handler(data):
+        """Xử lý request/sự kiện `heartbeat handler` trong luồng runtime."""
         hb = WorkerHeartbeat(
             worker_id=data.get("worker_id", ""),
             partitions={int(k): float(v) for k, v in data.get("partitions", {}).items()},
@@ -792,7 +840,11 @@ def run_coordinator(args):
                 fm.reassign_failed_partitions()
 
     def reassign_handler(data):
-        """POST /reassign — manual or automated partition reassignment."""
+        """Xử lý request/sự kiện `reassign handler` trong luồng runtime.
+        
+        Ghi chú gốc:
+        POST /reassign — manual or automated partition reassignment.
+        """
         if fm is None:
             return {"error": "failover disabled"}
         worker_id = data.get("worker_id", "")
@@ -803,14 +855,22 @@ def run_coordinator(args):
         return {"failed": list(failed), "reassigned": reassigned}
 
     def raft_handler(data):
-        """POST /raft-state — receive replicated state from leader."""
+        """Xử lý request/sự kiện `raft handler` trong luồng runtime.
+        
+        Ghi chú gốc:
+        POST /raft-state — receive replicated state from leader.
+        """
         if hasattr(coord, "receive_state"):
             coord.receive_state(data)
             return {"ok": True}
         return {"error": "raft not enabled"}
 
     def raft_vote_handler(data):
-        """POST /raft-vote — handle Raft vote requests from peers."""
+        """Xử lý request/sự kiện `raft vote handler` trong luồng runtime.
+        
+        Ghi chú gốc:
+        POST /raft-vote — handle Raft vote requests from peers.
+        """
         if hasattr(coord, "handle_vote_request"):
             return coord.handle_vote_request(
                 term=data.get("term", 0),
@@ -820,13 +880,21 @@ def run_coordinator(args):
         return {"error": "raft not enabled"}
 
     def zk_handler(data):
-        """POST /zk-vote — handle ZK ping/vote requests from peers."""
+        """Xử lý request/sự kiện `zk handler` trong luồng runtime.
+        
+        Ghi chú gốc:
+        POST /zk-vote — handle ZK ping/vote requests from peers.
+        """
         if hasattr(coord, "handle_zk_vote"):
             return coord.handle_zk_vote(data)
         return {"error": "zk not enabled"}
 
     def zk_state_handler(data):
-        """POST /zk-state — receive ZK-replicated state from leader."""
+        """Xử lý request/sự kiện `zk state handler` trong luồng runtime.
+        
+        Ghi chú gốc:
+        POST /zk-state — receive ZK-replicated state from leader.
+        """
         if hasattr(coord, "handle_zk_state"):
             return coord.handle_zk_state(data)
         return {"error": "zk not enabled"}
@@ -859,12 +927,15 @@ def run_coordinator(args):
         from concurrent import futures
         
         class CoordinatorServicer(csdlpt_pb2_grpc.CoordinatorServiceServicer):
+            """Lớp `CoordinatorServicer` gom dữ liệu và hành vi liên quan đến CoordinatorServicer."""
             def __init__(self, coord, fm, health_mon):
+                """Khởi tạo đối tượng của `CoordinatorServicer` và thiết lập trạng thái ban đầu."""
                 self.coord = coord
                 self.fm = fm
                 self.health_mon = health_mon
                 
             def WorkerHeartbeat(self, request, context):
+                """Hàm `WorkerHeartbeat` thực hiện phần xử lý liên quan đến WorkerHeartbeat của `CoordinatorServicer`."""
                 hb = WorkerHeartbeat(
                     worker_id=request.worker_id,
                     partitions={int(k): float(v) for k, v in request.partitions.items()},
@@ -901,6 +972,7 @@ def run_coordinator(args):
                 return csdlpt_pb2.EmptyReply(ok=True)
 
             def WorkerPing(self, request, context):
+                """Hàm `WorkerPing` thực hiện phần xử lý liên quan đến WorkerPing của `CoordinatorServicer`."""
                 from common.types import WorkerStatus
                 if self.fm is not None:
                     with self.fm._lock:
@@ -914,6 +986,8 @@ def run_coordinator(args):
                 return csdlpt_pb2.EmptyReply(ok=True)
                 
             def IngestorHeartbeat(self, request, context):
+                """Hàm `IngestorHeartbeat` thực hiện phần xử lý liên quan đến IngestorHeartbeat của `CoordinatorServicer`.
+                """
                 rtt = max(0.0, time.time() - request.timestamp) * 1000.0
                 self.health_mon.receive_heartbeat(
                     ingestor_id=request.ingestor_id,
@@ -926,6 +1000,7 @@ def run_coordinator(args):
                 return csdlpt_pb2.EmptyReply(ok=True)
                 
             def GetGlobalState(self, request, context):
+                """Hàm `GetGlobalState` thực hiện phần xử lý liên quan đến GetGlobalState của `CoordinatorServicer`."""
                 broadcast = self.coord.broadcast()
                 partition_types = {}
                 if self.fm is not None:
@@ -937,6 +1012,7 @@ def run_coordinator(args):
                 )
                 
             def RaftVote(self, request, context):
+                """Hàm `RaftVote` thực hiện phần xử lý liên quan đến RaftVote của `CoordinatorServicer`."""
                 if hasattr(self.coord, "handle_vote_request"):
                     r = self.coord.handle_vote_request(
                         term=request.term,
@@ -947,6 +1023,7 @@ def run_coordinator(args):
                 return csdlpt_pb2.RaftVoteReply(granted=False, term=0)
                 
             def RaftState(self, request, context):
+                """Hàm `RaftState` thực hiện phần xử lý liên quan đến RaftState của `CoordinatorServicer`."""
                 if hasattr(self.coord, "receive_state"):
                     data = json.loads(request.json_state) if request.json_state else {}
                     data["term"] = request.term
@@ -957,12 +1034,14 @@ def run_coordinator(args):
                 return csdlpt_pb2.EmptyReply(ok=False)
                 
             def ZkVote(self, request, context):
+                """Hàm `ZkVote` thực hiện phần xử lý liên quan đến ZkVote của `CoordinatorServicer`."""
                 if hasattr(self.coord, "handle_zk_vote"):
                     r = self.coord.handle_zk_vote({"action": request.action})
                     return csdlpt_pb2.ZkVoteReply(ok=r.get("ok", False), coordinator_id=r.get("coordinator_id", ""))
                 return csdlpt_pb2.ZkVoteReply(ok=False, coordinator_id="")
                 
             def ZkState(self, request, context):
+                """Hàm `ZkState` thực hiện phần xử lý liên quan đến ZkState của `CoordinatorServicer`."""
                 if hasattr(self.coord, "handle_zk_state"):
                     data = json.loads(request.json_state) if request.json_state else {}
                     data["leader_id"] = request.leader_id
@@ -986,6 +1065,7 @@ def run_coordinator(args):
     _start_alerting_thread(mon_mgr, stop)
 
     def save_loop():
+        """Lưu dữ liệu/trạng thái `loop` để dùng lại sau."""
         while not stop.is_set():
             time.sleep(2.0)
             coord.save_state()
@@ -996,6 +1076,7 @@ def run_coordinator(args):
 
     # Failover monitoring loop: proactively detect worker failures and trigger rebalancing
     def failover_monitoring_loop():
+        """Hàm `failover_monitoring_loop` thực hiện phần xử lý liên quan đến failover monitoring loop."""
         from common.types import WorkerStatus
         
         last_role = None
@@ -1062,6 +1143,7 @@ def run_coordinator(args):
     # Also refreshes cached_state so /state always returns live Raft info
     # (role, leader, term) even for followers that reject heartbeats.
     def proactive_broadcast_loop():
+        """Hàm `proactive_broadcast_loop` thực hiện phần xử lý liên quan đến proactive broadcast loop."""
         while not stop.is_set():
             time.sleep(0.2)
             if hasattr(coord, "broadcast"):
@@ -1082,6 +1164,7 @@ def run_coordinator(args):
 
     # Monitoring push loop
     def monitoring_loop():
+        """Hàm `monitoring_loop` thực hiện phần xử lý liên quan đến monitoring loop."""
         while not stop.is_set():
             time.sleep(5.0)
             _update_monitoring_from_component(mon_mgr, state)
@@ -1092,6 +1175,8 @@ def run_coordinator(args):
         kafka_broker_url = os.environ.get("KAFKA_BROKER_URL", f"http://localhost:{args.kafka_port}")
     if kafka_broker_url or args.enable_kafka:
         def ingestor_heartbeat_consumer_loop():
+            """Hàm `ingestor_heartbeat_consumer_loop` thực hiện phần xử lý liên quan đến ingestor heartbeat consumer loop.
+            """
             time.sleep(2.0)
             from common.kafka_real import KafkaConsumer
             try:
@@ -1145,6 +1230,7 @@ def run_coordinator(args):
 # ---------------------------------------------------------------------------
 
 def run_aggregator(args):
+    """Chạy luồng xử lý `run aggregator` theo cấu hình hiện tại."""
     from heuristic.aggregator import HeuristicAggregator
 
     ckpt_dir = os.environ.get("CHECKPOINT_DIR", "/data/checkpoint")
@@ -1182,6 +1268,7 @@ def run_aggregator(args):
     mon_mgr = _create_monitoring()
 
     def wm_handler(data):
+        """Xử lý request/sự kiện `wm handler` trong luồng runtime."""
         agg_base.receive_worker_watermark(
             worker_id=data.get("worker_id", ""),
             partition_id=int(data.get("partition_id", 0)),
@@ -1207,10 +1294,14 @@ def run_aggregator(args):
         from concurrent import futures
         
         class AggregatorServicer(csdlpt_pb2_grpc.AggregatorServiceServicer):
+            """Lớp `AggregatorServicer` gom dữ liệu và hành vi liên quan đến AggregatorServicer."""
             def __init__(self, agg_base):
+                """Khởi tạo đối tượng của `AggregatorServicer` và thiết lập trạng thái ban đầu."""
                 self.agg_base = agg_base
                 
             def SendWorkerWatermark(self, request, context):
+                """Hàm `SendWorkerWatermark` thực hiện phần xử lý liên quan đến SendWorkerWatermark của `AggregatorServicer`.
+                """
                 self.agg_base.receive_worker_watermark(
                     worker_id=request.worker_id,
                     partition_id=request.partition_id,
@@ -1234,6 +1325,7 @@ def run_aggregator(args):
     _start_alerting_thread(mon_mgr, stop)
 
     def save_loop():
+        """Lưu dữ liệu/trạng thái `loop` để dùng lại sau."""
         while not stop.is_set():
             time.sleep(2.0)
             agg_base.save_state()
@@ -1241,6 +1333,7 @@ def run_aggregator(args):
 
     # §9.3 Proactive 500ms broadcast loop: recompute W_global_h even without new worker messages
     def broadcast_loop():
+        """Hàm `broadcast_loop` thực hiện phần xử lý liên quan đến broadcast loop."""
         while not stop.is_set():
             time.sleep(0.5)
             agg_base._update_statuses()
@@ -1249,6 +1342,7 @@ def run_aggregator(args):
 
     # Monitoring push loop
     def monitoring_loop():
+        """Hàm `monitoring_loop` thực hiện phần xử lý liên quan đến monitoring loop."""
         while not stop.is_set():
             time.sleep(5.0)
             _update_monitoring_from_component(mon_mgr, state)
@@ -1267,6 +1361,7 @@ def run_aggregator(args):
 # ---------------------------------------------------------------------------
 
 def run_worker(args):
+    """Chạy luồng xử lý `run worker` theo cấu hình hiện tại."""
     mode = os.environ.get("MODE", args.mode)
     node_id = args.node_id or os.environ.get("NODE_ID", "0")
     parts = [int(x.strip()) for x in os.environ.get("PARTITIONS", args.partitions).split(",") if x.strip()]
@@ -1311,6 +1406,7 @@ def run_worker(args):
 
 
 def _run_strict_worker(node_id, parts, args):
+    """Chạy luồng xử lý `run strict worker` theo cấu hình hiện tại."""
     from strict.worker import (
         StrictWorker, BACKPRESSURE_MAX_QUEUE, BACKPRESSURE_RESUME_AT,
     )
@@ -1383,15 +1479,22 @@ def _run_strict_worker(node_id, parts, args):
     seen_event_ids = set()
 
     def ingest_handler(events):
+        """Xử lý request/sự kiện `ingest handler` trong luồng runtime."""
         count = 0
         for ev_raw in events:
+            if isinstance(ev_raw, dict) and ev_raw.get("is_punctuation"):
+                continue
             ev = parse_and_deduplicate_event(ev_raw, seen_event_ids)
             if ev is None:
+                continue
+            # Drop malformed messages with no usable event_time rather than
+            # defaulting to time.time().
+            if ev.get("event_time") is None:
                 continue
             pid = ev.get("partition_id", parts[0])
             le = LogEvent(
                 event_id=str(ev.get("event_id", f"ev-{time.time_ns()}")),
-                event_time=float(ev.get("event_time", time.time())),
+                event_time=float(ev["event_time"]),
                 status=int(ev.get("status", 200)),
                 arrival_time=float(ev.get("arrival_time", time.time())),
                 poll_received_at=time.time(),
@@ -1411,6 +1514,7 @@ def _run_strict_worker(node_id, parts, args):
         return count
 
     def punctuation_handler(data):
+        """Xử lý request/sự kiện `punctuation handler` trong luồng runtime."""
         token = PunctuationToken(
             T_commit=float(data.get("T_commit", time.time())),
             partition_id=int(data.get("partition_id", parts[0])),
@@ -1419,7 +1523,11 @@ def _run_strict_worker(node_id, parts, args):
         worker.on_punctuation(token)
 
     def backpressure_handler(data):
-        """POST /backpressure — worker reports buffer size, receives pause/resume."""
+        """Xử lý request/sự kiện `backpressure handler` trong luồng runtime.
+        
+        Ghi chú gốc:
+        POST /backpressure — worker reports buffer size, receives pause/resume.
+        """
         pid = int(data.get("partition_id", 0))
         size = int(data.get("buffer_size", 0))
         signal = bp.report_buffer(node_id, pid, size)
@@ -1452,6 +1560,7 @@ def _run_strict_worker(node_id, parts, args):
     strict_drain_batch = int(os.environ.get("STRICT_DRAIN_BATCH_SIZE", "200"))
 
     def drain_loop():
+        """Rút dữ liệu đang chờ trong `drain loop` để xử lý tiếp."""
         while not stop.is_set():
             time.sleep(strict_drain_sleep)
             for pid in list(worker.buffers):
@@ -1464,6 +1573,7 @@ def _run_strict_worker(node_id, parts, args):
     # Kafka consumer poll loop — consumer.poll() simulation
     if kafka_consumer is not None:
         def kafka_poll_loop():
+            """Hàm `kafka_poll_loop` thực hiện phần xử lý liên quan đến kafka poll loop."""
             committed_offsets: dict[int, int] = {}
             last_lag_report = 0.0
             last_progress_log = 0.0
@@ -1490,9 +1600,15 @@ def _run_strict_worker(node_id, parts, args):
                             ev = parse_and_deduplicate_event(ev_raw, seen_event_ids)
                             if ev is None:
                                 continue
+                            # Drop messages lacking a real event_time instead of
+                            # defaulting to wall-clock.
+                            if ev.get("event_time") is None:
+                                committed_offsets[pid] = msg["offset"] + 1
+                                worker_kafka_offsets[pid] = msg["offset"] + 1
+                                continue
                             le = LogEvent(
                                 event_id=str(ev.get("event_id", f"kafka-{msg['offset']}")),
-                                event_time=float(ev.get("event_time", time.time())),
+                                event_time=float(ev["event_time"]),
                                 status=int(ev.get("status", 200)),
                                 arrival_time=float(ev.get("arrival_time", time.time())),
                                 poll_received_at=time.time(),
@@ -1567,12 +1683,15 @@ def _run_strict_worker(node_id, parts, args):
     coord_state = {"url": coordinator_url, "failures": 0}
 
     def coordinator_health_check_loop():
-        """Leader-aware health check: queries /state to discover the Raft leader.
-
-        On each tick, fetches /state from the current coordinator. If the
-        coordinator reports it is NOT the leader but knows who the leader is,
-        we redirect. On failure, we probe peers for the leader instead of
-        blind round-robin — this prevents heartbeat spam to followers.
+        """Hàm `coordinator_health_check_loop` thực hiện phần xử lý liên quan đến coordinator health check loop.
+        
+        Ghi chú gốc:
+        Leader-aware health check: queries /state to discover the Raft leader.
+        
+                On each tick, fetches /state from the current coordinator. If the
+                coordinator reports it is NOT the leader but knows who the leader is,
+                we redirect. On failure, we probe peers for the leader instead of
+                blind round-robin — this prevents heartbeat spam to followers.
         """
         if not coord_state["url"]:
             return
@@ -1629,6 +1748,7 @@ def _run_strict_worker(node_id, parts, args):
 
     # Monitoring push loop
     def monitoring_loop():
+        """Hàm `monitoring_loop` thực hiện phần xử lý liên quan đến monitoring loop."""
         while not stop.is_set():
             time.sleep(5.0)
             _update_monitoring_from_component(mon_mgr, state)
@@ -1640,13 +1760,18 @@ def _run_strict_worker(node_id, parts, args):
     # On 3 consecutive failures (600ms), triggers immediate leader
     # re-discovery so we don't spam a dead coordinator for 15 seconds.
     def heartbeat_loop():
+        """Hàm `heartbeat_loop` thực hiện phần xử lý liên quan đến heartbeat loop."""
         import dataclasses
         import urllib.request
         last_ping_time = 0.0
         _hb_failures = 0  # consecutive heartbeat send failures
 
         def _rediscover_leader(old_url):
-            """Probe all coordinator peers for the current Raft leader."""
+            """Hàm `_rediscover_leader` thực hiện phần xử lý liên quan đến rediscover leader.
+            
+            Ghi chú gốc:
+            Probe all coordinator peers for the current Raft leader.
+            """
             if not coordinator_peers:
                 return old_url
             for peer in coordinator_peers:
@@ -1766,6 +1891,7 @@ def _run_strict_worker(node_id, parts, args):
 
     # ── Fix 2: W_global fetch loop — pull global watermark + partition types every 500ms ──
     def wglobal_fetch_loop():
+        """Hàm `wglobal_fetch_loop` thực hiện phần xử lý liên quan đến wglobal fetch loop."""
         import urllib.request
         from common.differentiated_eviction import PartitionEvictionType
         while not stop.is_set():
@@ -1835,6 +1961,7 @@ def _run_strict_worker(node_id, parts, args):
 
 
 def _run_heuristic_worker(node_id, parts, args):
+    """Chạy luồng xử lý `run heuristic worker` theo cấu hình hiện tại."""
     from heuristic.engine import HeuristicWatermarkEngine
     from heuristic.dlq import DLQPipeline
     from common.types import LogEvent
@@ -1843,13 +1970,18 @@ def _run_heuristic_worker(node_id, parts, args):
 
     ckpt_dir = os.environ.get("CHECKPOINT_DIR", "/data/checkpoint")
     tiered_storage = _create_tiered_storage()
-    engines = {
-        pid: HeuristicWatermarkEngine(
+    owned_parts = set(parts)
+
+    def _make_heuristic_engine(pid: int) -> HeuristicWatermarkEngine:
+        return HeuristicWatermarkEngine(
             partition_id=pid, worker_id=node_id,
             db_path=f"{ckpt_dir}/rocksdb-heuristic-{node_id}-p{pid}",
             tiered_storage=tiered_storage,
             checkpoint_dir=ckpt_dir,
         )
+
+    engines = {
+        pid: _make_heuristic_engine(pid)
         for pid in parts
     }
 
@@ -1894,36 +2026,45 @@ def _run_heuristic_worker(node_id, parts, args):
     seen_event_ids = set()
 
     def ingest_handler(events):
+        """Xử lý request/sự kiện `ingest handler` trong luồng runtime."""
         count = 0
         for ev_raw in events:
+            # Punctuation tokens are not data events — never feed them to the
+            # heuristic engine (their event_time would default to wall-clock and
+            # poison max_event_time / the watermark).
+            if isinstance(ev_raw, dict) and ev_raw.get("is_punctuation"):
+                continue
             ev = parse_and_deduplicate_event(ev_raw, seen_event_ids)
             if ev is None:
                 continue
-            pid = ev.get("partition_id", parts[0])
-            if pid not in engines:
-                from heuristic.engine import HeuristicWatermarkEngine
-                engines[pid] = HeuristicWatermarkEngine(
-                    partition_id=pid, worker_id=node_id,
-                    db_path=f"{ckpt_dir}/rocksdb-heuristic-{node_id}-p{pid}",
-                    tiered_storage=tiered_storage,
-                    checkpoint_dir=ckpt_dir,
-                )
-                downstream_emitter.schedule_final_reconciliation(stop, engines[pid])
+            # Drop malformed messages with no usable event_time rather than
+            # defaulting to time.time() (which jams the watermark ahead of real data).
+            if ev.get("event_time") is None:
+                continue
+            pid = int(ev.get("partition_id", parts[0]))
+            if pid not in owned_parts:
+                logging.warning(
+                    "[worker-heuristic:%s] dropping event for unassigned partition %s "
+                    "(owned=%s)", node_id, pid, sorted(owned_parts))
+                continue
+            eng = engines[pid]
             le = LogEvent(
                 event_id=str(ev.get("event_id", f"ev-{time.time_ns()}")),
-                event_time=float(ev.get("event_time", time.time())),
+                event_time=float(ev["event_time"]),
                 status=int(ev.get("status", 200)),
                 arrival_time=float(ev.get("arrival_time", time.time())),
                 poll_received_at=time.time(),
                 schema_version=int(ev.get("schema_version", 1)),
             )
-            engines[pid].process(le)
+            eng.process(le)
             count += 1
         return count
 
     class HeuristicWorkerProxy:
+        """Lớp `HeuristicWorkerProxy` gom dữ liệu và hành vi liên quan đến HeuristicWorkerProxy."""
         def __init__(self, engines, node_id, tiered_storage=None,
                      kafka_producer=None, kafka_results_topic=None):
+            """Khởi tạo đối tượng của `HeuristicWorkerProxy` và thiết lập trạng thái ban đầu."""
             self.engines = engines
             self.node_id = node_id
             self.tiered_storage = tiered_storage
@@ -1931,6 +2072,7 @@ def _run_heuristic_worker(node_id, parts, args):
             self.kafka_results_topic = kafka_results_topic
 
         def summary(self):
+            """Tạo bản tóm tắt trạng thái `summary` để trả về API hoặc báo cáo."""
             result = {"node_id": self.node_id, "partitions": {}}
             total_recv = 0
             total_on = 0
@@ -1994,18 +2136,27 @@ def _run_heuristic_worker(node_id, parts, args):
             return result
 
         def broadcast(self):
+            """Hàm `broadcast` thực hiện phần xử lý liên quan đến broadcast của `HeuristicWorkerProxy`."""
             result = {"node_id": self.node_id, "partitions": {}}
             for pid, eng in list(self.engines.items()):
                 result["partitions"][pid] = {"W_h": eng.W_h, "L_eff": eng.L_eff}
             return result
 
         def checkpoint(self):
-            """Persist engine metadata to RocksDB across all partitions."""
+            """Hàm `checkpoint` thực hiện phần xử lý liên quan đến checkpoint của `HeuristicWorkerProxy`.
+            
+            Ghi chú gốc:
+            Persist engine metadata to RocksDB across all partitions.
+            """
             for eng in list(self.engines.values()):
                 eng.checkpoint()
 
         def flush(self):
-            """Flush open windows and save cold-start baseline for graceful shutdown."""
+            """Flush dữ liệu đệm của `flush` xuống đích lưu trữ hoặc downstream.
+            
+            Ghi chú gốc:
+            Flush open windows and save cold-start baseline for graceful shutdown.
+            """
             for pid, eng in list(self.engines.items()):
                 eng.flush()
                 # Gap 3: save_baseline on graceful shutdown
@@ -2017,7 +2168,11 @@ def _run_heuristic_worker(node_id, parts, args):
                         pass
 
         def close(self):
-            """Close all engine RocksDB stores."""
+            """Đóng tài nguyên `close` và giải phóng trạng thái liên quan.
+            
+            Ghi chú gốc:
+            Close all engine RocksDB stores.
+            """
             for eng in list(self.engines.values()):
                 eng.close()
 
@@ -2053,6 +2208,7 @@ def _run_heuristic_worker(node_id, parts, args):
     # Kafka consumer poll loop for heuristic worker
     if kafka_consumer is not None:
         def kafka_heuristic_poll_loop():
+            """Hàm `kafka_heuristic_poll_loop` thực hiện phần xử lý liên quan đến kafka heuristic poll loop."""
             committed_offsets: dict[int, int] = {}
             last_lag_report = 0.0
             last_progress_log = 0.0
@@ -2065,16 +2221,14 @@ def _run_heuristic_worker(node_id, parts, args):
                         continue
                     polled = kafka_consumer.poll(timeout_ms=500, max_messages=100)
                     for pid, msgs in polled.items():
-                        if pid not in engines:
-                            # Dynamically initialize heuristic engine
-                            from heuristic.engine import HeuristicWatermarkEngine
-                            engines[pid] = HeuristicWatermarkEngine(
-                                partition_id=pid, worker_id=node_id,
-                                db_path=f"{ckpt_dir}/rocksdb-heuristic-{node_id}-p{pid}",
-                                tiered_storage=tiered_storage,
-                                checkpoint_dir=ckpt_dir,
-                            )
-                            downstream_emitter.schedule_final_reconciliation(stop, engines[pid])
+                        if pid not in owned_parts:
+                            logging.warning(
+                                "[worker-heuristic:%s] ignoring Kafka records for "
+                                "unassigned partition %s (owned=%s)",
+                                node_id, pid, sorted(owned_parts))
+                            for msg in msgs:
+                                committed_offsets[pid] = msg["offset"] + 1
+                            continue
                         if bp.is_paused(pid):
                             continue
                         eng = engines[pid]
@@ -2088,9 +2242,14 @@ def _run_heuristic_worker(node_id, parts, args):
                             ev = parse_and_deduplicate_event(ev_raw, seen_event_ids)
                             if ev is None:
                                 continue
+                            # Drop messages lacking a real event_time instead of
+                            # defaulting to wall-clock (would poison max_event_time).
+                            if ev.get("event_time") is None:
+                                committed_offsets[pid] = msg["offset"] + 1
+                                continue
                             le = LogEvent(
                                 event_id=str(ev.get("event_id", f"kafka-{msg['offset']}")),
-                                event_time=float(ev.get("event_time", time.time())),
+                                event_time=float(ev["event_time"]),
                                 status=int(ev.get("status", 200)),
                                 arrival_time=float(ev.get("arrival_time", time.time())),
                                 poll_received_at=time.time(),
@@ -2157,11 +2316,13 @@ def _run_heuristic_worker(node_id, parts, args):
         threading.Thread(target=kafka_heuristic_poll_loop, daemon=True).start()
 
     def report_loop():
+        """Hàm `report_loop` thực hiện phần xử lý liên quan đến report loop."""
         import urllib.request
 
         # Push a worker watermark to one aggregator, preferring gRPC and
         # falling back to HTTP. Returns True on success.
         def _push_watermark(url, pid, w_h):
+            """Hàm `_push_watermark` thực hiện phần xử lý liên quan đến push watermark."""
             if grpc is not None:
                 try:
                     stub = get_grpc_aggregator_stub(url)
@@ -2219,6 +2380,7 @@ def _run_heuristic_worker(node_id, parts, args):
 
     # Monitoring push loop
     def monitoring_loop():
+        """Hàm `monitoring_loop` thực hiện phần xử lý liên quan đến monitoring loop."""
         while not stop.is_set():
             time.sleep(5.0)
             _update_monitoring_from_component(mon_mgr, state)
@@ -2226,6 +2388,7 @@ def _run_heuristic_worker(node_id, parts, args):
 
     # §12 DLQ drain loop — move late_events from engines into DLQ pipeline every 1s
     def dlq_drain_loop():
+        """Hàm `dlq_drain_loop` thực hiện phần xử lý liên quan đến dlq drain loop."""
         while not stop.is_set():
             time.sleep(1.0)
             for eng in engines.values():
@@ -2244,6 +2407,7 @@ def _run_heuristic_worker(node_id, parts, args):
 
     # §12.5 DLQ hourly correction scheduler — drain DLQ, compute corrections, emit
     def dlq_correction_loop():
+        """Hàm `dlq_correction_loop` thực hiện phần xử lý liên quan đến dlq correction loop."""
         while not stop.is_set():
             time.sleep(3600.0)
             if dlq.backlog == 0:
@@ -2296,6 +2460,7 @@ def _run_heuristic_worker(node_id, parts, args):
 
     # Periodic checkpoint thread — persist engine metadata every 10s
     def checkpoint_loop():
+        """Hàm `checkpoint_loop` thực hiện phần xử lý liên quan đến checkpoint loop."""
         while not stop.is_set():
             time.sleep(10.0)
             try:
@@ -2307,6 +2472,7 @@ def _run_heuristic_worker(node_id, parts, args):
 
     # Progress log loop (HTTP-only / non-Kafka path)
     def progress_log_loop():
+        """Hàm `progress_log_loop` thực hiện phần xử lý liên quan đến progress log loop."""
         while not stop.is_set():
             time.sleep(5.0)
             total_recv = sum(e.metrics.total_received for e in engines.values())
@@ -2327,9 +2493,11 @@ def _run_heuristic_worker(node_id, parts, args):
 
     # W_global_h fetch loop — pull global watermark from aggregator every 500ms
     def wglobal_fetch_loop():
+        """Hàm `wglobal_fetch_loop` thực hiện phần xử lý liên quan đến wglobal fetch loop."""
         import urllib.request
 
         def _fetch_state(url):
+            """Hàm `_fetch_state` thực hiện phần xử lý liên quan đến fetch state."""
             try:
                 req = urllib.request.Request(url + "/state")
                 with urllib.request.urlopen(req, timeout=2) as resp:
@@ -2375,6 +2543,7 @@ def _run_heuristic_worker(node_id, parts, args):
 # ---------------------------------------------------------------------------
 
 def run_ingestor(args):
+    """Chạy luồng xử lý `run ingestor` theo cấu hình hiện tại."""
     node_hosts = [h.strip() for h in os.environ.get("NODE_HOSTS", "localhost:9101").split(",")]
     mode = os.environ.get("MODE", args.mode)
     source = args.source or os.environ.get("SOURCE", "")
@@ -2409,6 +2578,7 @@ def run_ingestor(args):
                         'bytes': 'body_bytes_sent',
                     }
                     def _parse_access_log_time(ts_str):
+                        """Hàm `_parse_access_log_time` thực hiện phần xử lý liên quan đến parse access log time."""
                         dt = datetime.strptime(ts_str, "%d/%b/%Y:%H:%M:%S %z")
                         return dt.timestamp()
                     csv_time_parser = _parse_access_log_time
@@ -2416,6 +2586,7 @@ def run_ingestor(args):
                           file=sys.stderr)
 
             def _map_row(row):
+                """Hàm `_map_row` thực hiện phần xử lý liên quan đến map row."""
                 if csv_col_map is None:
                     return row
                 mapped = dict(row)
@@ -2457,7 +2628,11 @@ def run_ingestor(args):
     csv_row_counter = [0]
 
     def _next_csv_event():
-        """Read next row from CSV, normalize timestamp, return event dict or None on EOF."""
+        """Hàm `_next_csv_event` thực hiện phần xử lý liên quan đến next csv event.
+        
+        Ghi chú gốc:
+        Read next row from CSV, normalize timestamp, return event dict or None on EOF.
+        """
         nonlocal csv_first_time
         try:
             row = _map_row(next(csv_reader))
@@ -2489,7 +2664,7 @@ def run_ingestor(args):
             "event_time": event_time,
             "arrival_time": next_arr,
             "status": int(row.get('response', '200')),
-            "partition_id": hash(host) % 12,
+            "partition_id": _stable_partition(host, total_parts),
             "payload": {
                 "host": host,
                 "method": row.get('method', ''),
@@ -2548,6 +2723,7 @@ def run_ingestor(args):
     _log_trace = log_level in ("debug", "trace")
 
     def _update_max_event_time(ev):
+        """Cập nhật trạng thái/metric `update max event time` dựa trên dữ liệu mới."""
         nonlocal max_event_time_sent, min_event_time_sent
         et = float(ev.get("event_time", 0.0))
         if et > max_event_time_sent:
@@ -2559,7 +2735,11 @@ def run_ingestor(args):
             max_event_time_per_part[pid] = et
 
     def send_event_kafka(ev):
-        """Send event via KafkaProducer (acks=all)."""
+        """Gửi dữ liệu hoặc thông điệp `send event kafka` tới thành phần đích.
+        
+        Ghi chú gốc:
+        Send event via KafkaProducer (acks=all).
+        """
         _update_max_event_time(ev)
         result = kafka_producer.send("events", ev, key=ev.get("event_id", ""),
                                      partition=ev.get("partition_id", 0) % 12,
@@ -2575,6 +2755,7 @@ def run_ingestor(args):
                       file=sys.stderr)
 
     def send_event(ev, host):
+        """Gửi dữ liệu hoặc thông điệp `send event` tới thành phần đích."""
         _update_max_event_time(ev)
         try:
             data = json.dumps([ev]).encode()
@@ -2599,21 +2780,24 @@ def run_ingestor(args):
                 traceback.print_exc(file=sys.stderr)
 
     def send_punctuation():
-        """Emit per-partition punctuation tokens.
-
-        Three modes, set via PUNCTUATION_MODE env var:
-
-        data-driven (default) — guaranteed 100% completeness for CSV replay.
-          T_commit = min_event_time_sent keeps the watermark behind ALL events
-          during ingestion, then jumps to max_event_time_sent + delta + window
-          at EOF to flush every window.  Memory: open_windows ≈ span / window_size.
-
-        max-event-time — progressive window closing for large streaming datasets.
-          Each partition's T_commit = max_event_time_per_part[pid], so no
-          cross-partition contamination.  May mark old events late on datasets
-          whose event-time span exceeds delta_base + window_size.
-
-        wall-clock — real-time streaming: T_commit = now - delta_base_s.
+        """Gửi dữ liệu hoặc thông điệp `send punctuation` tới thành phần đích.
+        
+        Ghi chú gốc:
+        Emit per-partition punctuation tokens.
+        
+                Three modes, set via PUNCTUATION_MODE env var:
+        
+                data-driven (default) — guaranteed 100% completeness for CSV replay.
+                  T_commit = min_event_time_sent keeps the watermark behind ALL events
+                  during ingestion, then jumps to max_event_time_sent + delta + window
+                  at EOF to flush every window.  Memory: open_windows ≈ span / window_size.
+        
+                max-event-time — progressive window closing for large streaming datasets.
+                  Each partition's T_commit = max_event_time_per_part[pid], so no
+                  cross-partition contamination.  May mark old events late on datasets
+                  whose event-time span exceeds delta_base + window_size.
+        
+                wall-clock — real-time streaming: T_commit = now - delta_base_s.
         """
         is_empty = events_sent_since_punctuation[0] == 0
         events_sent_since_punctuation[0] = 0
@@ -2699,6 +2883,7 @@ def run_ingestor(args):
     migration_step = os.environ.get("SCHEMA_MIGRATION_STEP", "v1_only").lower()
 
     def create_v1_event(ev):
+        """Hàm `create_v1_event` thực hiện phần xử lý liên quan đến create v1 event."""
         ev_v1 = dict(ev)
         ev_v1["schema_version"] = 1
         if "status" not in ev_v1:
@@ -2706,6 +2891,7 @@ def run_ingestor(args):
         return ev_v1
 
     def create_v2_event(ev):
+        """Hàm `create_v2_event` thực hiện phần xử lý liên quan đến create v2 event."""
         ev_v2 = dict(ev)
         ev_v2["schema_version"] = 2
         status = ev_v2.pop("status", 200)
@@ -2717,6 +2903,7 @@ def run_ingestor(args):
     stop = threading.Event()
 
     def loop():
+        """Hàm `loop` thực hiện phần xử lý liên quan đến loop."""
         idx = 0
         eof = False
         last_report = time.time()
@@ -2819,6 +3006,7 @@ def run_ingestor(args):
     coordinator_url = os.environ.get("COORDINATOR_URL", "")
 
     def heartbeat_loop():
+        """Hàm `heartbeat_loop` thực hiện phần xử lý liên quan đến heartbeat loop."""
         import urllib.request as _req
         while not stop.is_set():
             time.sleep(5.0)
@@ -2905,6 +3093,7 @@ def run_ingestor(args):
 
     # Monitoring push loop
     def monitoring_loop():
+        """Hàm `monitoring_loop` thực hiện phần xử lý liên quan đến monitoring loop."""
         while not stop.is_set():
             time.sleep(5.0)
             if mon_mgr:
@@ -2923,7 +3112,11 @@ def run_ingestor(args):
 # ---------------------------------------------------------------------------
 
 def _cleanup_components(state: dict) -> None:
-    """Call checkpoint/flush/close on all components during graceful shutdown."""
+    """Hàm `_cleanup_components` thực hiện phần xử lý liên quan đến cleanup components.
+    
+    Ghi chú gốc:
+    Call checkpoint/flush/close on all components during graceful shutdown.
+    """
     if state is None:
         return
     grpc_srv = state.get("grpc_server")
@@ -2945,7 +3138,9 @@ def _cleanup_components(state: dict) -> None:
 
 
 def _wait_shutdown(stop_event, server, state: dict = None):
+    """Chờ điều kiện `wait shutdown` hoàn tất trước khi tiếp tục."""
     def _handle(signum, frame):
+        """Hàm `_handle` thực hiện phần xử lý liên quan đến handle."""
         print(f"\n[shutdown] signal {signum} received, stopping...")
         stop_event.set()
         _cleanup_components(state)

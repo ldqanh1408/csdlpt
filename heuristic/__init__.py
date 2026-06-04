@@ -1,4 +1,8 @@
-"""Heuristic Watermark path - low latency with bounded loss via DDSketch."""
+"""
+Package triển khai nhánh Heuristic Watermark.
+
+Nhánh này ưu tiên độ trễ thấp bằng DDSketch để ước lượng phân vị lateness, định tuyến event trễ sang DLQ và phát correction để đạt eventual consistency.
+"""
 
 from heuristic.engine import HeuristicWatermarkEngine
 from heuristic.aggregator import HeuristicAggregator

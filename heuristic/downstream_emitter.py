@@ -1,4 +1,8 @@
-"""Downstream Emitter — correction delivery with latency tracking (Spec §12.2-12.7)."""
+"""
+Bộ phát correction xuống downstream kèm đo độ trễ.
+
+Module xếp hàng correction theo mức ưu tiên, gửi sang sink/Kafka nếu có và thống kê latency để đánh giá eventual consistency.
+"""
 
 import heapq
 import logging
@@ -13,15 +17,21 @@ logger = logging.getLogger("downstream_emitter")
 
 @dataclass(order=True)
 class PriorityCorrection:
+    """Lớp `PriorityCorrection` gom dữ liệu và hành vi liên quan đến PriorityCorrection."""
     priority: float
     correction: CorrectionMessage = field(compare=False)
     enqueued_at: float = field(compare=False, default_factory=time.time)
 
 
 class DownstreamEmitter:
-    """Emits corrections with priority queue (largest deltas first)."""
+    """Lớp `DownstreamEmitter` gom dữ liệu và hành vi liên quan đến DownstreamEmitter.
+    
+    Ghi chú gốc:
+    Emits corrections with priority queue (largest deltas first).
+    """
 
     def __init__(self, max_queue: int = 10000):
+        """Khởi tạo đối tượng của `DownstreamEmitter` và thiết lập trạng thái ban đầu."""
         self._lock = threading.Lock()
         self._queue: list[PriorityCorrection] = []
         self._emitted: dict[str, CorrectionMessage] = {}
@@ -36,6 +46,7 @@ class DownstreamEmitter:
         self._final_sent: set[str] = set()  # window_ids that already received FINAL
 
     def enqueue(self, correction: CorrectionMessage, window_type: str = "normal"):
+        """Đưa dữ liệu vào hàng đợi `enqueue` để xử lý sau."""
         with self._lock:
             if len(self._queue) >= self.max_queue:
                 self._dropped += 1
@@ -45,6 +56,7 @@ class DownstreamEmitter:
             self._correction_window_types[correction.correction_id] = window_type
 
     def drain(self, batch_size: int = 100) -> list[CorrectionMessage]:
+        """Hàm `drain` thực hiện phần xử lý liên quan đến drain của `DownstreamEmitter`."""
         emitted = []
         with self._lock:
             for _ in range(min(batch_size, len(self._queue))):
@@ -66,6 +78,7 @@ class DownstreamEmitter:
 
     def emit_final_reconciliation(self, window_id: str, final_count: int,
                                    previous_emit_timestamp: float = 0.0) -> CorrectionMessage | None:
+        """Phát dữ liệu hoặc metric `emit final reconciliation` ra downstream."""
         with self._lock:
             # Skip if this window already received its FINAL
             if window_id in self._final_sent:
@@ -83,16 +96,20 @@ class DownstreamEmitter:
         return None
 
     def pending(self) -> int:
+        """Hàm `pending` thực hiện phần xử lý liên quan đến pending của `DownstreamEmitter`."""
         with self._lock:
             return len(self._queue)
 
     def avg_correction_latency_s(self) -> float:
+        """Hàm `avg_correction_latency_s` thực hiện phần xử lý liên quan đến avg correction latency s của `DownstreamEmitter`.
+        """
         with self._lock:
             if not self._latencies_s:
                 return 0.0
             return sum(self._latencies_s) / len(self._latencies_s)
 
     def summary(self) -> dict:
+        """Tạo bản tóm tắt trạng thái `summary` để trả về API hoặc báo cáo."""
         with self._lock:
             return {
                 "queue_depth": len(self._queue),
@@ -107,16 +124,19 @@ class DownstreamEmitter:
     # ------------------------------------------------------------------
 
     def check_sla(self) -> dict:
-        """Check correction latency SLA compliance.
-
-        SLA thresholds:
-          - Normal window: correction must be emitted within 1 hour (3600s)
-          - Burst window:  correction must be emitted within 15 minutes (900s)
-
-        Returns a dict with:
-          normal_window_violations : int
-          burst_window_violations : int
-          sla_compliant_pct        : float (0-100)
+        """Kiểm tra điều kiện `check sla` và trả về kết quả đánh giá.
+        
+        Ghi chú gốc:
+        Check correction latency SLA compliance.
+        
+                SLA thresholds:
+                  - Normal window: correction must be emitted within 1 hour (3600s)
+                  - Burst window:  correction must be emitted within 15 minutes (900s)
+        
+                Returns a dict with:
+                  normal_window_violations : int
+                  burst_window_violations : int
+                  sla_compliant_pct        : float (0-100)
         """
         with self._lock:
             normal_violations = sum(
@@ -144,20 +164,24 @@ class DownstreamEmitter:
     def schedule_final_reconciliation(
         self, stop_event: threading.Event, window_store,
     ) -> None:
-        """Start a background thread that checks for windows older than 24h
-        and emits FINAL_RECONCILIATION for each eligible window.
-
-        Parameters
-        ----------
-        stop_event : threading.Event
-            When set, the loop exits cleanly.
-        window_store : object
-            A store with a ``get_expired_windows(age_s)`` method that returns
-            an iterable of (window_id, current_count, emitted_at) tuples for
-            windows whose end time is older than ``age_s`` seconds.  Typical
-            ``age_s`` is 86400 (24 hours).
+        """Hàm `schedule_final_reconciliation` thực hiện phần xử lý liên quan đến schedule final reconciliation của `DownstreamEmitter`.
+        
+        Ghi chú gốc:
+        Start a background thread that checks for windows older than 24h
+                and emits FINAL_RECONCILIATION for each eligible window.
+        
+                Parameters
+                ----------
+                stop_event : threading.Event
+                    When set, the loop exits cleanly.
+                window_store : object
+                    A store with a ``get_expired_windows(age_s)`` method that returns
+                    an iterable of (window_id, current_count, emitted_at) tuples for
+                    windows whose end time is older than ``age_s`` seconds.  Typical
+                    ``age_s`` is 86400 (24 hours).
         """
         def _loop():
+            """Hàm `_loop` thực hiện phần xử lý liên quan đến loop của `DownstreamEmitter`."""
             logger.info("24h FINAL reconciliation scheduler started")
             while not stop_event.is_set():
                 try:

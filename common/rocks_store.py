@@ -1,7 +1,7 @@
-"""RocksDB persistent key-value store wrapper using rocksdict.
+"""
+Lớp bọc RocksDB/RocksDict cho lưu trữ key-value bền vững.
 
-Provides dict-like interface with pickle serialization, write-batch support,
-prefix-based iteration/cleanup, and context-manager protocol.
+Dùng để checkpoint open/closed windows, DLQ, output idempotency, failback state và metadata cần sống sót qua restart hoặc failover.
 """
 
 import os
@@ -15,23 +15,27 @@ _BLOCK_CACHE_BYTES = 64 * 1024 * 1024  # 64 MB per instance (spec §11)
 
 
 class RocksStore:
-    """RocksDB-backed persistent store.
-
-    All keys are strings (encoded as UTF-8 bytes internally).
-    All values are pickled Python objects.
-
-    Usage:
-        store = RocksStore("/data/mystore")
-        store.put("key1", {"count": 5})
-        val = store.get("key1")
-        store.close()
-
-        # Context manager
-        with RocksStore("/data/mystore") as store:
-            store.put("x", 42)
+    """Lớp `RocksStore` gom dữ liệu và hành vi liên quan đến RocksStore.
+    
+    Ghi chú gốc:
+    RocksDB-backed persistent store.
+    
+        All keys are strings (encoded as UTF-8 bytes internally).
+        All values are pickled Python objects.
+    
+        Usage:
+            store = RocksStore("/data/mystore")
+            store.put("key1", {"count": 5})
+            val = store.get("key1")
+            store.close()
+    
+            # Context manager
+            with RocksStore("/data/mystore") as store:
+                store.put("x", 42)
     """
 
     def __init__(self, db_path: str, create_if_missing: bool = True) -> None:
+        """Khởi tạo đối tượng của `RocksStore` và thiết lập trạng thái ban đầu."""
         self.db_path: str = db_path
         self._db: Optional[rocksdict.Rdict] = None
         self._opts = rocksdict.Options()
@@ -47,6 +51,7 @@ class RocksStore:
     # ------------------------------------------------------------------
 
     def _ensure_connected(self) -> None:
+        """Đảm bảo điều kiện/tài nguyên `ensure connected` đã sẵn sàng trước khi dùng."""
         if self._db is None:
             with self._lock:
                 if self._db is None:
@@ -55,18 +60,22 @@ class RocksStore:
 
     @staticmethod
     def _encode_key(key: str) -> bytes:
+        """Hàm `_encode_key` thực hiện phần xử lý liên quan đến encode key của `RocksStore`."""
         return key.encode("utf-8")
 
     @staticmethod
     def _decode_key(raw: bytes) -> str:
+        """Hàm `_decode_key` thực hiện phần xử lý liên quan đến decode key của `RocksStore`."""
         return raw.decode("utf-8")
 
     @staticmethod
     def _encode_value(value: Any) -> bytes:
+        """Hàm `_encode_value` thực hiện phần xử lý liên quan đến encode value của `RocksStore`."""
         return pickle.dumps(value)
 
     @staticmethod
     def _decode_value(raw: bytes) -> Any:
+        """Hàm `_decode_value` thực hiện phần xử lý liên quan đến decode value của `RocksStore`."""
         return pickle.loads(raw)
 
     # ------------------------------------------------------------------
@@ -74,13 +83,21 @@ class RocksStore:
     # ------------------------------------------------------------------
 
     def put(self, key: str, value: Any) -> None:
-        """Store a value under the given key."""
+        """Hàm `put` thực hiện phần xử lý liên quan đến put của `RocksStore`.
+        
+        Ghi chú gốc:
+        Store a value under the given key.
+        """
         with self._lock:
             self._ensure_connected()
             self._db[self._encode_key(key)] = self._encode_value(value)
 
     def get(self, key: str) -> Optional[Any]:
-        """Retrieve a value by key.  Returns None when missing."""
+        """Hàm `get` thực hiện phần xử lý liên quan đến get của `RocksStore`.
+        
+        Ghi chú gốc:
+        Retrieve a value by key.  Returns None when missing.
+        """
         with self._lock:
             self._ensure_connected()
             try:
@@ -89,7 +106,11 @@ class RocksStore:
                 return None
 
     def delete(self, key: str) -> None:
-        """Remove a key (no-op if absent)."""
+        """Hàm `delete` thực hiện phần xử lý liên quan đến delete của `RocksStore`.
+        
+        Ghi chú gốc:
+        Remove a key (no-op if absent).
+        """
         with self._lock:
             self._ensure_connected()
             try:
@@ -98,7 +119,11 @@ class RocksStore:
                 pass
 
     def contains(self, key: str) -> bool:
-        """Return True if the key exists in the store."""
+        """Hàm `contains` thực hiện phần xử lý liên quan đến contains của `RocksStore`.
+        
+        Ghi chú gốc:
+        Return True if the key exists in the store.
+        """
         with self._lock:
             self._ensure_connected()
             return self._encode_key(key) in self._db
@@ -108,7 +133,11 @@ class RocksStore:
     # ------------------------------------------------------------------
 
     def items(self, prefix: str = "") -> Iterator[tuple[str, Any]]:
-        """Iterate over all (key, value) pairs, optionally filtered by prefix."""
+        """Hàm `items` thực hiện phần xử lý liên quan đến items của `RocksStore`.
+        
+        Ghi chú gốc:
+        Iterate over all (key, value) pairs, optionally filtered by prefix.
+        """
         with self._lock:
             self._ensure_connected()
             prefix_bytes = prefix.encode("utf-8") if prefix else b""
@@ -121,7 +150,11 @@ class RocksStore:
             yield item
 
     def keys(self, prefix: str = "") -> Iterator[str]:
-        """Iterate over all keys, optionally filtered by prefix."""
+        """Hàm `keys` thực hiện phần xử lý liên quan đến keys của `RocksStore`.
+        
+        Ghi chú gốc:
+        Iterate over all keys, optionally filtered by prefix.
+        """
         with self._lock:
             self._ensure_connected()
             prefix_bytes = prefix.encode("utf-8") if prefix else b""
@@ -134,7 +167,11 @@ class RocksStore:
             yield k
 
     def count(self, prefix: str = "") -> int:
-        """Count keys matching the given prefix."""
+        """Hàm `count` thực hiện phần xử lý liên quan đến count của `RocksStore`.
+        
+        Ghi chú gốc:
+        Count keys matching the given prefix.
+        """
         with self._lock:
             self._ensure_connected()
             prefix_bytes = prefix.encode("utf-8") if prefix else b""
@@ -146,10 +183,13 @@ class RocksStore:
             return n
 
     def clear_prefix(self, prefix: str) -> int:
-        """Delete all keys that start with *prefix*.  Returns number deleted.
-
-        Uses RocksDB range-delete when available; falls back to batched
-        iteration otherwise.
+        """Làm sạch dữ liệu/trạng thái `clear prefix` đang lưu tạm.
+        
+        Ghi chú gốc:
+        Delete all keys that start with *prefix*.  Returns number deleted.
+        
+                Uses RocksDB range-delete when available; falls back to batched
+                iteration otherwise.
         """
         with self._lock:
             self._ensure_connected()
@@ -182,18 +222,21 @@ class RocksStore:
     # ------------------------------------------------------------------
 
     def write_batch(self, operations: list[tuple[str, str, Any]]) -> None:
-        """Execute an atomic batch of operations.
-
-        Each element is a 3-tuple:
-            ("put",    key: str, value: Any)
-            ("delete", key: str, _dummy)
-
-        Example:
-            store.write_batch([
-                ("put", "a", 1),
-                ("put", "b", 2.5),
-                ("delete", "old", None),
-            ])
+        """Hàm `write_batch` thực hiện phần xử lý liên quan đến write batch của `RocksStore`.
+        
+        Ghi chú gốc:
+        Execute an atomic batch of operations.
+        
+                Each element is a 3-tuple:
+                    ("put",    key: str, value: Any)
+                    ("delete", key: str, _dummy)
+        
+                Example:
+                    store.write_batch([
+                        ("put", "a", 1),
+                        ("put", "b", 2.5),
+                        ("delete", "old", None),
+                    ])
         """
         with self._lock:
             self._ensure_connected()
@@ -213,13 +256,21 @@ class RocksStore:
     # ------------------------------------------------------------------
 
     def flush(self) -> None:
-        """Flush pending writes to disk for durability."""
+        """Flush dữ liệu đệm của `flush` xuống đích lưu trữ hoặc downstream.
+        
+        Ghi chú gốc:
+        Flush pending writes to disk for durability.
+        """
         with self._lock:
             if self._db is not None:
                 self._db.flush()
 
     def close(self) -> None:
-        """Close the database cleanly."""
+        """Đóng tài nguyên `close` và giải phóng trạng thái liên quan.
+        
+        Ghi chú gốc:
+        Close the database cleanly.
+        """
         with self._lock:
             if self._db is not None:
                 try:
@@ -230,14 +281,17 @@ class RocksStore:
                     self._db = None
 
     def __enter__(self) -> "RocksStore":
+        """Bắt đầu context manager của `RocksStore` và trả về đối tượng sử dụng được."""
         self._ensure_connected()
         return self
 
     def __exit__(self, exc_type, exc_val, exc_tb) -> bool:
+        """Kết thúc context manager của `RocksStore` và dọn tài nguyên liên quan."""
         self.close()
         return False
 
     @property
     def is_open(self) -> bool:
+        """Kiểm tra điều kiện `is open` và trả về boolean."""
         with self._lock:
             return self._db is not None

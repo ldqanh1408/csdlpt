@@ -1,56 +1,32 @@
-"""
-ddsketch/sketch.py — DDSketch for quantile estimation in distributed stream processing.
+"""Cài đặt DDSketch và SlidingWindowDDSketch cho hệ thống watermark.
 
-DDSketch (Datadog, 2019) is a fully-mergeable data structure for estimating
-quantiles with a configurable relative error guarantee (alpha). It maps
-positive values onto a logarithmic bucket index and maintains a counter per
-bucket. Quantile queries iterate buckets in ascending order until the
-cumulative count reaches the target rank; the value returned is the lower
-bound of the stopping bucket.
+DDSketch là cấu trúc dữ liệu ước lượng quantile có thể merge, dùng sai số tương
+đối alpha. Giá trị dương được ánh xạ vào bucket logarithmic; mỗi bucket chỉ lưu
+counter. Khi hỏi quantile, sketch duyệt bucket tăng dần tới khi tổng tích lũy
+đạt rank mục tiêu và trả về cận dưới của bucket đó.
 
-Algorithm
----------
-Given relative error alpha, define:
-    gamma = (1 + alpha) / (1 - alpha)
+Thuật toán:
+  - Với sai số tương đối alpha, đặt `gamma = (1 + alpha) / (1 - alpha)`.
+  - Với giá trị x trong `[min_value, max_value]`:
+    `bucket(x) = ceil(log_gamma(x / min_value))`.
+  - Cận dưới bucket i là `min_value * gamma**i`.
+  - Sai số tương đối được khống chế vì mọi x trong bucket i nằm trong khoảng
+    log tương ứng của gamma.
 
-For a value x in [min_value, max_value], the bucket index is:
-    bucket(x) = ceil(log_gamma(x / min_value))
-              = ceil(ln(x / min_value) / ln(gamma))
+Khả năng merge:
+  - Hai DDSketch cùng alpha/min/max có thể merge bằng cách cộng counter từng
+    bucket. Merge không làm tăng sai số, nên phù hợp với hệ phân tán: mỗi worker
+    giữ sketch cục bộ, aggregator/coordinator có thể cộng lại khi cần.
 
-The lower bound of bucket i is:
-    value_lower_bound(i) = min_value * gamma^i
+Giới hạn bộ nhớ:
+  - `max_buckets` giới hạn số bucket không rỗng.
+  - Khi vượt giới hạn, hai bucket thấp nhất được gộp lại.
+  - Giá trị âm bị bỏ qua; giá trị quá nhỏ/quá lớn được clamp theo min/max.
 
-The relative error guarantee holds because for any value x falling into bucket
-i, both x and value_lower_bound(i) lie within [gamma^i, gamma^(i+1)), so:
-    |value_lower_bound(i) - x| / x <= alpha
-
-Mergeability
-------------
-Two DDSketch instances with the same alpha can be merged by simply adding
-the bucket counters. The merge is exact — no additional error is introduced.
-This property makes DDSketch suitable for distributed aggregation: each node
-maintains a local sketch, and the coordinator merges them into a global view.
-
-Memory bound
-------------
-The number of non-empty buckets is bounded by max_buckets. When the limit is
-exceeded, the two lowest-index buckets are collapsed (counts summed, stored
-at the higher index). Tail truncation (values > max_value) and head clamping
-(values < min_value) are applied at ingestion time. Negative values are
-silently dropped.
-
-SlidingWindowDDSketch
----------------------
-Wraps a deque of sub-sketches, each covering a fixed time granularity
-(default 1 second), to provide quantile estimates over a sliding time window
-(default 60 seconds). On each advance() call, expired sub-sketches are
-dropped. Quantile queries merge all active sub-sketches on the fly.
-
-References
-----------
-- Masson, C., Rim, J. E., & Lee, H. K. (2019). "DDSketch: A fast and
-  fully-mergeable quantile sketch with relative-error guarantees."
-  Proceedings of the VLDB Endowment, 12(12), 2195-2205.
+SlidingWindowDDSketch:
+  - Giữ nhiều sub-sketch theo lát thời gian, mặc định mỗi lát 1 giây.
+  - Khi `advance()` tới thời điểm mới, sub-sketch hết hạn bị loại bỏ.
+  - Query quantile sẽ merge các sub-sketch còn active.
 """
 
 from __future__ import annotations
@@ -65,19 +41,22 @@ from typing import Dict, List, Optional, Tuple
 # ---------------------------------------------------------------------------
 
 class DDSketch:
-    """Fixed-memory quantile sketch with relative error guarantee.
-
-    Parameters
-    ----------
-    alpha : float
-        Relative error guarantee (default 0.01 = 1%).
-    max_buckets : int
-        Hard cap on the number of non-empty buckets (default 1024).
-    min_value : float
-        Smallest representable value. Inputs below this are clamped up.
-    max_value : float
-        Largest representable value. Inputs above this are clamped down
-        (the caller is expected to route genuine overflow events to a DLQ).
+    """Lớp `DDSketch` gom dữ liệu và hành vi liên quan đến DDSketch.
+    
+    Ghi chú gốc:
+    Fixed-memory quantile sketch with relative error guarantee.
+    
+        Parameters
+        ----------
+        alpha : float
+            Relative error guarantee (default 0.01 = 1%).
+        max_buckets : int
+            Hard cap on the number of non-empty buckets (default 1024).
+        min_value : float
+            Smallest representable value. Inputs below this are clamped up.
+        max_value : float
+            Largest representable value. Inputs above this are clamped down
+            (the caller is expected to route genuine overflow events to a DLQ).
     """
 
     def __init__(
@@ -87,6 +66,7 @@ class DDSketch:
         min_value: float = 1e-3,
         max_value: float = 3600.0,
     ) -> None:
+        """Khởi tạo đối tượng của `DDSketch` và thiết lập trạng thái ban đầu."""
         if alpha <= 0 or alpha >= 1:
             raise ValueError("alpha must be in (0, 1)")
         if max_buckets < 2:
@@ -110,32 +90,51 @@ class DDSketch:
 
     @property
     def total_count(self) -> int:
-        """Total number of (non-negative, in-range) values inserted."""
+        """Hàm `total_count` thực hiện phần xử lý liên quan đến total count của `DDSketch`.
+        
+        Ghi chú gốc:
+        Total number of (non-negative, in-range) values inserted.
+        """
         return self._total_count
 
     @property
     def bucket_count(self) -> int:
-        """Number of non-empty buckets currently stored."""
+        """Hàm `bucket_count` thực hiện phần xử lý liên quan đến bucket count của `DDSketch`.
+        
+        Ghi chú gốc:
+        Number of non-empty buckets currently stored.
+        """
         return len(self._buckets)
 
     # --- bucket index helpers -----------------------------------------------
 
     def _bucket_index(self, value: float) -> int:
-        """Compute the bucket index for a positive value."""
+        """Hàm `_bucket_index` thực hiện phần xử lý liên quan đến bucket index của `DDSketch`.
+        
+        Ghi chú gốc:
+        Compute the bucket index for a positive value.
+        """
         ratio = value / self.min_value
         return int(math.ceil(math.log(ratio) / self._log_gamma))
 
     def _value_lower_bound(self, bucket_idx: int) -> float:
-        """Return the smallest value that falls into the given bucket."""
+        """Hàm `_value_lower_bound` thực hiện phần xử lý liên quan đến value lower bound của `DDSketch`.
+        
+        Ghi chú gốc:
+        Return the smallest value that falls into the given bucket.
+        """
         return self.min_value * (self._gamma ** bucket_idx)
 
     # --- insert -------------------------------------------------------------
 
     def add(self, value: float) -> None:
-        """Add a single value to the sketch.  O(1) amortised.
-
-        Values outside [min_value, max_value] are capped to the nearest bound.
-        Negative values are silently dropped.
+        """Hàm `add` thực hiện phần xử lý liên quan đến add của `DDSketch`.
+        
+        Ghi chú gốc:
+        Add a single value to the sketch.  O(1) amortised.
+        
+                Values outside [min_value, max_value] are capped to the nearest bound.
+                Negative values are silently dropped.
         """
         if value < 0:
             return
@@ -148,14 +147,22 @@ class DDSketch:
         self._maybe_collapse()
 
     def add_many(self, values: List[float]) -> None:
-        """Batch-insert a list of values."""
+        """Hàm `add_many` thực hiện phần xử lý liên quan đến add many của `DDSketch`.
+        
+        Ghi chú gốc:
+        Batch-insert a list of values.
+        """
         for v in values:
             self.add(v)
 
     # --- collapse -----------------------------------------------------------
 
     def _maybe_collapse(self) -> None:
-        """Collapse the two lowest-index buckets when over capacity."""
+        """Hàm `_maybe_collapse` thực hiện phần xử lý liên quan đến maybe collapse của `DDSketch`.
+        
+        Ghi chú gốc:
+        Collapse the two lowest-index buckets when over capacity.
+        """
         while len(self._buckets) > self.max_buckets:
             sorted_indices = sorted(self._buckets.keys())
             if len(sorted_indices) < 2:
@@ -168,14 +175,17 @@ class DDSketch:
     # --- quantile -----------------------------------------------------------
 
     def quantile(self, q: float) -> float:
-        """Return the estimated *q*-quantile (0 <= q <= 1).
-
-        Returns 0.0 when the sketch is empty.
-
-        Raises
-        ------
-        ValueError
-            If *q* is outside [0, 1].
+        """Hàm `quantile` thực hiện phần xử lý liên quan đến quantile của `DDSketch`.
+        
+        Ghi chú gốc:
+        Return the estimated *q*-quantile (0 <= q <= 1).
+        
+                Returns 0.0 when the sketch is empty.
+        
+                Raises
+                ------
+                ValueError
+                    If *q* is outside [0, 1].
         """
         if not (0.0 <= q <= 1.0):
             raise ValueError(f"q must be in [0, 1], got {q}")
@@ -199,10 +209,13 @@ class DDSketch:
     # --- merge --------------------------------------------------------------
 
     def merge(self, other: DDSketch) -> DDSketch:
-        """Merge *other* into a **new** sketch.  Exact -- no accuracy loss.
-
-        The two sketches must share the same *alpha*, *max_buckets*,
-        *min_value*, and *max_value*.
+        """Hàm `merge` thực hiện phần xử lý liên quan đến merge của `DDSketch`.
+        
+        Ghi chú gốc:
+        Merge *other* into a **new** sketch.  Exact -- no accuracy loss.
+        
+                The two sketches must share the same *alpha*, *max_buckets*,
+                *min_value*, and *max_value*.
         """
         self._validate_merge_compatible(other)
 
@@ -223,7 +236,11 @@ class DDSketch:
         return merged
 
     def merge_into(self, other: DDSketch) -> None:
-        """Merge *other* into **this** sketch in-place."""
+        """Hàm `merge_into` thực hiện phần xử lý liên quan đến merge into của `DDSketch`.
+        
+        Ghi chú gốc:
+        Merge *other* into **this** sketch in-place.
+        """
         self._validate_merge_compatible(other)
 
         self._total_count += other._total_count
@@ -233,7 +250,11 @@ class DDSketch:
         self._maybe_collapse()
 
     def _validate_merge_compatible(self, other: DDSketch) -> None:
-        """Raise if *other* is incompatible for merging."""
+        """Hàm `_validate_merge_compatible` thực hiện phần xử lý liên quan đến validate merge compatible của `DDSketch`.
+        
+        Ghi chú gốc:
+        Raise if *other* is incompatible for merging.
+        """
         if self.alpha != other.alpha:
             raise ValueError(
                 f"alpha mismatch: {self.alpha} vs {other.alpha}"
@@ -252,7 +273,11 @@ class DDSketch:
             )
 
     def copy(self) -> DDSketch:
-        """Return a deep copy with identical configuration and state."""
+        """Hàm `copy` thực hiện phần xử lý liên quan đến copy của `DDSketch`.
+        
+        Ghi chú gốc:
+        Return a deep copy with identical configuration and state.
+        """
         cp = DDSketch(
             alpha=self.alpha,
             max_buckets=self.max_buckets,
@@ -266,7 +291,11 @@ class DDSketch:
     # --- serialisation ------------------------------------------------------
 
     def to_dict(self) -> dict:
-        """Serialize to a plain dict (suitable for JSON)."""
+        """Hàm `to_dict` thực hiện phần xử lý liên quan đến to dict của `DDSketch`.
+        
+        Ghi chú gốc:
+        Serialize to a plain dict (suitable for JSON).
+        """
         return {
             "alpha": self.alpha,
             "max_buckets": self.max_buckets,
@@ -278,7 +307,11 @@ class DDSketch:
 
     @classmethod
     def from_dict(cls, d: dict) -> DDSketch:
-        """Deserialize from a dict previously produced by ``to_dict``."""
+        """Hàm `from_dict` thực hiện phần xử lý liên quan đến from dict của `DDSketch`.
+        
+        Ghi chú gốc:
+        Deserialize from a dict previously produced by ``to_dict``.
+        """
         sketch = cls(
             alpha=d["alpha"],
             max_buckets=d["max_buckets"],
@@ -292,6 +325,7 @@ class DDSketch:
     # --- repr ---------------------------------------------------------------
 
     def __repr__(self) -> str:
+        """Hàm `__repr__` thực hiện phần xử lý liên quan đến repr của `DDSketch`."""
         return (
             f"DDSketch(alpha={self.alpha}, buckets={len(self._buckets)}/"
             f"{self.max_buckets}, count={self._total_count})"
@@ -303,28 +337,31 @@ class DDSketch:
 # ---------------------------------------------------------------------------
 
 class SlidingWindowDDSketch:
-    """Quantile sketch over a sliding time window.
-
-    Maintains *N* sub-sketches, each covering a fixed time granularity
-    (default 1 second).  The oldest sub-sketch is dropped when it falls
-    outside the window, and new sub-sketches are created automatically as
-    time advances.
-
-    Parameters
-    ----------
-    window_seconds : float
-        Total width of the sliding window in seconds (default 60).
-    sub_sketch_granularity : float
-        Duration each sub-sketch covers in seconds (default 1).
-        The number of sub-sketches is ``window_seconds / sub_sketch_granularity``.
-    alpha : float
-        Relative error passed to each underlying ``DDSketch``.
-    max_buckets : int
-        Bucket cap passed to each underlying ``DDSketch``.
-    min_value : float
-        Minimum representable value for each sub-sketch.
-    max_value : float
-        Maximum representable value for each sub-sketch.
+    """Lớp `SlidingWindowDDSketch` gom dữ liệu và hành vi liên quan đến SlidingWindowDDSketch.
+    
+    Ghi chú gốc:
+    Quantile sketch over a sliding time window.
+    
+        Maintains *N* sub-sketches, each covering a fixed time granularity
+        (default 1 second).  The oldest sub-sketch is dropped when it falls
+        outside the window, and new sub-sketches are created automatically as
+        time advances.
+    
+        Parameters
+        ----------
+        window_seconds : float
+            Total width of the sliding window in seconds (default 60).
+        sub_sketch_granularity : float
+            Duration each sub-sketch covers in seconds (default 1).
+            The number of sub-sketches is ``window_seconds / sub_sketch_granularity``.
+        alpha : float
+            Relative error passed to each underlying ``DDSketch``.
+        max_buckets : int
+            Bucket cap passed to each underlying ``DDSketch``.
+        min_value : float
+            Minimum representable value for each sub-sketch.
+        max_value : float
+            Maximum representable value for each sub-sketch.
     """
 
     def __init__(
@@ -336,6 +373,7 @@ class SlidingWindowDDSketch:
         min_value: float = 1e-3,
         max_value: float = 3600.0,
     ) -> None:
+        """Khởi tạo đối tượng của `SlidingWindowDDSketch` và thiết lập trạng thái ban đầu."""
         if window_seconds <= 0:
             raise ValueError("window_seconds must be > 0")
         if sub_sketch_granularity <= 0:
@@ -358,14 +396,22 @@ class SlidingWindowDDSketch:
     # --- helpers ------------------------------------------------------------
 
     def _sub_sketch_start(self, timestamp: float) -> float:
-        """Return the start boundary of the granularity bucket for *timestamp*."""
+        """Hàm `_sub_sketch_start` thực hiện phần xử lý liên quan đến sub sketch start của `SlidingWindowDDSketch`.
+        
+        Ghi chú gốc:
+        Return the start boundary of the granularity bucket for *timestamp*.
+        """
         return (
             math.floor(timestamp / self.sub_sketch_granularity)
             * self.sub_sketch_granularity
         )
 
     def _make_sub_sketch(self) -> DDSketch:
-        """Create an empty sub-sketch with this window's parameters."""
+        """Hàm `_make_sub_sketch` thực hiện phần xử lý liên quan đến make sub sketch của `SlidingWindowDDSketch`.
+        
+        Ghi chú gốc:
+        Create an empty sub-sketch with this window's parameters.
+        """
         return DDSketch(
             alpha=self.alpha,
             max_buckets=self.max_buckets,
@@ -374,7 +420,11 @@ class SlidingWindowDDSketch:
         )
 
     def _prune(self) -> None:
-        """Remove sub-sketches whose start time has fallen outside the window."""
+        """Hàm `_prune` thực hiện phần xử lý liên quan đến prune của `SlidingWindowDDSketch`.
+        
+        Ghi chú gốc:
+        Remove sub-sketches whose start time has fallen outside the window.
+        """
         if self._latest_time is None:
             return
         cutoff = self._latest_time - self.window_seconds
@@ -385,12 +435,15 @@ class SlidingWindowDDSketch:
     # --- insert -------------------------------------------------------------
 
     def add(self, value: float, timestamp: Optional[float] = None) -> None:
-        """Add *value* to the sub-sketch covering *timestamp*.
-
-        If *timestamp* is ``None``, ``time.time()`` is used.  Values with a
-        timestamp older than the current window are silently dropped.
-        Negative values are silently dropped (delegated to the underlying
-        ``DDSketch.add``).
+        """Hàm `add` thực hiện phần xử lý liên quan đến add của `SlidingWindowDDSketch`.
+        
+        Ghi chú gốc:
+        Add *value* to the sub-sketch covering *timestamp*.
+        
+                If *timestamp* is ``None``, ``time.time()`` is used.  Values with a
+                timestamp older than the current window are silently dropped.
+                Negative values are silently dropped (delegated to the underlying
+                ``DDSketch.add``).
         """
         if timestamp is None:
             timestamp = time.time()
@@ -417,17 +470,24 @@ class SlidingWindowDDSketch:
     def add_many(
         self, values: List[Tuple[float, float]]
     ) -> None:
-        """Batch-insert (value, timestamp) pairs."""
+        """Hàm `add_many` thực hiện phần xử lý liên quan đến add many của `SlidingWindowDDSketch`.
+        
+        Ghi chú gốc:
+        Batch-insert (value, timestamp) pairs.
+        """
         for value, ts in values:
             self.add(value, ts)
 
     # --- window management --------------------------------------------------
 
     def advance(self, current_time: float) -> None:
-        """Rotate the window so *current_time* becomes the leading edge.
-
-        Sub-sketches whose start time is before
-        ``current_time - window_seconds`` are dropped.
+        """Hàm `advance` thực hiện phần xử lý liên quan đến advance của `SlidingWindowDDSketch`.
+        
+        Ghi chú gốc:
+        Rotate the window so *current_time* becomes the leading edge.
+        
+                Sub-sketches whose start time is before
+                ``current_time - window_seconds`` are dropped.
         """
         if self._latest_time is None or current_time > self._latest_time:
             self._latest_time = current_time
@@ -436,9 +496,12 @@ class SlidingWindowDDSketch:
     # --- quantile -----------------------------------------------------------
 
     def quantile(self, q: float) -> float:
-        """Return the estimated *q*-quantile across all active sub-sketches.
-
-        Returns 0.0 when no data is present in the window.
+        """Hàm `quantile` thực hiện phần xử lý liên quan đến quantile của `SlidingWindowDDSketch`.
+        
+        Ghi chú gốc:
+        Return the estimated *q*-quantile across all active sub-sketches.
+        
+                Returns 0.0 when no data is present in the window.
         """
         if not self._sketches:
             return 0.0
@@ -454,18 +517,30 @@ class SlidingWindowDDSketch:
 
     @property
     def total_count(self) -> int:
-        """Total number of samples across all active sub-sketches."""
+        """Hàm `total_count` thực hiện phần xử lý liên quan đến total count của `SlidingWindowDDSketch`.
+        
+        Ghi chú gốc:
+        Total number of samples across all active sub-sketches.
+        """
         return sum(sk.total_count for sk in self._sketches.values())
 
     @property
     def active_sub_sketches(self) -> int:
-        """Number of sub-sketches currently within the window."""
+        """Hàm `active_sub_sketches` thực hiện phần xử lý liên quan đến active sub sketches của `SlidingWindowDDSketch`.
+        
+        Ghi chú gốc:
+        Number of sub-sketches currently within the window.
+        """
         return len(self._sketches)
 
     # --- serialisation ------------------------------------------------------
 
     def to_dict(self) -> dict:
-        """Serialize to a plain dict (suitable for JSON)."""
+        """Hàm `to_dict` thực hiện phần xử lý liên quan đến to dict của `SlidingWindowDDSketch`.
+        
+        Ghi chú gốc:
+        Serialize to a plain dict (suitable for JSON).
+        """
         return {
             "window_seconds": self.window_seconds,
             "sub_sketch_granularity": self.sub_sketch_granularity,
@@ -482,7 +557,11 @@ class SlidingWindowDDSketch:
 
     @classmethod
     def from_dict(cls, d: dict) -> SlidingWindowDDSketch:
-        """Deserialize from a dict previously produced by ``to_dict``."""
+        """Hàm `from_dict` thực hiện phần xử lý liên quan đến from dict của `SlidingWindowDDSketch`.
+        
+        Ghi chú gốc:
+        Deserialize from a dict previously produced by ``to_dict``.
+        """
         window = cls(
             window_seconds=d["window_seconds"],
             sub_sketch_granularity=d["sub_sketch_granularity"],
@@ -501,6 +580,7 @@ class SlidingWindowDDSketch:
     # --- repr ---------------------------------------------------------------
 
     def __repr__(self) -> str:
+        """Hàm `__repr__` thực hiện phần xử lý liên quan đến repr của `SlidingWindowDDSketch`."""
         return (
             f"SlidingWindowDDSketch(window={self.window_seconds}s, "
             f"granularity={self.sub_sketch_granularity}s, "

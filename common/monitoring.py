@@ -1,10 +1,7 @@
-"""Central Prometheus metrics registry for the stream processor.
+"""
+Registry Prometheus trung tâm cho toàn hệ thống.
 
-Provides a MonitoringManager that wraps prometheus_client metrics (Counter,
-Gauge, Histogram) and exposes helpers to update them from coordinator broadcasts
-and per-engine summaries.  Metrics follow Prometheus naming conventions:
-snake_case, _total suffix for counters, _seconds for time-valued gauges
-(where appropriate).
+Module tạo và cập nhật Counter/Gauge/Histogram cho watermark, worker, DLQ, failover, backpressure, replay, correction latency và timer profile.
 """
 
 from __future__ import annotations
@@ -31,6 +28,7 @@ from prometheus_client import (
 
 @dataclass
 class AlertRule:
+    """Lớp `AlertRule` gom dữ liệu và hành vi liên quan đến AlertRule."""
     name: str
     description: str
     severity: str  # critical | warning | high
@@ -43,15 +41,19 @@ class AlertRule:
 # ---------------------------------------------------------------------------
 
 class MonitoringManager:
-    """Central Prometheus metrics registry for the stream processor.
-
-    Parameters
-    ----------
-    registry : CollectorRegistry | None
-        If None, uses the default global registry.
+    """Lớp `MonitoringManager` quản lý trạng thái và thao tác nghiệp vụ tương ứng.
+    
+    Ghi chú gốc:
+    Central Prometheus metrics registry for the stream processor.
+    
+        Parameters
+        ----------
+        registry : CollectorRegistry | None
+            If None, uses the default global registry.
     """
 
     def __init__(self, registry: CollectorRegistry | None = None):
+        """Khởi tạo đối tượng của `MonitoringManager` và thiết lập trạng thái ban đầu."""
         _reg = registry or REGISTRY
 
         # ---- Watermark gauges ----
@@ -423,12 +425,15 @@ class MonitoringManager:
     # ------------------------------------------------------------------
 
     def update_from_coordinator(self, broadcast: dict) -> None:
-        """Update metrics from a coordinator broadcast dict.
-
-        Expected keys (from StrictCoordinator.broadcast):
-          W_global, term, timestamp, partition_count, active_workers,
-          fencing_violations, node_skew_max_ms, watermark_lag_s,
-          skew_status, lag_status, combined_status
+        """Cập nhật trạng thái/metric `update from coordinator` dựa trên dữ liệu mới.
+        
+        Ghi chú gốc:
+        Update metrics from a coordinator broadcast dict.
+        
+                Expected keys (from StrictCoordinator.broadcast):
+                  W_global, term, timestamp, partition_count, active_workers,
+                  fencing_violations, node_skew_max_ms, watermark_lag_s,
+                  skew_status, lag_status, combined_status
         """
         mode = broadcast.get("mode", "strict")
         wg = broadcast.get("W_global", float("-inf"))
@@ -478,15 +483,18 @@ class MonitoringManager:
         self._snapshot["_raft_term_prev"] = cur_term
 
     def update_from_engine(self, engine_summary: dict, worker_id: str, partition_id: int) -> None:
-        """Update metrics from an engine summary dict.
-
-        Expected keys (from SystemMetrics.summary / engine.summary):
-          total_received, on_time, late_dropped, duplicates, backpressure_drops,
-          watermark_lag_s, node_skew_ms, sketch_total_count,
-          sketch_quantile_p50_ms, sketch_quantile_p95_ms, sketch_quantile_p99_ms,
-          dlq_backlog, replay_mode_active, adaptive_percentile_active,
-          fencing_token_violations, data_completeness_pct, late_arrival_rate_pct,
-          non_monotonic_punctuation, idleness_detected
+        """Cập nhật trạng thái/metric `update from engine` dựa trên dữ liệu mới.
+        
+        Ghi chú gốc:
+        Update metrics from an engine summary dict.
+        
+                Expected keys (from SystemMetrics.summary / engine.summary):
+                  total_received, on_time, late_dropped, duplicates, backpressure_drops,
+                  watermark_lag_s, node_skew_ms, sketch_total_count,
+                  sketch_quantile_p50_ms, sketch_quantile_p95_ms, sketch_quantile_p99_ms,
+                  dlq_backlog, replay_mode_active, adaptive_percentile_active,
+                  fencing_token_violations, data_completeness_pct, late_arrival_rate_pct,
+                  non_monotonic_punctuation, idleness_detected
         """
         pid = str(partition_id)
 
@@ -618,7 +626,11 @@ class MonitoringManager:
         self.ingestor_network_rtt_seconds.labels(ingestor_id=ingestor_id).set(net_rtt_s)
 
     def update_from_health_monitor(self, health_eval: dict) -> None:
-        """Update ingestion health gauges from IngestorHealthMonitor.evaluate()."""
+        """Cập nhật trạng thái/metric `update from health monitor` dựa trên dữ liệu mới.
+        
+        Ghi chú gốc:
+        Update ingestion health gauges from IngestorHealthMonitor.evaluate().
+        """
         silent = health_eval.get("silent_count", 0)
         stuck = sum(
             1
@@ -638,11 +650,14 @@ class MonitoringManager:
             self.ingestor_network_rtt_seconds.labels(ingestor_id=ingestor_id).set(rtt_ms / 1000.0)
 
     def update_worker_resources(self, worker_id: str) -> None:
-        """Update worker RAM/disk gauges from psutil (best-effort).
-
-        Called periodically by the worker health loop so that WorkerRAMHigh,
-        WorkerDiskHigh, and WorkerDiskHighWarning alert rules have data to
-        evaluate against.
+        """Cập nhật trạng thái/metric `update worker resources` dựa trên dữ liệu mới.
+        
+        Ghi chú gốc:
+        Update worker RAM/disk gauges from psutil (best-effort).
+        
+                Called periodically by the worker health loop so that WorkerRAMHigh,
+                WorkerDiskHigh, and WorkerDiskHighWarning alert rules have data to
+                evaluate against.
         """
         try:
             import psutil
@@ -665,10 +680,13 @@ class MonitoringManager:
             pass
 
     def update_alert_snapshot(self, **kwargs) -> None:
-        """Push values into the snapshot dict for alert rule evaluation.
-
-        Keys: correction_latency_s, all_workers_idle, replay_mode_extended,
-              extreme_lag_count, dlq_backlog, etc.
+        """Cập nhật trạng thái/metric `update alert snapshot` dựa trên dữ liệu mới.
+        
+        Ghi chú gốc:
+        Push values into the snapshot dict for alert rule evaluation.
+        
+                Keys: correction_latency_s, all_workers_idle, replay_mode_extended,
+                      extreme_lag_count, dlq_backlog, etc.
         """
         for key, val in kwargs.items():
             self._snapshot[f"_{key}"] = val
@@ -681,27 +699,47 @@ class MonitoringManager:
             self.replay_mode_extended.set(kwargs["replay_mode_extended"])
 
     def update_data_loss_rate(self, mode: str, rate: float) -> None:
-        """Set the data loss rate gauge for the given mode."""
+        """Cập nhật trạng thái/metric `update data loss rate` dựa trên dữ liệu mới.
+        
+        Ghi chú gốc:
+        Set the data loss rate gauge for the given mode.
+        """
         self.data_loss_rate.labels(mode=mode).set(rate)
 
     def update_minio_upload_lag(self, lag_s: float) -> None:
-        """Record a MinIO object upload latency observation."""
+        """Cập nhật trạng thái/metric `update minio upload lag` dựa trên dữ liệu mới.
+        
+        Ghi chú gốc:
+        Record a MinIO object upload latency observation.
+        """
         self.minio_upload_lag_seconds.observe(lag_s)
 
     def set_rocksdb_size(self, component: str, size_bytes: float) -> None:
-        """Set RocksDB storage size for a component (e.g. 'state', 'window')."""
+        """Cập nhật giá trị `rocksdb size` vào trạng thái hiện tại.
+        
+        Ghi chú gốc:
+        Set RocksDB storage size for a component (e.g. 'state', 'window').
+        """
         self.rocksdb_size_bytes.labels(component=component).set(size_bytes)
 
     def update_kafka_lag(self, topic: str, group_id: str, client_id: str,
                          partition: int, lag: int) -> None:
-        """Update Kafka partition lag for a consumer group partition."""
+        """Cập nhật trạng thái/metric `update kafka lag` dựa trên dữ liệu mới.
+        
+        Ghi chú gốc:
+        Update Kafka partition lag for a consumer group partition.
+        """
         self.kafka_partition_lag.labels(
             topic=topic, group_id=group_id, client_id=client_id,
             partition_id=str(partition),
         ).set(lag)
 
     def set_tiered_storage(self, tier: str, objects: int, bytes_: int) -> None:
-        """Set MinIO tiered storage metrics for a tier (e.g. 'hot', 'warm', 'cold')."""
+        """Cập nhật giá trị `tiered storage` vào trạng thái hiện tại.
+        
+        Ghi chú gốc:
+        Set MinIO tiered storage metrics for a tier (e.g. 'hot', 'warm', 'cold').
+        """
         self.tiered_storage_objects.labels(tier=tier).set(objects)
         self.tiered_storage_bytes.labels(tier=tier).set(bytes_)
 
@@ -710,14 +748,19 @@ class MonitoringManager:
     # ------------------------------------------------------------------
 
     def _read_gauge(self, gauge) -> float:
+        """Hàm `_read_gauge` thực hiện phần xử lý liên quan đến read gauge của `MonitoringManager`."""
         for sample in gauge.collect():
             for s in sample.samples:
                 return float(s.value)
         return 0.0
 
     def snapshot(self) -> dict:
-        """Return a JSON-serializable snapshot of current gauge values for alert
-        evaluation. Includes ALL keys required by registered alert rules (1-15)."""
+        """Hàm `snapshot` thực hiện phần xử lý liên quan đến snapshot của `MonitoringManager`.
+        
+        Ghi chú gốc:
+        Return a JSON-serializable snapshot of current gauge values for alert
+                evaluation. Includes ALL keys required by registered alert rules (1-15).
+        """
         return {
             # Tier 1: system health
             "watermark_lag_s": self._read_gauge(self.watermark_lag_s),
@@ -738,5 +781,9 @@ class MonitoringManager:
         }
 
     def generate_metrics(self) -> bytes:
-        """Generate Prometheus text format (application/openmetrics-text)."""
+        """Hàm `generate_metrics` thực hiện phần xử lý liên quan đến generate metrics của `MonitoringManager`.
+        
+        Ghi chú gốc:
+        Generate Prometheus text format (application/openmetrics-text).
+        """
         return generate_latest()

@@ -1,24 +1,7 @@
-"""PagerDuty alerting integration for the stream processor.
+"""
+Quản lý cảnh báo vận hành cho hệ thống stream processor.
 
-Sends alerts via PagerDuty Events API v2 when a routing key is configured.
-Falls back to stderr logging when no routing key is provided (dev/local mode).
-
-Default alert rules:
-  1. watermark_lag_critical   -- W_lag > 60s              -> critical
-  2. watermark_lag_warning    -- W_lag > 30s              -> warning
-  3. node_skew_warning        -- skew > 1000ms            -> warning
-  4. node_skew_critical       -- skew > 5000ms            -> critical
-  5. combined_status_critical -- combined_status == 3     -> critical
-  6. fencing_violation        -- fencing violations increase -> high
-  7. ingestor_silent          -- ingestor silent > 15s    -> high
-  8. negative_lag_warning     -- negative_lag_rate 1-5%   -> warning
-  9. negative_lag_critical    -- negative_lag_rate > 5%   -> critical
- 10. all_workers_idle         -- all workers idle         -> high
- 11. replay_mode_extended     -- replay_mode > 2 for > 5m -> warning
- 12. correction_latency_high  -- avg correction lat > 1h  -> warning
- 13. dlq_backlog_critical     -- dlq_backlog > 50000      -> critical
- 14. sketch_drift_high        -- estimator_drift > 0.5    -> warning
- 15. extreme_lag_detected     -- extreme_lag_count > 0    -> warning
+Module định nghĩa luật cảnh báo, đọc metric hiện tại và gửi sự kiện qua PagerDuty Events API v2; khi chạy local/dev không có routing key thì ghi cảnh báo ra stderr.
 """
 
 from __future__ import annotations
@@ -49,9 +32,12 @@ def _send_pagerduty_event(
     dedup_key: str = "",
     custom_details: dict | None = None,
 ) -> bool:
-    """Send an alert event to PagerDuty via Events API v2.
-
-    Returns True on success (HTTP 202), False on failure.
+    """Gửi dữ liệu hoặc thông điệp `send pagerduty event` tới thành phần đích.
+    
+    Ghi chú gốc:
+    Send an alert event to PagerDuty via Events API v2.
+    
+        Returns True on success (HTTP 202), False on failure.
     """
     severity_map = {
         "critical": "critical",
@@ -89,16 +75,20 @@ def _send_pagerduty_event(
 # ---------------------------------------------------------------------------
 
 class AlertManager:
-    """Manages alert rules and sends to PagerDuty (or stdout fallback).
-
-    Parameters
-    ----------
-    pagerduty_routing_key : str | None
-        PagerDuty Events API v2 routing key.  If None, alerts are logged to
-        stderr instead of being sent to PagerDuty.
+    """Lớp `AlertManager` quản lý trạng thái và thao tác nghiệp vụ tương ứng.
+    
+    Ghi chú gốc:
+    Manages alert rules and sends to PagerDuty (or stdout fallback).
+    
+        Parameters
+        ----------
+        pagerduty_routing_key : str | None
+            PagerDuty Events API v2 routing key.  If None, alerts are logged to
+            stderr instead of being sent to PagerDuty.
     """
 
     def __init__(self, pagerduty_routing_key: str | None = None):
+        """Khởi tạo đối tượng của `AlertManager` và thiết lập trạng thái ban đầu."""
         if pagerduty_routing_key is None:
             pagerduty_routing_key = os.environ.get("PAGERDUTY_ROUTING_KEY", "").strip() or None
         self.routing_key = pagerduty_routing_key
@@ -112,7 +102,11 @@ class AlertManager:
     # ------------------------------------------------------------------
 
     def _setup_default_rules(self) -> None:
-        """Register the six default alert rules."""
+        """Hàm `_setup_default_rules` thực hiện phần xử lý liên quan đến setup default rules của `AlertManager`.
+        
+        Ghi chú gốc:
+        Register the six default alert rules.
+        """
 
         # 1. watermark_lag_critical: W_lag > 60s -> critical
         self.rules.append(
@@ -284,10 +278,13 @@ class AlertManager:
     # ------------------------------------------------------------------
 
     def evaluate(self, metrics: dict) -> list[dict]:
-        """Evaluate all rules against current metrics snapshot.
-
-        Returns a list of triggered alert dicts, each with keys:
-          name, description, severity, condition, timestamp.
+        """Hàm `evaluate` thực hiện phần xử lý liên quan đến evaluate của `AlertManager`.
+        
+        Ghi chú gốc:
+        Evaluate all rules against current metrics snapshot.
+        
+                Returns a list of triggered alert dicts, each with keys:
+                  name, description, severity, condition, timestamp.
         """
         now = time.time()
         triggered: list[dict] = []
@@ -331,12 +328,15 @@ class AlertManager:
         return triggered
 
     def send_alert(self, alert: dict) -> None:
-        """Send alert to PagerDuty via Events API v2, or log to stderr if no key.
-
-        Parameters
-        ----------
-        alert : dict
-            Alert dict as returned by evaluate().
+        """Gửi dữ liệu hoặc thông điệp `send alert` tới thành phần đích.
+        
+        Ghi chú gốc:
+        Send alert to PagerDuty via Events API v2, or log to stderr if no key.
+        
+                Parameters
+                ----------
+                alert : dict
+                    Alert dict as returned by evaluate().
         """
         if self.routing_key:
             success = _send_pagerduty_event(
@@ -378,18 +378,21 @@ def alert_evaluation_loop(
     interval_s: float = 10.0,
     stop_event=None,
 ) -> None:
-    """Run periodic alert evaluation in a background thread.
-
-    Parameters
-    ----------
-    alert_mgr : AlertManager
-        The alert manager with registered rules.
-    mon_mgr : MonitoringManager
-        The monitoring manager providing metrics snapshots.
-    interval_s : float
-        Seconds between evaluations.
-    stop_event : threading.Event | None
-        When set, the loop exits.
+    """Hàm `alert_evaluation_loop` thực hiện phần xử lý liên quan đến alert evaluation loop.
+    
+    Ghi chú gốc:
+    Run periodic alert evaluation in a background thread.
+    
+        Parameters
+        ----------
+        alert_mgr : AlertManager
+            The alert manager with registered rules.
+        mon_mgr : MonitoringManager
+            The monitoring manager providing metrics snapshots.
+        interval_s : float
+            Seconds between evaluations.
+        stop_event : threading.Event | None
+            When set, the loop exits.
     """
     while stop_event is None or not stop_event.is_set():
         try:

@@ -1,38 +1,28 @@
 #!/usr/bin/env python3
-"""Experiment runner — Data Completeness % vs Wait Time (ms)  [topic #112 deliverable].
+"""Runner thí nghiệm Docker cho đường cong Completeness % vs Wait Time.
 
-For each Wait Time (DELTA_BASE_S, seconds) this script:
-  1. Recreates the cluster (deploy/docker-compose.yml ONLY) with that wait time,
-  2. Runs the WHOLE dataset until the ingestor reaches EOF and workers drain,
-  3. Measures the FINAL completeness AND the steady-state AVERAGE completeness
-     (mean of several samples after EOF) across all workers,
-  4. Writes a CSV + Markdown report and prints the table.
+Với mỗi điểm Wait Time, script sẽ:
+  1. Tạo lại cụm bằng `deploy/docker-compose.yml`.
+  2. Chạy toàn bộ dataset cho tới khi ingestor EOF và worker drain.
+  3. Đo completeness cuối cùng và completeness trung bình sau giai đoạn settle.
+  4. Ghi CSV + Markdown report, đồng thời in bảng kết quả ra terminal.
 
-This is NOT a manual mid-run "capture" — completeness is read after the dataset
-has been fully processed at each wait time, then averaged.
+Đây không phải kiểu chụp metric giữa chừng. Mỗi điểm sweep được đo sau khi dataset
+đã xử lý xong, nhờ vậy so sánh strict/heuristic ổn định hơn.
 
-Punctuation mode and the trade-off curve:
-  The strict engine sets  local_watermark = T_commit - delta_base  and closes a
-  window when  window_end <= watermark  (strict/engine.py). So a LARGER wait (δ)
-  lowers the watermark, keeps windows open longer, and recovers more late data
-  (higher completeness); a SMALLER δ closes windows sooner (more late drops).
-  * data-driven (DEFAULT, recommended for this historical web-log dataset):
-    T_commit tracks event-time, so δ is compared against the data's out-of-order
-    delay (seconds). Sweeping δ 0->10s yields the classic rising curve that
-    plateaus at 100% once δ exceeds the lateness spread.
-  * wall-clock: T_commit = now - δ (real-time streaming). For a dataset whose
-    event-times span many days but is replayed in seconds, δ of a few seconds is
-    negligible, so completeness is roughly flat — not useful for the curve.
+Cách hiểu đường trade-off:
+  - Strict dùng `local_watermark = T_commit - delta_base` và đóng window khi
+    `window_end <= watermark`. delta càng lớn thì hệ thống chờ late data lâu hơn,
+    completeness cao hơn nhưng latency tăng.
+  - Heuristic sweep theo percentile DDSketch. p càng cao thì L_eff càng lớn,
+    ít late event hơn nhưng watermark tiến chậm hơn.
 
-Usage (from repo root):
-    python reports/run_experiment.py \
-        --mode strict --punctuation wall-clock \
-        --dataset nyc_taxi_events_full.csv \
-        --deltas 0,2,5,10,20 --repeats 1 \
-        --max-wait 300 --settle 25
+Ví dụ:
+  python reports/run_experiment.py --mode strict --punctuation max-event-time \
+      --dataset nyc_taxi_events_sliced.csv --deltas 0,2,5,10,20
 
-    # Full dataset (slow, ~10 min/point):
-    python reports/run_experiment.py --dataset nyc_taxi_events_full.csv --deltas 0,5,10,20,40
+  python reports/run_experiment.py --mode heuristic --punctuation max-event-time \
+      --dataset nyc_taxi_events_sliced.csv --ps 0.5,0.9,0.99,0.999
 """
 from __future__ import annotations
 import os
@@ -57,19 +47,30 @@ SHARED_VOL = DEPLOY_DIR / "checkpoint" / "shared"
 WORKER_PORTS = [9101, 9102, 9103, 9104]
 ALL_PROFILES = ["strict", "heuristic"]
 
-# Reuse the dashboard's metric helpers so completeness is computed identically to the UI.
+HEURISTIC_RUNTIME_DEFAULTS = {
+    "INGESTOR_REPLAY": "arrival",
+    "REPLAY_SPEED": "150",
+    "HEURISTIC_LOCAL_WATERMARK_CLOSE": "true",
+    "HEURISTIC_WARMUP_SAMPLES": "2000",
+    "HEURISTIC_WARMUP_S": "5.0",
+    "PYTHONUNBUFFERED": "1",
+}
+
+# Dùng lại helper metric của dashboard để completeness được tính giống UI.
 _spec = importlib.util.spec_from_file_location("_dash", str(DEPLOY_DIR / "dashboard.py"))
 _dash = importlib.util.module_from_spec(_spec)
 _spec.loader.exec_module(_dash)
 
 
 def _compose(*args, env=None, timeout=900):
+    """Hàm `_compose` thực hiện phần xử lý liên quan đến compose."""
     cmd = ["docker", "compose", "-f", COMPOSE_FILE, *args]
     return subprocess.run(cmd, cwd=str(DEPLOY_DIR), env=env, capture_output=True,
                           text=True, encoding="utf-8", errors="replace", timeout=timeout)
 
 
 def _down():
+    """Hàm `_down` thực hiện phần xử lý liên quan đến down."""
     cmd = ["docker", "compose", "-f", COMPOSE_FILE]
     for p in ALL_PROFILES:
         cmd += ["--profile", p]
@@ -79,6 +80,7 @@ def _down():
 
 
 def _clear_shared():
+    """Làm sạch dữ liệu/trạng thái `clear shared` đang lưu tạm."""
     import shutil
     try:
         shutil.rmtree(SHARED_VOL)
@@ -90,6 +92,7 @@ def _clear_shared():
 
 
 def _up(mode: str, env: dict, build: bool):
+    """Hàm `_up` thực hiện phần xử lý liên quan đến up."""
     profiles = ["strict"] if mode == "strict" else ["heuristic"]
     cmd = ["docker", "compose", "-f", COMPOSE_FILE]
     for p in profiles:
@@ -102,11 +105,13 @@ def _up(mode: str, env: dict, build: bool):
 
 
 def _ingestor_eof() -> bool:
+    """Hàm `_ingestor_eof` thực hiện phần xử lý liên quan đến ingestor eof."""
     r = _compose("logs", "--tail", "6", "--no-color", "ingestor", timeout=30)
     return "eof=True" in (r.stdout or "")
 
 
 def _read_worker(port: int):
+    """Hàm `_read_worker` thực hiện phần xử lý liên quan đến read worker."""
     try:
         with urllib.request.urlopen(f"http://localhost:{port}/api/metrics", timeout=6) as r:
             return json.load(r)
@@ -115,10 +120,14 @@ def _read_worker(port: int):
 
 
 def _agg(mode: str, retries: int = 4) -> dict:
-    """Robust aggregate read: query each worker /api/metrics DIRECTLY with a
-    generous timeout (sequential, not the dashboard's 1.5s parallel fetch which
-    drops slow workers under load and produces spurious dips). Completeness is
-    computed identically to the dashboard: on_time / (received - duplicates)."""
+    """Hàm `_agg` thực hiện phần xử lý liên quan đến agg.
+    
+    Ghi chú gốc:
+    Robust aggregate read: query each worker /api/metrics DIRECTLY with a
+        generous timeout (sequential, not the dashboard's 1.5s parallel fetch which
+        drops slow workers under load and produces spurious dips). Completeness is
+        computed identically to the dashboard: on_time / (received - duplicates).
+    """
     blank = {"total_received": 0, "on_time": 0, "late_dropped": 0,
              "data_completeness_pct": -1.0, "late_arrival_rate_pct": 0.0,
              "wm_lag_max_s": 0.0, "proc_lat_p99_us": 0.0, "l_eff_ms": 0.0, "_workers": 0}
@@ -129,11 +138,9 @@ def _agg(mode: str, retries: int = 4) -> dict:
             p99 = 0.0
             leff_vals = []
             for m in ms:
-                dicts = []
-                if "total_received" in m and (m.get("total_received") or "partitions" not in m):
-                    dicts = [m]
-                elif "partitions" in m:
-                    dicts = [pd for pd in m["partitions"].values() if isinstance(pd, dict)]
+                parts = m.get("partitions") if isinstance(m, dict) else None
+                if isinstance(parts, dict) and parts:
+                    dicts = [pd for pd in parts.values() if isinstance(pd, dict)]
                 else:
                     dicts = [m]
                 for d in dicts:
@@ -159,6 +166,7 @@ def _agg(mode: str, retries: int = 4) -> dict:
 
 
 def _wait_healthy(timeout_s: int = 120) -> bool:
+    """Chờ điều kiện `wait healthy` hoàn tất trước khi tiếp tục."""
     deadline = time.time() + timeout_s
     while time.time() < deadline:
         ok = 0
@@ -176,7 +184,11 @@ def _wait_healthy(timeout_s: int = 120) -> bool:
 
 
 def _dataset_rows(dataset: str) -> int:
-    """Count data rows (excluding header) of dataset/<file>, or 0 if unknown."""
+    """Hàm `_dataset_rows` thực hiện phần xử lý liên quan đến dataset rows.
+    
+    Ghi chú gốc:
+    Count data rows (excluding header) of dataset/<file>, or 0 if unknown.
+    """
     p = PROJECT_ROOT / "dataset" / dataset
     try:
         with p.open("r", encoding="utf-8", errors="replace") as f:
@@ -187,6 +199,7 @@ def _dataset_rows(dataset: str) -> int:
 
 def run_point(mode: str, punctuation: str, dataset: str, sweep_var: str, sweep_value: float,
               max_wait: int, settle: int, log_level: str) -> dict:
+    """Chạy luồng xử lý `run point` theo cấu hình hiện tại."""
     print(f"\n=== {sweep_var} = {sweep_value} | mode={mode} | punct={punctuation} ===")
     target_rows = _dataset_rows(dataset)
     if target_rows:
@@ -201,22 +214,33 @@ def run_point(mode: str, punctuation: str, dataset: str, sweep_var: str, sweep_v
         "DATASET_FILE": dataset,
         "PUNCTUATION_MODE": punctuation,
         "LOG_LEVEL": log_level,
-        # Moderate-high backpressure room so the small experiment dataset drains
-        # without an OOM crash (very high limits) or a pause-without-resume stall
-        # (default limits). We isolate the WATERMARK effect on completeness.
+        # Đặt ngưỡng backpressure vừa đủ cao để dataset thí nghiệm nhỏ drain hết
+        # mà không OOM hoặc kẹt pause nhưng không resume. Nhờ vậy phép đo tách
+        # được ảnh hưởng của WATERMARK lên completeness.
         "BP_PAUSE_THRESHOLD": "100000",
         "BP_RESUME_THRESHOLD": "5000",
         "STRICT_HARD_QUEUE_LIMIT": "300000",
     })
-    # Forward arrival-paced replay knobs if set in the launcher's environment
-    # (INGESTOR_REPLAY=arrival REPLAY_SPEED=50). Paced replay makes max_event_time
-    # advance gradually → cleaner completeness-vs-wait curve (vs fast-send which
-    # makes the watermark aggressive).
-    for k in ("INGESTOR_REPLAY", "REPLAY_SPEED", "INGESTOR_SLEEP_S", "PUNCTUATION_INTERVAL_S", "HEURISTIC_WARMUP_SAMPLES", "HEURISTIC_WARMUP_S", "HEURISTIC_LOCAL_WATERMARK_CLOSE"):
+
+    if mode == "heuristic":
+        env.update(HEURISTIC_RUNTIME_DEFAULTS)
+
+    # Cho phép caller override các knob runtime nếu thật sự cần.
+    for k in ("INGESTOR_REPLAY", "REPLAY_SPEED", "INGESTOR_SLEEP_S",
+              "PUNCTUATION_INTERVAL_S", "HEURISTIC_WARMUP_SAMPLES",
+              "HEURISTIC_WARMUP_S", "HEURISTIC_LOCAL_WATERMARK_CLOSE",
+              "PYTHONUNBUFFERED"):
         if os.environ.get(k):
             env[k] = os.environ[k]
-    # The swept independent variable (DELTA_BASE_S for strict, HEURISTIC_P_NORMAL
-    # for heuristic). docker-compose.yml interpolates both into the workers.
+    if mode == "heuristic":
+        print("  heuristic runtime defaults: "
+              f"INGESTOR_REPLAY={env.get('INGESTOR_REPLAY')} "
+              f"REPLAY_SPEED={env.get('REPLAY_SPEED')} "
+              f"HEURISTIC_LOCAL_WATERMARK_CLOSE={env.get('HEURISTIC_LOCAL_WATERMARK_CLOSE')} "
+              f"HEURISTIC_WARMUP_SAMPLES={env.get('HEURISTIC_WARMUP_SAMPLES')} "
+              f"HEURISTIC_WARMUP_S={env.get('HEURISTIC_WARMUP_S')}")
+    # Biến độc lập đang sweep: DELTA_BASE_S cho strict, HEURISTIC_P_NORMAL cho
+    # heuristic. docker-compose.yml nội suy cả hai vào worker.
     env[sweep_var] = str(sweep_value)
     print("  bringing cluster up...")
     up = _up(mode, env, build=run_point._first)
@@ -251,15 +275,13 @@ def run_point(mode: str, punctuation: str, dataset: str, sweep_var: str, sweep_v
         print(f"    t={int(time.time()-t0):>4}s received={total:>9,}"
               f"{('/'+format(target_rows,',')) if target_rows else ''} "
               f"completeness={comp_str} eof={eof_seen} consumed_ok={consumed_ok} stable={stable}")
-        # Done only when: ingestor EOF, ~all rows consumed, AND the count has
-        # held steady (drained). consumed_ok guards against a backpressure lull
-        # being mistaken for completion.
+        # Chỉ coi là xong khi ingestor EOF, gần đủ số dòng đã tiêu thụ và count
+        # đứng yên đủ lâu. consumed_ok tránh nhầm một nhịp backpressure là hoàn tất.
         if eof_seen and consumed_ok and stable >= 3:
             break
 
-    # Settle: let final windows close, then sample completeness for the average.
-    # Skip samples where total_received == 0 — completeness is meaningless when
-    # no data has arrived (would be 0% and skew the average downward).
+    # Settle: cho các cửa sổ cuối đóng xong rồi mới lấy mẫu completeness trung bình.
+    # Bỏ mẫu total_received == 0 vì lúc chưa có dữ liệu thì completeness không có ý nghĩa.
     print(f"  settling {settle}s and sampling steady-state completeness...")
     samples = []
     s_end = time.time() + settle
@@ -274,8 +296,8 @@ def run_point(mode: str, punctuation: str, dataset: str, sweep_var: str, sweep_v
     comp_avg = round(statistics.mean(samples), 3) if samples else (
         final.get("data_completeness_pct", 0.0) if final.get("total_received", 0) > 0 else 0.0)
     leff_ms = round(final.get("l_eff_ms", 0.0), 1)
-    # Wait-time axis: strict uses the CONFIGURED δ (DELTA_BASE_S); heuristic uses
-    # the REALIZED effective lag L_eff measured from the DDSketch.
+    # Trục wait-time: strict dùng δ cấu hình (DELTA_BASE_S), heuristic dùng L_eff
+    # thực đo từ DDSketch.
     if mode == "strict":
         wait_ms = int(sweep_value * 1000)
     else:
@@ -308,6 +330,7 @@ run_point._first = True
 
 
 def write_reports(rows: list[dict], out_dir: Path, mode: str, dataset: str, punctuation: str):
+    """Hàm `write_reports` thực hiện phần xử lý liên quan đến write reports."""
     ts = datetime.now().strftime("%Y%m%d_%H%M%S")
     csv_path = out_dir / f"completeness_vs_wait_{mode}_{ts}.csv"
     md_path = out_dir / f"completeness_vs_wait_{mode}_{ts}.md"
@@ -347,6 +370,7 @@ def write_reports(rows: list[dict], out_dir: Path, mode: str, dataset: str, punc
 
 
 def main():
+    """Điểm vào CLI của script, đọc tham số và điều phối các bước xử lý."""
     ap = argparse.ArgumentParser(description="Completeness % vs Wait Time experiment runner")
     ap.add_argument("--mode", default="strict", choices=["strict", "heuristic"])
     ap.add_argument("--punctuation", default="data-driven",

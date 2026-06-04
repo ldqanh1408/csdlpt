@@ -1,25 +1,8 @@
 #!/usr/bin/env python3
-"""Auto-run strict + heuristic experiments and generate comparison report.
+"""
+Chạy tự động pipeline phân tích Strict + Heuristic và sinh báo cáo so sánh.
 
-One-command report generation. Place your NYC taxi dataset in dataset/ then run:
-
-    python reports/run_all.py                        # offline analysis only
-    python reports/run_all.py --docker               # full Docker experiment (needs Docker)
-    python reports/run_all.py --docker --rows 150000 # quick test with 150K rows
-
-Flow:
-  1. Checks dataset exists (nyc_taxi_events_full.csv or generates from yellow_tripdata)
-  2. Runs offline analysis (analyze_dataset.py) — always
-  3. (--docker) Runs strict mode Docker experiment at multiple delta values
-  4. (--docker) Runs heuristic mode Docker experiment at multiple percentile values
-  5. Generates comparison report -> reports/artifacts/comparison_report.md
-
-Output:
-    reports/artifacts/
-        analysis_report.md          — Full offline numerical analysis
-        completeness_vs_wait_strict.csv / .md     — Strict Docker experiment
-        completeness_vs_wait_heuristic.csv / .md  — Heuristic Docker experiment
-        comparison_report.md        — Combined summary with completeness curves
+Script đảm bảo dataset tồn tại, chạy phân tích offline, tùy chọn chạy Docker experiment và gom kết quả thành báo cáo trong `reports/results`.
 """
 from __future__ import annotations
 import os
@@ -46,7 +29,11 @@ CONVERTER_SCRIPT = PROJECT_ROOT / "tools" / "nyc_taxi_to_events.py"
 
 
 def _run(cmd: list[str], cwd=None, timeout=86400) -> int:
-    """Run a command, streaming output to stdout."""
+    """Chạy luồng xử lý `run` theo cấu hình hiện tại.
+    
+    Ghi chú gốc:
+    Run a command, streaming output to stdout.
+    """
     label = " ".join(str(c) for c in cmd)
     print(f"\n{'='*60}\n[run_all] {label}\n{'='*60}", flush=True)
     result = subprocess.run(cmd, cwd=cwd or str(PROJECT_ROOT), timeout=timeout)
@@ -56,7 +43,11 @@ def _run(cmd: list[str], cwd=None, timeout=86400) -> int:
 
 
 def ensure_dataset() -> bool:
-    """Ensure the prepared dataset exists; offer to generate it if needed."""
+    """Đảm bảo điều kiện/tài nguyên `ensure dataset` đã sẵn sàng trước khi dùng.
+    
+    Ghi chú gốc:
+    Ensure the prepared dataset exists; offer to generate it if needed.
+    """
     if DATASET_READY.exists():
         size_mb = DATASET_READY.stat().st_size / 1024 / 1024
         print(f"[run_all] Dataset ready: {DATASET_READY} ({size_mb:.0f} MB)")
@@ -86,7 +77,11 @@ def ensure_dataset() -> bool:
 
 
 def run_offline_analysis() -> Path | None:
-    """Run offline numerical analysis. Returns path to report or None."""
+    """Chạy luồng xử lý `run offline analysis` theo cấu hình hiện tại.
+    
+    Ghi chú gốc:
+    Run offline numerical analysis. Returns path to report or None.
+    """
     ts = datetime.now().strftime("%Y%m%d_%H%M%S")
     ARTIFACTS_DIR.mkdir(parents=True, exist_ok=True)
 
@@ -110,7 +105,11 @@ def run_offline_analysis() -> Path | None:
 
 
 def run_docker_experiment(mode: str, deltas_or_ps: str, max_wait: int = 600, punctuation: str = "max-event-time") -> Path | None:
-    """Run one Docker experiment sweep. Returns path to report or None."""
+    """Chạy luồng xử lý `run docker experiment` theo cấu hình hiện tại.
+    
+    Ghi chú gốc:
+    Run one Docker experiment sweep. Returns path to report or None.
+    """
     ts = datetime.now().strftime("%Y%m%d_%H%M%S")
 
     cmd = [
@@ -152,7 +151,11 @@ def run_docker_experiment(mode: str, deltas_or_ps: str, max_wait: int = 600, pun
 
 
 def generate_comparison(strict_report: Path | None, heuristic_report: Path | None) -> Path:
-    """Generate a combined comparison markdown report."""
+    """Hàm `generate_comparison` thực hiện phần xử lý liên quan đến generate comparison.
+    
+    Ghi chú gốc:
+    Generate a combined comparison markdown report.
+    """
     ARTIFACTS_DIR.mkdir(parents=True, exist_ok=True)
     ts = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
     out = ARTIFACTS_DIR / "comparison_report.md"
@@ -211,6 +214,7 @@ def generate_comparison(strict_report: Path | None, heuristic_report: Path | Non
 
 
 def main():
+    """Điểm vào CLI của script, đọc tham số và điều phối các bước xử lý."""
     ap = argparse.ArgumentParser(description="Auto-run all experiments and generate reports")
     ap.add_argument("--docker", action="store_true",
                     help="Also run Docker-based experiments (requires Docker)")

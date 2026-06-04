@@ -1,0 +1,38 @@
+%% Tổng quan chia 5 Domain theo Plane chức năng
+%% D1, D4, D5 dùng chung cho hai mode; D2/D3 hoán đổi theo mode
+%% Render: mmdc -i domain_overview.mmd -o domain_overview.svg
+flowchart TB
+    subgraph D4["D4 - Metadata Plane (DÙNG CHUNG)"]
+        ZK["ZooKeeper<br/>bầu chọn (election) + phát hiện dịch vụ (service discovery)"]
+        IHB["Ingestor heartbeat<br/>(luồng Kafka stream riêng)"]
+    end
+
+    subgraph D1["D1 - Data Plane (DÙNG CHUNG)"]
+        ING["Ingestor"]
+        KAF["Kafka - 12 partition"]
+        WK["4 nút Worker (Worker node)"]
+        ING -->|"events + Punctuation - 1 giây"| KAF
+        KAF -->|"poll (pull) + BPQ sắp xếp"| WK
+    end
+
+    subgraph CTRL["Control Plane (HOÁN ĐỔI THEO CHẾ ĐỘ - MODE)"]
+        D2["D2 - Strict Coordinator (Raft 3 node)<br/>W_global = min(LW_i)"]
+        D3["D3 - Heuristic Aggregator (Active-Standby)<br/>W_global_h = min(W_h) + DLQ"]
+    end
+
+    subgraph D5["D5 - State Plane (DÙNG CHUNG)"]
+        T1["Tier1 - RocksDB (local)"]
+        T2["Tier2 - Phân vùng chia sẻ (Shared Volume)"]
+        T3["Tier3 - MinIO"]
+        T1 -->|"checkpoint 10 giây"| T2
+        T2 -->|"flush + DR 5 phút"| T3
+    end
+
+    WK <-->|"heartbeat / watermark"| CTRL
+    WK -.->|"ghi trạng thái (state)"| T1
+    D4 -.->|"phát hiện (discovery) + kiểm tra sức khỏe"| CTRL
+
+    classDef shared fill:#E3F4E1,stroke:#4CAF50,color:#1d3a1f;
+    classDef switch fill:#FFE8D6,stroke:#E07B39,color:#3a2a1a;
+    class D1,D4,D5 shared;
+    class D2,D3 switch;

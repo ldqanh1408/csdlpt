@@ -1,4 +1,8 @@
-"""Real Kafka Producer and Consumer Adapter using kafka-python."""
+"""
+Adapter Kafka thật dùng thư viện `kafka-python`.
+
+Bao bọc producer/consumer để hệ thống chạy với Kafka broker thật: đảm bảo topic tồn tại, gửi record theo key/partition và poll batch có kiểm soát offset.
+"""
 
 import os
 import json
@@ -13,7 +17,11 @@ logger = logging.getLogger("kafka_real")
 
 def ensure_topics(broker_url: str, topics: list[str], num_partitions: int = 12,
                   replication_factor: int = 1, timeout_s: float = 30.0) -> None:
-    """Create Kafka topics if they don't exist. Safe to call multiple times."""
+    """Đảm bảo điều kiện/tài nguyên `ensure topics` đã sẵn sàng trước khi dùng.
+    
+    Ghi chú gốc:
+    Create Kafka topics if they don't exist. Safe to call multiple times.
+    """
     bootstrap = broker_url.replace("http://", "").replace("https://", "").split(",")
     deadline = time.monotonic() + timeout_s
     admin = None
@@ -44,10 +52,15 @@ def ensure_topics(broker_url: str, topics: list[str], num_partitions: int = 12,
 
 
 class KafkaConsumer:
-    """Real Kafka Consumer Adapter using kafka-python."""
+    """Lớp `KafkaConsumer` gom dữ liệu và hành vi liên quan đến KafkaConsumer.
+    
+    Ghi chú gốc:
+    Real Kafka Consumer Adapter using kafka-python.
+    """
 
     def __init__(self, broker_url: str = "localhost:9092",
                  group_id: str = "default", client_id: str = None):
+        """Khởi tạo đối tượng của `KafkaConsumer` và thiết lập trạng thái ban đầu."""
         self.bootstrap_servers = broker_url.replace("http://", "").replace("https://", "").split(",")
         self.group_id = group_id
         self.client_id = client_id
@@ -80,6 +93,7 @@ class KafkaConsumer:
         self.consumer = PyKafkaConsumer(**kafka_kwargs)
 
     def subscribe(self, topics: list[str]) -> list[int]:
+        """Hàm `subscribe` thực hiện phần xử lý liên quan đến subscribe của `KafkaConsumer`."""
         self._subscribed_topics = list(topics)
         # Parse partitions configured for this worker
         partitions_env = os.environ.get("PARTITIONS")
@@ -95,6 +109,7 @@ class KafkaConsumer:
         return self._assigned_partitions
 
     def poll(self, topic: str = None, timeout_ms: int = 1000, max_messages: int = 500) -> dict[int, list[dict]]:
+        """Hàm `poll` thực hiện phần xử lý liên quan đến poll của `KafkaConsumer`."""
         records_dict = self.consumer.poll(timeout_ms=timeout_ms, max_records=max_messages)
 
         results = {}
@@ -115,6 +130,7 @@ class KafkaConsumer:
         return results
 
     def pause(self, partitions: list[int]) -> None:
+        """Hàm `pause` thực hiện phần xử lý liên quan đến pause của `KafkaConsumer`."""
         topic = self._subscribed_topics[0] if self._subscribed_topics else "events"
         to_pause = [pid for pid in partitions if pid not in self._paused_partitions]
         if not to_pause:
@@ -125,6 +141,7 @@ class KafkaConsumer:
         self._paused_partitions.update(to_pause)
 
     def resume(self, partitions: list[int]) -> None:
+        """Hàm `resume` thực hiện phần xử lý liên quan đến resume của `KafkaConsumer`."""
         topic = self._subscribed_topics[0] if self._subscribed_topics else "events"
         to_resume = [pid for pid in partitions if pid in self._paused_partitions]
         if not to_resume:
@@ -135,12 +152,14 @@ class KafkaConsumer:
         self._paused_partitions.difference_update(to_resume)
 
     def seek(self, partition: int, offset: int) -> None:
+        """Hàm `seek` thực hiện phần xử lý liên quan đến seek của `KafkaConsumer`."""
         topic = self._subscribed_topics[0] if self._subscribed_topics else "events"
         tp = TopicPartition(topic, partition)
         logger.info("RealKafkaConsumer: seek partition %s to offset %d", tp, offset)
         self.consumer.seek(tp, offset)
 
     def commit(self, offsets: dict[int, int] = None) -> None:
+        """Hàm `commit` thực hiện phần xử lý liên quan đến commit của `KafkaConsumer`."""
         if not offsets:
             return
         topic = self._subscribed_topics[0] if self._subscribed_topics else "events"
@@ -152,6 +171,7 @@ class KafkaConsumer:
         self.consumer.commit(py_offsets)
 
     def position(self, partition: int) -> int:
+        """Hàm `position` thực hiện phần xử lý liên quan đến position của `KafkaConsumer`."""
         topic = self._subscribed_topics[0] if self._subscribed_topics else "events"
         tp = TopicPartition(topic, partition)
         try:
@@ -160,6 +180,7 @@ class KafkaConsumer:
             return 0
 
     def lag(self, topic: str, partition: int) -> int:
+        """Hàm `lag` thực hiện phần xử lý liên quan đến lag của `KafkaConsumer`."""
         tp = TopicPartition(topic, partition)
         try:
             end_offsets = self.consumer.end_offsets([tp])
@@ -170,9 +191,12 @@ class KafkaConsumer:
             return 0
 
     def assigned_partitions(self) -> list[int]:
+        """Hàm `assigned_partitions` thực hiện phần xử lý liên quan đến assigned partitions của `KafkaConsumer`.
+        """
         return list(self._assigned_partitions)
 
     def update_assignment(self, pids: list[int]) -> None:
+        """Cập nhật trạng thái/metric `update assignment` dựa trên dữ liệu mới."""
         self._assigned_partitions = list(pids)
         self._paused_partitions.intersection_update(pids)
         topic = self._subscribed_topics[0] if self._subscribed_topics else "events"
@@ -181,6 +205,7 @@ class KafkaConsumer:
         self.consumer.assign(tps)
 
     def close(self) -> None:
+        """Đóng tài nguyên `close` và giải phóng trạng thái liên quan."""
         logger.info("RealKafkaConsumer: closing consumer connection")
         try:
             self.consumer.close()
@@ -189,10 +214,15 @@ class KafkaConsumer:
 
 
 class KafkaProducer:
-    """Real Kafka Producer Adapter using kafka-python."""
+    """Lớp `KafkaProducer` gom dữ liệu và hành vi liên quan đến KafkaProducer.
+    
+    Ghi chú gốc:
+    Real Kafka Producer Adapter using kafka-python.
+    """
 
     def __init__(self, broker_url: str = "localhost:9092", acks: str = "all",
                  client_id: str = None):
+        """Khởi tạo đối tượng của `KafkaProducer` và thiết lập trạng thái ban đầu."""
         self.bootstrap_servers = broker_url.replace("http://", "").replace("https://", "").split(",")
         self.acks = 1 if acks == "1" else ("all" if acks == "all" else acks)
         self.client_id = client_id
@@ -220,6 +250,7 @@ class KafkaProducer:
         self.producer = PyKafkaProducer(**kafka_kwargs)
 
     def send(self, topic: str, value, key: str = None, partition: int = None, sync: bool = True) -> dict:
+        """Hàm `send` thực hiện phần xử lý liên quan đến send của `KafkaProducer`."""
         if isinstance(value, dict):
             val_bytes = json.dumps(value).encode('utf-8')
         elif isinstance(value, str):
@@ -250,4 +281,5 @@ class KafkaProducer:
             return {"error": str(e)}
 
     def flush(self) -> None:
+        """Flush dữ liệu đệm của `flush` xuống đích lưu trữ hoặc downstream."""
         self.producer.flush()

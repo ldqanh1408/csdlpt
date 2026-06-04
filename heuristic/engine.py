@@ -1,10 +1,7 @@
-"""Heuristic Watermark Engine - low-latency with DDSketch-based lag estimation.
+"""
+Engine Heuristic Watermark chạy theo từng partition.
 
-Watermark: W_h(t) = max(W_h(t-1), max(T_event) - L_eff(t))
-where L_eff(t) = DDSketch.quantile(p), p = adaptive percentile.
-
-Expected loss <= 1% (steady state), <= 5% (burst, with adaptive p=0.999).
-End-to-end latency ~5s (vs ~15s for Strict).
+Engine dùng SlidingWindowDDSketch để ước lượng L_eff từ phân vị lateness, cập nhật `W_h`, đóng cửa sổ sớm để giảm latency, đưa event quá trễ vào DLQ và xử lý burst/replay/cold-start/negative-lag.
 """
 
 import json
@@ -19,7 +16,7 @@ logger = logging.getLogger(__name__)
 
 
 def _flag_enabled(name: str, default: bool = True) -> bool:
-    """Read a boolean feature flag from the environment (deployment §6.4)."""
+    """Đọc feature flag dạng boolean từ biến môi trường."""
     raw = os.environ.get(name)
     if raw is None:
         return default
@@ -34,7 +31,7 @@ from heuristic.cold_start import ColdStartManager
 from heuristic.negative_lag import NegativeLagHandler, LagTier
 
 
-# RocksDB key prefixes
+# Tiền tố key trong RocksDB cho từng nhóm dữ liệu bền vững.
 _PFX_OPEN = "ow:"
 _PFX_CLOSED = "cw:"
 _PFX_SEEN = "si:"
@@ -55,6 +52,10 @@ DEFAULT_PARAMS = {
     "L_max": 10000000.0,
     "wm_max_advance_rate": 1.5,
     "l_eff_update_threshold": 0.10,
+    "l_eff_decay_rate": 0.05,
+    # Ngưỡng "lệch tương lai": event có event_time vượt arrival_time quá ngưỡng này
+    # (lag âm lớn) bị coi là bất thường, không được phép đẩy max_event_time/watermark.
+    "max_future_skew_s": 300.0,
     "baseline_multiplier": 10,
     "exit_multiplier": 2,
     "exit_streak_seconds": 10,
@@ -67,39 +68,46 @@ DEFAULT_PARAMS = {
 
 @dataclass
 class WindowAggregate:
+    """Lớp `WindowAggregate` gom dữ liệu và hành vi liên quan đến WindowAggregate."""
     count: int = 0
     status_500: int = 0
 
 
 class HeuristicWatermarkEngine:
-    """Per-partition engine using DDSketch to estimate watermark heuristically."""
+    """Lớp `HeuristicWatermarkEngine` thực thi logic xử lý chính của engine.
+    
+    Ghi chú gốc:
+    Per-partition engine using DDSketch to estimate watermark heuristically.
+    """
 
     def __init__(self, partition_id: int = 0, worker_id: str = "", **kwargs):
+        """Khởi tạo đối tượng của `HeuristicWatermarkEngine` và thiết lập trạng thái ban đầu."""
         cfg = {**DEFAULT_PARAMS, **kwargs}
         cfg["L_max"] = float(os.environ.get("HEURISTIC_L_MAX", cfg["L_max"]))
         cfg["max_lag_accepted"] = float(os.environ.get("HEURISTIC_MAX_LAG_ACCEPTED", os.environ.get("HEURISTIC_L_MAX", cfg["max_lag_accepted"])))
         cfg["warmup_min_samples"] = int(os.environ.get("HEURISTIC_WARMUP_SAMPLES", cfg["warmup_min_samples"]))
         cfg["warmup_min_seconds"] = float(os.environ.get("HEURISTIC_WARMUP_S", cfg["warmup_min_seconds"]))
         cfg["wm_max_advance_rate"] = float(os.environ.get("HEURISTIC_WM_ADVANCE_RATE", cfg["wm_max_advance_rate"]))
-        # Swept percentile must reach the engine. Without this the worker never
-        # forwards HEURISTIC_P_NORMAL/SAFE (run.py constructs the engine without
-        # p_normal=), so every sweep point silently ran at the default p=0.99 —
-        # the percentile knob was a no-op and completeness stayed flat.
+        cfg["l_eff_decay_rate"] = float(os.environ.get("HEURISTIC_L_EFF_DECAY_RATE", cfg["l_eff_decay_rate"]))
+        cfg["max_future_skew_s"] = float(os.environ.get("HEURISTIC_MAX_FUTURE_SKEW_S", cfg["max_future_skew_s"]))
+        # Percentile đang sweep phải đi tới engine. Nếu không đọc env ở đây,
+        # worker tạo engine mà không truyền p_normal/p_safe, khiến mọi điểm sweep
+        # âm thầm dùng default p=0.99 và completeness bị phẳng.
         cfg["p_normal"] = float(os.environ.get("HEURISTIC_P_NORMAL", cfg["p_normal"]))
         cfg["p_safe"] = float(os.environ.get("HEURISTIC_P_SAFE", cfg["p_safe"]))
         self.partition_id = partition_id
         self.worker_id = worker_id
 
-        # RocksDB path (extract before consuming kwargs)
+        # Đường dẫn RocksDB: lấy ra trước khi cfg bị tiêu thụ tiếp.
         db_path: Optional[str] = cfg.pop("db_path", None)
         tiered_storage = cfg.pop("tiered_storage", None)
         self.checkpoint_dir: str = cfg.pop("checkpoint_dir",
                                             os.path.dirname(db_path) if db_path else "/tmp")
 
-        # Windowing
+        # Bộ chia tumbling window theo event-time.
         self.tumbling = TumblingWindow(cfg["window_size_s"])
 
-        # DDSketch
+        # DDSketch trượt để ước lượng phân vị lateness gần đây.
         self.sketch = SlidingWindowDDSketch(
             window_seconds=cfg["window_seconds"],
             sub_sketch_granularity=cfg["sub_sketch_granularity"],
@@ -109,7 +117,7 @@ class HeuristicWatermarkEngine:
             max_value=cfg["max_lag_accepted"],
         )
 
-        # Watermark state
+        # Trạng thái watermark heuristic của partition hiện tại.
         self.W_h: float = float("-inf")
         self.W_h_prev: float = float("-inf")
         self.W_global_h: float = float("-inf")
@@ -117,24 +125,22 @@ class HeuristicWatermarkEngine:
         self.L_eff: float = cfg["L_max"]
         self.L_eff_prev: float = cfg["L_max"]
 
-        # Window state
+        # Trạng thái cửa sổ đang mở/đã đóng.
         self.open_windows: dict[float, WindowAggregate] = defaultdict(WindowAggregate)
         self.closed_windows: dict[float, WindowResult] = {}
         self._window_closed_at: dict[float, float] = {}
         self.late_events: list[dict] = []
 
-        # Extreme lag counter (spec §5.5)
+        # Bộ đếm lag cực lớn để cảnh báo dữ liệu bất thường.
         self.extreme_lag_count: int = 0
         self.punctuation_total: int = 0
 
-        # Dedup with TTL (§6.5 — bound memory; idempotent filter only needs
-        # to cover ~δ_base seconds of recent IDs). Each entry stores the
-        # arrival time so `_purge_seen_ids` can drop anything older than
-        # `_dedup_ttl_s`.
+        # Chống trùng lặp bằng TTL để giới hạn bộ nhớ. Bộ lọc idempotent chỉ cần
+        # nhớ các event_id gần đây; mỗi entry lưu arrival_time để purge theo tuổi.
         self.seen_ids: dict[str, float] = {}
         self._dedup_ttl_s: float = 60.0
 
-        # Adaptive percentile
+        # Percentile thích nghi: tăng an toàn khi burst, quay lại bình thường khi ổn định.
         self.p_current: float = cfg["p_normal"]
         self.p_normal: float = cfg["p_normal"]
         self.p_safe: float = cfg["p_safe"]
@@ -144,21 +150,24 @@ class HeuristicWatermarkEngine:
         self.recovery_minutes: int = cfg["recovery_minutes"]
         self._quantile_history: list[float] = []
 
-        # Adaptive alpha (DDSketch Strategy 3)
+        # Alpha thích nghi cho DDSketch.
         self._current_alpha: float = cfg["alpha"]
         self._last_alpha_check: float = 0.0
 
-        # Hysteresis
+        # Hysteresis để watermark không nhảy quá gắt giữa các lần cập nhật.
         self.wm_max_advance_rate: float = cfg["wm_max_advance_rate"]
         self.l_eff_update_threshold: float = cfg["l_eff_update_threshold"]
+        # Tốc độ giảm tối đa của L_eff mỗi lần cập nhật (asymmetric hysteresis).
+        self.l_eff_decay_rate: float = cfg["l_eff_decay_rate"]
+        self.max_future_skew_s: float = cfg["max_future_skew_s"]
 
-        # Snapshot manager
+        # Quản lý snapshot gần đây để phục hồi nhanh.
         self.snapshot_interval: float = cfg["snapshot_interval"]
         self.snapshot_count: int = cfg["snapshot_count"]
         self._snapshots: list[tuple[float, dict]] = []
         self._last_snapshot: float = 0.0
 
-        # Replay mode
+        # Replay mode giúp xử lý dữ liệu phát lại có thể rất out-of-order.
         self.in_replay_mode: bool = False
         self._replay_start_time: float = 0.0
         self.baseline_multiplier: float = cfg["baseline_multiplier"]
@@ -167,11 +176,11 @@ class HeuristicWatermarkEngine:
         self.baseline_lag: float = cfg["L_max"]
         self._replay_stable_since: float = 0.0
 
-        # Max allowed lag
+        # Ngưỡng lag tối đa được chấp nhận trước khi coi là cực trị.
         self.max_lag_accepted: float = cfg["max_lag_accepted"]
         self.L_max: float = cfg["L_max"]
 
-        # Cold start manager (spec §6)
+        # Cold start manager giữ watermark thận trọng cho tới khi đủ mẫu.
         self.cold_start = ColdStartManager(
             warmup_min_seconds=cfg["warmup_min_seconds"],
             warmup_min_samples=cfg["warmup_min_samples"],
@@ -233,6 +242,7 @@ class HeuristicWatermarkEngine:
     # ---- RocksDB persistence helpers ----
 
     def _persist_open_window(self, ws: float) -> None:
+        """Ghi bền vững trạng thái `persist open window` xuống storage."""
         if self._store is None:
             return
         agg = self.open_windows.get(ws)
@@ -240,23 +250,30 @@ class HeuristicWatermarkEngine:
             self._store.put(f"{_PFX_OPEN}{ws}", agg)
 
     def _delete_open_window(self, ws: float) -> None:
+        """Xóa dữ liệu `delete open window` khỏi bộ nhớ hoặc storage."""
         if self._store is None:
             return
         self._store.delete(f"{_PFX_OPEN}{ws}")
 
     def _persist_closed_window(self, ws: float, result: WindowResult) -> None:
+        """Ghi bền vững trạng thái `persist closed window` xuống storage."""
         if self._store is None:
             return
         self._store.put(f"{_PFX_CLOSED}{ws}", result)
 
     def _persist_seen_id(self, event_id: str) -> None:
+        """Ghi bền vững trạng thái `persist seen id` xuống storage."""
         if self._store is None:
             return
         ts = self.seen_ids.get(event_id, time.time())
         self._store.put(f"{_PFX_SEEN}{event_id}", ts)
 
     def _restore_from_store(self) -> None:
-        """Populate in-memory state from RocksDB on startup."""
+        """Khôi phục trạng thái `restore from store` từ checkpoint hoặc storage.
+        
+        Ghi chú gốc:
+        Populate in-memory state from RocksDB on startup.
+        """
         if self._store is None:
             return
 
@@ -295,7 +312,11 @@ class HeuristicWatermarkEngine:
                 self.sketch = SlidingWindowDDSketch.from_dict(sketch_data)
 
     def _persist_late_events(self) -> None:
-        """Persist late_events list to RocksDB as JSON (spec §12.1, §13.4)."""
+        """Ghi bền vững trạng thái `persist late events` xuống storage.
+        
+        Ghi chú gốc:
+        Persist late_events list to RocksDB as JSON (spec §12.1, §13.4).
+        """
         if self._store is None:
             return
         # Serialize as JSON string (not pickle) so the data is inspectable
@@ -303,7 +324,11 @@ class HeuristicWatermarkEngine:
         self._store.put(f"{_PFX_META}late_events", serialized)
 
     def _restore_late_events(self) -> None:
-        """Restore late_events from RocksDB on startup (spec §12.1)."""
+        """Khôi phục trạng thái `restore late events` từ checkpoint hoặc storage.
+        
+        Ghi chú gốc:
+        Restore late_events from RocksDB on startup (spec §12.1).
+        """
         if self._store is None:
             return
         raw = self._store.get(f"{_PFX_META}late_events")
@@ -326,13 +351,21 @@ class HeuristicWatermarkEngine:
             self.late_events = []
 
     def _clear_persisted_late_events(self) -> None:
-        """Remove persisted late_events from RocksDB (called after DLQ drain)."""
+        """Làm sạch dữ liệu/trạng thái `clear persisted late events` đang lưu tạm.
+        
+        Ghi chú gốc:
+        Remove persisted late_events from RocksDB (called after DLQ drain).
+        """
         if self._store is None:
             return
         self._store.delete(f"{_PFX_META}late_events")
 
     def checkpoint(self) -> None:
-        """Persist engine metadata to RocksDB and export sketch.bin JSON."""
+        """Hàm `checkpoint` thực hiện phần xử lý liên quan đến checkpoint của `HeuristicWatermarkEngine`.
+        
+        Ghi chú gốc:
+        Persist engine metadata to RocksDB and export sketch.bin JSON.
+        """
         if self._store is not None:
             meta = {
                 "W_h": self.W_h,
@@ -381,10 +414,13 @@ class HeuristicWatermarkEngine:
 
 
     def _restore_from_sketch_bin(self) -> None:
-        """Try loading state from sketch.bin as a secondary recovery path.
-
-        Called after RocksDB restore. If RocksDB is empty (state still at
-        defaults), attempt to recover from the JSON export.
+        """Khôi phục trạng thái `restore from sketch bin` từ checkpoint hoặc storage.
+        
+        Ghi chú gốc:
+        Try loading state from sketch.bin as a secondary recovery path.
+        
+                Called after RocksDB restore. If RocksDB is empty (state still at
+                defaults), attempt to recover from the JSON export.
         """
         sketch_path = os.path.join(self.checkpoint_dir, "sketch.bin")
         if not os.path.exists(sketch_path):
@@ -408,7 +444,11 @@ class HeuristicWatermarkEngine:
 
     # ---- Core watermark computation ----
     def _compute_watermark(self) -> float:
-        """W_h(t) = max(W_h(t-1), max(T_event) - L_eff(t)) with hysteresis."""
+        """Tính toán kết quả `compute watermark` từ dữ liệu hiện có.
+        
+        Ghi chú gốc:
+        W_h(t) = max(W_h(t-1), max(T_event) - L_eff(t)) with hysteresis.
+        """
         self.W_h_prev = self.W_h
 
         if self.max_event_time == float("-inf"):
@@ -433,6 +473,19 @@ class HeuristicWatermarkEngine:
         # Monotonic enforcement
         self.W_h = max(self.W_h_prev, candidate)
 
+        # Sweep / local-watermark-close mode (topic #112): close windows on the
+        # pure local watermark W_h = max(T_event) - L_eff, matching the offline
+        # analytical model (analyze_dataset.sweep_heuristic_all). The wall-clock
+        # rate limiter below couples W_h to elapsed wall-clock time instead of
+        # L_eff — under paced replay (REPLAY_SPEED >> 1) it caps W_h advance far
+        # below the arrival frontier, decoupling W_h from L_eff so the percentile
+        # knob has almost no effect and immediate completeness never approaches
+        # ~p at high percentiles. Skip rate limiting here so a higher p (larger
+        # L_eff) actually pushes the watermark back and raises completeness.
+        if _flag_enabled("HEURISTIC_LOCAL_WATERMARK_CLOSE", False):
+            self._last_wm_update_time = time.time()
+            return self.W_h
+
         # Rate limiting (hysteresis — bound advance by elapsed wall-clock time)
         if self._last_wm_update_time > 0:
             elapsed = time.time() - self._last_wm_update_time
@@ -446,7 +499,11 @@ class HeuristicWatermarkEngine:
         return self.W_h
 
     def _update_L_eff(self) -> None:
-        """Update L_eff from sketch, with adaptive percentile and threshold."""
+        """Cập nhật trạng thái/metric `update L eff` dựa trên dữ liệu mới.
+        
+        Ghi chú gốc:
+        Update L_eff from sketch, with adaptive percentile and threshold.
+        """
         # Cold start: use conservative prior until warm
         self.cold_start.update(self.metrics.total_received)
         if not self.cold_start.is_warm:
@@ -483,8 +540,27 @@ class HeuristicWatermarkEngine:
         if len(self._quantile_history) > 60:
             self._quantile_history.pop(0)
 
-        # Hysteresis: only update if change > 10%
-        if abs(new_L_eff - self.L_eff) / max(self.L_eff, 0.001) >= self.l_eff_update_threshold:
+        # Hysteresis. In local-watermark-close (sweep) mode the watermark is
+        # monotonic AND not wall-clock rate limited, so a transient dip in the
+        # sketch quantile (e.g. a brief low-lateness window right after warm-up,
+        # or the cold→warm L_eff handover from the conservative L_max prior)
+        # would otherwise drop L_eff in one step. That makes W_h = max_event - L_eff
+        # jump to the event frontier and, being monotonic, LOCK there permanently —
+        # every later out-of-order event is then falsely marked late (the 6%
+        # completeness / identical-W_h-across-partitions failure mode).
+        #
+        # Asymmetric hysteresis fixes it: raise L_eff promptly when lateness grows,
+        # but only let it DECAY slowly (<= l_eff_decay_rate per update, never below
+        # the true quantile). A short low estimate can no longer collapse L_eff, so
+        # W_h cannot overshoot the frontier.
+        if _flag_enabled("HEURISTIC_LOCAL_WATERMARK_CLOSE", False):
+            if new_L_eff >= self.L_eff:
+                if (new_L_eff - self.L_eff) / max(self.L_eff, 0.001) >= self.l_eff_update_threshold:
+                    self.L_eff = min(new_L_eff, self.L_max)
+            else:
+                floor = self.L_eff * (1.0 - self.l_eff_decay_rate)
+                self.L_eff = min(self.L_eff, max(new_L_eff, floor))
+        elif abs(new_L_eff - self.L_eff) / max(self.L_eff, 0.001) >= self.l_eff_update_threshold:
             self.L_eff = min(new_L_eff, self.L_max)
 
         # Burst detection
@@ -495,6 +571,7 @@ class HeuristicWatermarkEngine:
 
     def _check_burst(self) -> None:
         # §6.4 feature flag: when disabled, do not switch to p_safe.
+        """Kiểm tra điều kiện `check burst` và trả về kết quả đánh giá."""
         if not _flag_enabled("ENABLE_ADAPTIVE_PERCENTILE", True):
             return
         if len(self._quantile_history) < 30:
@@ -514,10 +591,13 @@ class HeuristicWatermarkEngine:
                 self.metrics.adaptive_percentile_active = False
 
     def _check_adaptive_alpha(self) -> None:
-        """Adjust sketch alpha based on value range (DDSketch Strategy 3).
-
-        Narrow range (all lags < 1s): reduce alpha to 0.001 for more precision.
-        Wide range (max lag > 30s): restore alpha to default 0.01.
+        """Kiểm tra điều kiện `check adaptive alpha` và trả về kết quả đánh giá.
+        
+        Ghi chú gốc:
+        Adjust sketch alpha based on value range (DDSketch Strategy 3).
+        
+                Narrow range (all lags < 1s): reduce alpha to 0.001 for more precision.
+                Wide range (max lag > 30s): restore alpha to default 0.01.
         """
         if self.sketch.total_count < 10:
             return
@@ -543,12 +623,20 @@ class HeuristicWatermarkEngine:
             self.sketch._cached_quantiles.clear()
 
     def update_global_watermark(self, W_global_h: float) -> None:
-        """Update global watermark copy and proactively close windows."""
+        """Cập nhật trạng thái/metric `update global watermark` dựa trên dữ liệu mới.
+        
+        Ghi chú gốc:
+        Update global watermark copy and proactively close windows.
+        """
         self.W_global_h = max(self.W_global_h, W_global_h)
         self._close_windows()
 
     def _close_windows(self) -> None:
-        """Close windows where W_h (or W_global_h) >= window_end."""
+        """Đóng tài nguyên `close windows` và giải phóng trạng thái liên quan.
+        
+        Ghi chú gốc:
+        Close windows where W_h (or W_global_h) >= window_end.
+        """
         # Skip window closing during cold start Phase 0
         if self.cold_start.phase.name == "PHASE_0":
             return
@@ -572,7 +660,9 @@ class HeuristicWatermarkEngine:
             if w + self.tumbling.size <= w_limit
         ]
         for w in sorted(to_close):
-            agg = self.open_windows.pop(w)
+            agg = self.open_windows.pop(w, None)
+            if agg is None:
+                continue
             self._delete_open_window(w)
             win_id = self.tumbling.window_id(self.partition_id, w)
             result = WindowResult(
@@ -591,9 +681,12 @@ class HeuristicWatermarkEngine:
             self._pending_results.append(result)
 
     def get_expired_windows(self, age_s: float) -> list:
-        """Return closed windows where window_end < now - age_s as (window_id, count, emitted_at) tuples.
-
-        Used by DownstreamEmitter.schedule_final_reconciliation() for 24h FINAL checks.
+        """Trả về thông tin `expired windows` từ trạng thái hiện tại.
+        
+        Ghi chú gốc:
+        Return closed windows where window_end < now - age_s as (window_id, count, emitted_at) tuples.
+        
+                Used by DownstreamEmitter.schedule_final_reconciliation() for 24h FINAL checks.
         """
         now = time.time()
         cutoff = now - age_s
@@ -605,19 +698,25 @@ class HeuristicWatermarkEngine:
         return expired
 
     def drain_results(self) -> list:
-        """Return and clear pending results accumulated from closed windows.
-
-        Called by the Kafka producer loop to emit WindowResults to the
-        ``heuristic_results`` topic.
+        """Rút dữ liệu đang chờ trong `drain results` để xử lý tiếp.
+        
+        Ghi chú gốc:
+        Return and clear pending results accumulated from closed windows.
+        
+                Called by the Kafka producer loop to emit WindowResults to the
+                ``heuristic_results`` topic.
         """
         results = self._pending_results[:]
         self._pending_results.clear()
         return results
 
     def _purge_old_closed_windows(self) -> None:
-        """Periodically delete closed windows older than 1 hour from RocksDB.
-
-        Called from process() every 300s to prevent unbounded storage growth.
+        """Loại bỏ dữ liệu `purge old closed windows` đã hết hạn hoặc không còn cần thiết.
+        
+        Ghi chú gốc:
+        Periodically delete closed windows older than 1 hour from RocksDB.
+        
+                Called from process() every 300s to prevent unbounded storage growth.
         """
         if self._store is None:
             return
@@ -641,11 +740,14 @@ class HeuristicWatermarkEngine:
             pass  # deletions are immediate in RocksStore, no flush needed per key
 
     def _purge_seen_ids(self) -> None:
-        """TTL sweep on the in-memory dedup set + periodic RocksDB compaction.
-
-        Spec §6.5: idempotent filter only needs to cover recent late arrivals
-        (here `_dedup_ttl_s` = 60s). Drop expired entries from memory every
-        call; clear-and-repopulate RocksDB every 5 minutes so SSTs compact.
+        """Loại bỏ dữ liệu `purge seen ids` đã hết hạn hoặc không còn cần thiết.
+        
+        Ghi chú gốc:
+        TTL sweep on the in-memory dedup set + periodic RocksDB compaction.
+        
+                Spec §6.5: idempotent filter only needs to cover recent late arrivals
+                (here `_dedup_ttl_s` = 60s). Drop expired entries from memory every
+                call; clear-and-repopulate RocksDB every 5 minutes so SSTs compact.
         """
         now = time.time()
         cutoff = now - self._dedup_ttl_s
@@ -666,10 +768,12 @@ class HeuristicWatermarkEngine:
 
     # ---- Event processing ----
     def is_idle(self) -> bool:
+        """Kiểm tra điều kiện `is idle` và trả về boolean."""
         return time.time() - self.last_event_time > 2.0
 
     def process(self, event: LogEvent, arrival_time: float = None) -> Optional[float]:
         # Backpressure: drop if inbound queue is full (spec §5.11).
+        """Hàm `process` thực hiện phần xử lý liên quan đến process của `HeuristicWatermarkEngine`."""
         if len(self._inbound_queue) >= self._queue_maxsize:
             self._backpressure_drops += 1
             return None
@@ -714,6 +818,34 @@ class HeuristicWatermarkEngine:
         self._purge_old_closed_windows()
 
         et = event.event_time
+
+        # Future-skew guard: an event timestamped implausibly far in the FUTURE
+        # relative to when it arrived (et - arrival_time > max_future_skew_s, i.e.
+        # a large negative lag) cannot be a real observation — e.g. a malformed
+        # message whose event_time defaulted to wall-clock, or a corrupt row. If
+        # allowed to advance max_event_time it would jam W_h = max_event_time - L_eff
+        # ahead of every genuine event (mass false-late) and trip BOO fallback.
+        # Treat it as an anomaly: route to DLQ and return WITHOUT touching
+        # max_event_time / sketch / watermark / windows.
+        if (et - arrival_time) > self.max_future_skew_s:
+            self.extreme_lag_count += 1
+            self.metrics.late_dropped += 1
+            self.late_events.append({
+                "event_id": event.event_id,
+                "T_event": et,
+                "arrival_time": arrival_time,
+                "lag": arrival_time - et,
+                "W_h_at_arrival": self.W_h,
+                "lateness": 0.0,
+                "partition_id": self.partition_id,
+                "original_status": event.status,
+                "worker_id": self.worker_id,
+                "payload": getattr(event, "payload", None),
+                "future_skew": True,
+            })
+            self.metrics.dlq_backlog = len(self.late_events)
+            return HighResTimer.now_ns() - t0
+
         self.max_event_time = max(self.max_event_time, et)
         self.last_event_time = arrival_time
 
@@ -745,8 +877,18 @@ class HeuristicWatermarkEngine:
         # Extreme lag check (spec §5.5): lag > max_lag_accepted -> skip sketch, route to DLQ
         _extreme_lag = lag > self.max_lag_accepted
 
-        # Replay detection (spec §11.3)
-        if self.detect_replay(lag):
+        # Replay detection (spec §11.3). Replay mode (and its sketch rollback)
+        # is a production live-stream feature: it stops feeding the DDSketch
+        # while a "replay burst" is suspected. In the analytical sweep mode
+        # (HEURISTIC_LOCAL_WATERMARK_CLOSE) it is actively harmful — once
+        # baseline_lag collapses, the replay threshold (10 × baseline_lag) gets
+        # tiny so ordinary lateness is perpetually misread as replay, the sketch
+        # FREEZES (sketch_total_count stuck), L_eff sticks at the warm-up value
+        # and the per-partition watermark breaks (the 3-8% completeness / frozen
+        # sketch failure mode). The sweep wants a stable percentile estimate, so
+        # keep feeding the sketch and skip replay detection entirely.
+        sweep_mode = _flag_enabled("HEURISTIC_LOCAL_WATERMARK_CLOSE", False)
+        if (not sweep_mode) and self.detect_replay(lag):
             pass  # skip sketch update during replay
         elif self.neg_lag.should_degrade_to_boo():
             pass  # skip sketch update during BOO fallback
@@ -862,12 +1004,15 @@ class HeuristicWatermarkEngine:
 
     # ---- Snapshot + Rollback ----
     def _take_snapshot(self) -> None:
+        """Hàm `_take_snapshot` thực hiện phần xử lý liên quan đến take snapshot của `HeuristicWatermarkEngine`.
+        """
         snap = (time.time(), self.sketch.to_dict())
         self._snapshots.append(snap)
         if len(self._snapshots) > self.snapshot_count:
             self._snapshots.pop(0)
 
     def rollback_to(self, target_time: float) -> bool:
+        """Hàm `rollback_to` thực hiện phần xử lý liên quan đến rollback to của `HeuristicWatermarkEngine`."""
         for ts, snap_dict in reversed(self._snapshots):
             if ts <= target_time:
                 self.sketch = SlidingWindowDDSketch.from_dict(snap_dict)
@@ -876,6 +1021,7 @@ class HeuristicWatermarkEngine:
 
     # ---- Replay mode ----
     def detect_replay(self, lag: float) -> bool:
+        """Hàm `detect_replay` thực hiện phần xử lý liên quan đến detect replay của `HeuristicWatermarkEngine`."""
         if self.baseline_lag > 0 and lag > self.baseline_multiplier * self.baseline_lag:
             was_already_in_replay = self.in_replay_mode
             self.in_replay_mode = True
@@ -888,6 +1034,7 @@ class HeuristicWatermarkEngine:
         return False
 
     def check_exit_replay(self) -> None:
+        """Kiểm tra điều kiện `check exit replay` và trả về kết quả đánh giá."""
         if not self.in_replay_mode:
             return
         # Enforce 30s wall-clock minimum for replay mode (§8.3, §11.3)
@@ -908,6 +1055,7 @@ class HeuristicWatermarkEngine:
             self._replay_stable_since = 0.0
 
     def flush(self) -> None:
+        """Flush dữ liệu đệm của `flush` xuống đích lưu trữ hoặc downstream."""
         for w in sorted(self.open_windows):
             agg = self.open_windows[w]
             result = WindowResult(
@@ -932,21 +1080,34 @@ class HeuristicWatermarkEngine:
         self.open_windows.clear()
 
     def close(self) -> None:
-        """Close the RocksDB store if open."""
+        """Đóng tài nguyên `close` và giải phóng trạng thái liên quan.
+        
+        Ghi chú gốc:
+        Close the RocksDB store if open.
+        """
         if self._store is not None:
             self._store.close()
             self._store = None
 
     @property
     def queue_size(self) -> int:
-        """Current depth of the inbound backpressure queue (spec §5.11)."""
+        """Hàm `queue_size` thực hiện phần xử lý liên quan đến queue size của `HeuristicWatermarkEngine`.
+        
+        Ghi chú gốc:
+        Current depth of the inbound backpressure queue (spec §5.11).
+        """
         return len(self._inbound_queue)
 
     def get_seek_offset(self) -> int:
-        """Return Kafka seek offset (offset + 1 per spec §8.3)."""
+        """Trả về thông tin `seek offset` từ trạng thái hiện tại.
+        
+        Ghi chú gốc:
+        Return Kafka seek offset (offset + 1 per spec §8.3).
+        """
         return self.kafka_seek_offset + 1
 
     def summary(self) -> dict:
+        """Tạo bản tóm tắt trạng thái `summary` để trả về API hoặc báo cáo."""
         closed_count = (
             self._store.count(prefix=_PFX_CLOSED)
             if self._store is not None
@@ -985,6 +1146,7 @@ class HeuristicWatermarkEngine:
             p99 = sorted_l[int(n * 0.99)] / 1000.0
 
         def _lat_us(values: list[float], percentile: float) -> float:
+            """Hàm `_lat_us` thực hiện phần xử lý liên quan đến lat us của `HeuristicWatermarkEngine`."""
             values = [v for v in values if v >= 0]
             if not values:
                 return 0.0

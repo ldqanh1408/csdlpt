@@ -1,0 +1,7 @@
+%% Ví dụ cấu trúc: độ trễ (lag) -> DDSketch -> W_h
+flowchart LR
+    L["Mẫu độ trễ (Lag samples) (giây)<br/>2.1, 3.8, 4.0, 12.5, ..."]
+    SK["DDSketch (các thùng log-scale buckets)<br/>quantile(0.99) = L_eff = 4.0 giây"]
+    WH["W_h = max_event_time(200 giây) - 4.0 = 196 giây"]
+    L -->|"thêm mẫu (add samples)"| SK
+    SK -->|"ước lượng L_eff"| WH

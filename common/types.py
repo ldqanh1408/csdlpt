@@ -1,20 +1,27 @@
-"""Shared dataclasses and enums for the stream processing system."""
+"""
+Định nghĩa dataclass và enum dùng chung trong toàn bộ pipeline.
+
+Bao gồm LogEvent, PunctuationToken, WindowResult, CorrectionMessage, heartbeat worker, trạng thái partition/window và metadata checkpoint/sketch.
+"""
 
 from dataclasses import dataclass, field
 from enum import Enum
 
 
 class WatermarkMode(Enum):
+    """Lớp `WatermarkMode` định nghĩa các trạng thái/hằng số dùng trong luồng xử lý."""
     STRICT = "strict"
     HEURISTIC = "heuristic"
 
 
 class WindowStatus(Enum):
+    """Lớp `WindowStatus` định nghĩa các trạng thái/hằng số dùng trong luồng xử lý."""
     OPEN = "open"
     CLOSED = "closed"
 
 
 class WorkerStatus(Enum):
+    """Lớp `WorkerStatus` định nghĩa các trạng thái/hằng số dùng trong luồng xử lý."""
     ACTIVE = "active"
     STALE = "stale"
     IDLE = "idle"
@@ -22,6 +29,7 @@ class WorkerStatus(Enum):
 
 
 class EvictionState(Enum):
+    """Lớp `EvictionState` định nghĩa các trạng thái/hằng số dùng trong luồng xử lý."""
     CLOSED = "closed"
     UPLOADING = "uploading"
     UPLOADED = "uploaded"
@@ -29,6 +37,7 @@ class EvictionState(Enum):
 
 
 class PartitionState(Enum):
+    """Lớp `PartitionState` định nghĩa các trạng thái/hằng số dùng trong luồng xử lý."""
     ASSIGNED = "assigned"
     REASSIGNING = "reassigning"
     ORPHANED = "orphaned"
@@ -37,6 +46,7 @@ class PartitionState(Enum):
 
 @dataclass
 class LogEvent:
+    """Lớp `LogEvent` gom dữ liệu và hành vi liên quan đến LogEvent."""
     event_id: str
     event_time: float
     status: int
@@ -49,6 +59,7 @@ class LogEvent:
 
 @dataclass
 class PunctuationToken:
+    """Lớp `PunctuationToken` gom dữ liệu và hành vi liên quan đến PunctuationToken."""
     T_commit: float
     partition_id: int
     ingestor_id: str
@@ -57,6 +68,7 @@ class PunctuationToken:
 
 @dataclass
 class WindowResult:
+    """Lớp `WindowResult` gom dữ liệu và hành vi liên quan đến WindowResult."""
     window_id: str
     partition_id: int
     window_start: float
@@ -70,6 +82,7 @@ class WindowResult:
 
 @dataclass
 class CorrectionMessage:
+    """Lớp `CorrectionMessage` gom dữ liệu và hành vi liên quan đến CorrectionMessage."""
     message_type: str = "WINDOW_CORRECTION"
     window_id: str = ""
     correction_id: str = ""
@@ -86,6 +99,7 @@ class CorrectionMessage:
 
 @dataclass
 class WorkerHeartbeat:
+    """Lớp `WorkerHeartbeat` gom dữ liệu và hành vi liên quan đến WorkerHeartbeat."""
     worker_id: str
     partitions: dict[int, float] = field(default_factory=dict)
     max_event_time: float = 0.0
@@ -97,6 +111,7 @@ class WorkerHeartbeat:
 
 @dataclass
 class AggregatorState:
+    """Lớp `AggregatorState` gom dữ liệu và hành vi liên quan đến AggregatorState."""
     partition_id: int
     worker_id: str
     W_h: float
@@ -106,6 +121,7 @@ class AggregatorState:
 
 @dataclass
 class CheckpointMetadata:
+    """Lớp `CheckpointMetadata` gom dữ liệu và hành vi liên quan đến CheckpointMetadata."""
     partition_id: int
     checkpoint_timestamp: float
     kafka_committed_offset: int
@@ -116,6 +132,7 @@ class CheckpointMetadata:
 
 @dataclass
 class SketchCheckpoint:
+    """Lớp `SketchCheckpoint` gom dữ liệu và hành vi liên quan đến SketchCheckpoint."""
     alpha: float
     window_seconds: int
     sub_sketches: list[dict] = field(default_factory=list)

@@ -1,0 +1,7 @@
+%% Ví dụ cấu trúc: Kafka offset -> Min-Heap theo event_time
+flowchart LR
+    K["Kafka poll (theo offset)<br/>et=100, et=95, et=98"]
+    H["Min-Heap (event_time, seq)<br/>đỉnh heap: 95 → 98 → 100"]
+    O["đẩy ra (pop) engine: 95, 98, 100<br/>(đúng thứ tự thời gian sự kiện - event-time)"]
+    K -->|"nạp vào heap"| H
+    H -->|"lấy ra (pop)"| O

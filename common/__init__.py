@@ -1,4 +1,8 @@
-"""Common types, windowing, and metrics shared across strict and heuristic paths."""
+"""
+Package dùng chung cho cả nhánh Strict và Heuristic.
+
+Chứa kiểu dữ liệu, cửa sổ thời gian, cấu hình, metrics, monitoring, Kafka, TLS, RocksDB, MinIO, Schema Registry và ZooKeeper lock.
+"""
 
 from common.types import (
     WatermarkMode,

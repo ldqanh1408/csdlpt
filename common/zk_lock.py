@@ -1,4 +1,8 @@
-"""ZooKeeper-based leader election lock for Aggregator HA."""
+"""
+Leader election bằng ZooKeeper cho cơ chế Aggregator HA.
+
+Module tạo ephemeral znode để chọn primary aggregator, theo dõi leader và giải phóng lock khi node standby/primary dừng.
+"""
 
 import logging
 import os
@@ -9,15 +13,19 @@ logger = logging.getLogger("zk_lock")
 
 
 class ZKLeaderElection:
-    """Leader election lock via ZooKeeper ephemeral nodes.
-
-    Uses Kazoo's Lock recipe. It attempts to acquire an exclusive lock
-    under the specified path. If successful, this node becomes the active
-    leader. On crash or network loss, the ephemeral node is automatically
-    removed by ZooKeeper, allowing standbys to take over.
+    """Lớp `ZKLeaderElection` gom dữ liệu và hành vi liên quan đến ZKLeaderElection.
+    
+    Ghi chú gốc:
+    Leader election lock via ZooKeeper ephemeral nodes.
+    
+        Uses Kazoo's Lock recipe. It attempts to acquire an exclusive lock
+        under the specified path. If successful, this node becomes the active
+        leader. On crash or network loss, the ephemeral node is automatically
+        removed by ZooKeeper, allowing standbys to take over.
     """
 
     def __init__(self, zk_hosts: str, lock_path: str = "/csdlpt/aggregator-lock"):
+        """Khởi tạo đối tượng của `ZKLeaderElection` và thiết lập trạng thái ban đầu."""
         self.zk_hosts = zk_hosts
         self.lock_path = lock_path
         self._client = None
@@ -25,6 +33,7 @@ class ZKLeaderElection:
         self._is_leader = False
 
     def start(self):
+        """Hàm `start` thực hiện phần xử lý liên quan đến start của `ZKLeaderElection`."""
         logger.info("ZK: connecting to hosts=%s", self.zk_hosts)
         auth_data = None
         default_acl = None
@@ -40,6 +49,7 @@ class ZKLeaderElection:
         self._lock = self._client.Lock(self.lock_path)
 
     def try_acquire(self) -> bool:
+        """Hàm `try_acquire` thực hiện phần xử lý liên quan đến try acquire của `ZKLeaderElection`."""
         if not self._client or not self._client.connected:
             return False
         try:
@@ -53,9 +63,11 @@ class ZKLeaderElection:
 
     @property
     def is_leader(self) -> bool:
+        """Kiểm tra điều kiện `is leader` và trả về boolean."""
         return self._is_leader
 
     def release(self):
+        """Hàm `release` thực hiện phần xử lý liên quan đến release của `ZKLeaderElection`."""
         if self._lock and self._is_leader:
             try:
                 self._lock.release()

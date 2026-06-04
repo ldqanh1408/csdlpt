@@ -1,7 +1,7 @@
-"""Centralized configuration — reads all parameters from environment variables.
+"""
+Cấu hình tập trung đọc từ biến môi trường.
 
-Single source of truth replacing scattered os.environ.get() calls across run.py,
-coordinator, worker, and engines. All values have spec-defined defaults.
+Các helper `_env_*` chuyển kiểu an toàn, còn `Config` gom tham số runtime cho window, partition, heartbeat, Kafka, MinIO, DDSketch, DLQ, failover, TLS và backpressure.
 """
 
 from __future__ import annotations
@@ -11,6 +11,7 @@ from dataclasses import dataclass, field
 
 
 def _env_int(name: str, default: int) -> int:
+    """Đọc biến môi trường `env int` và chuyển về kiểu dữ liệu phù hợp."""
     try:
         return int(os.environ.get(name, str(default)))
     except ValueError:
@@ -18,6 +19,7 @@ def _env_int(name: str, default: int) -> int:
 
 
 def _env_float(name: str, default: float) -> float:
+    """Đọc biến môi trường `env float` và chuyển về kiểu dữ liệu phù hợp."""
     try:
         return float(os.environ.get(name, str(default)))
     except ValueError:
@@ -25,11 +27,13 @@ def _env_float(name: str, default: float) -> float:
 
 
 def _env_bool(name: str, default: bool) -> bool:
+    """Đọc biến môi trường `env bool` và chuyển về kiểu dữ liệu phù hợp."""
     val = os.environ.get(name, str(default)).lower()
     return val in ("1", "true", "yes", "on")
 
 
 def _env_list(name: str, default: list[int]) -> list[int]:
+    """Đọc biến môi trường `env list` và chuyển về kiểu dữ liệu phù hợp."""
     raw = os.environ.get(name, "")
     if not raw:
         return list(default)
@@ -38,7 +42,11 @@ def _env_list(name: str, default: list[int]) -> list[int]:
 
 @dataclass
 class Config:
-    """System-wide configuration with spec-defined defaults."""
+    """Lớp `Config` gom dữ liệu và hành vi liên quan đến Config.
+    
+    Ghi chú gốc:
+    System-wide configuration with spec-defined defaults.
+    """
 
     mode: str = os.environ.get("MODE", "strict")
     role: str = os.environ.get("ROLE", "worker")
@@ -97,10 +105,12 @@ class Config:
 
     @property
     def minio_configured(self) -> bool:
+        """Hàm `minio_configured` thực hiện phần xử lý liên quan đến minio configured của `Config`."""
         return bool(self.minio_endpoint)
 
     @property
     def db_path(self) -> str:
+        """Hàm `db_path` thực hiện phần xử lý liên quan đến db path của `Config`."""
         if not self.db_enabled:
             return ""
         return f"{self.checkpoint_dir}/rocksdb-{self.mode}-{self.node_id}"

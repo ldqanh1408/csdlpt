@@ -3,7 +3,11 @@
 # NO CHECKED-IN PROTOBUF GENCODE
 # source: common/csdlpt.proto
 # Protobuf Python Version: 6.31.1
-"""Generated protocol buffer code."""
+"""
+Mã Python sinh tự động từ `common/csdlpt.proto`.
+
+Chứa descriptor và message protobuf cho heartbeat, trạng thái Raft, state request/reply và watermark aggregator. Không sửa logic bằng tay; nếu proto đổi thì sinh lại bằng protoc.
+"""
 from google.protobuf import descriptor as _descriptor
 from google.protobuf import descriptor_pool as _descriptor_pool
 from google.protobuf import runtime_version as _runtime_version
