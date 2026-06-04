@@ -1,8 +1,0 @@
-%% Tiered Storage - 3 nhịp độc lập (hẹn giờ - timer 10 giây / sự kiện / timer 5 phút)
-flowchart TB
-    EV["Sự kiện"] -->|"ghi dưới 1ms"| T1["Tier1 RocksDB (cục bộ - local, hot)"]
-    T1 -->|"NHỊP A - Timer 10 giây<br/>checkpoint trạng thái (state) + Kafka offset"| T2["Tier2 Shared Volume (warm)"]
-    T1 ==>|"NHỊP B - khi window_end <= W_global<br/>đẩy cửa sổ (window) đã chốt"| T3["Tier3 MinIO (cold)"]
-    T1 -.->|"NHỊP C - Timer 5 phút<br/>sao lưu (backup) cửa sổ đang mở (DR)"| T3
-    T3 -->|"sau khi UPLOADED thì giải phóng (purge) khỏi Tier1"| T1
-    T2 -->|"failover: mount + seek(offset+1)"| EV

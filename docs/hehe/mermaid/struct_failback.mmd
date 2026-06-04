@@ -1,5 +1,0 @@
-%% Ví dụ cấu trúc: bản ghi trạng thái failback (kiên định - persist theo partition)
-flowchart LR
-    F["Trạng thái Failback - phân vùng (partition) P4<br/>step = FLUSH_ACK<br/>from = W2, to = W1<br/>offset = 900<br/>command_id = c-17, term = 43"]
-    N["Leader bị thay đổi giữa chừng?<br/>đọc lại bản ghi → tiếp tục từ FLUSH_ACK"]
-    F -->|"kiểm tra vai trò Leader khi Coordinator failover"| N

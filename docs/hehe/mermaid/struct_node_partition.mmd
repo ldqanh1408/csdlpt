@@ -1,9 +1,0 @@
-%% Ví dụ cấu trúc: nút (node) giữ nhiều engine, mỗi engine 1 phân vùng (partition)
-flowchart TB
-    N["nút 0 (node0 - Worker process)<br/>chủ sở hữu (owner): P0, P1, P2"]
-    N -->|"quản lý"| E0["engine[P0]"]
-    N -->|"quản lý"| E1["engine[P1]"]
-    N -->|"quản lý"| E2["engine[P2]"]
-    E0 -->|"đọc/ghi dữ liệu"| D0["RocksDB P0 riêng biệt<br/>LW(P0)=120, bộ đệm (buffer), khóa (lock)"]
-    E1 -->|"đọc/ghi dữ liệu"| D1["RocksDB P1 riêng biệt<br/>LW(P1)=125, bộ đệm (buffer), khóa (lock)"]
-    E2 -->|"đọc/ghi dữ liệu"| D2["RocksDB P2 riêng biệt<br/>LW(P2)=118, bộ đệm (buffer), khóa (lock)"]

@@ -58,7 +58,7 @@ class StrictWatermarkEngine:
     ):
         """Khởi tạo đối tượng của `StrictWatermarkEngine` và thiết lập trạng thái ban đầu."""
         self.tumbling = TumblingWindow(window_size_s)
-        self.delta_base = delta_base_s
+        self.delta_base = watermark
         self.max_queue = max_queue
         self.checkpoint_dir = checkpoint_dir
         self.tiered_storage = tiered_storage

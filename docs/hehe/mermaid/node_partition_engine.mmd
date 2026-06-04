@@ -1,9 +1,0 @@
-%% Nút (Node) quản lý phân vùng (partition): 1 node : N partition : 1 engine
-flowchart TB
-    subgraph N0["nút 0 (node0 - Worker) - giữ 3 engine độc lập"]
-        E0["Engine P0<br/>RocksDB riêng biệt + LW(P0)"]
-        E1["Engine P1<br/>RocksDB riêng biệt + LW(P1)"]
-        E2["Engine P2<br/>RocksDB riêng biệt + LW(P2)"]
-    end
-    N0 -->|"heartbeat: map {P0:LW0, P1:LW1, P2:LW2}<br/>nút (node) KHÔNG gộp trước khi gửi"| C["Coordinator / Aggregator"]
-    C -->|"min() trên TỪNG phân vùng (partition) toàn cục để tính W_global"| C
